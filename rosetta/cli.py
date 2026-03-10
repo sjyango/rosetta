@@ -278,6 +278,9 @@ Examples:
   # Re-generate reports from existing results (no execution)
   rosetta --test path/to/test.test --diff-only
 
+  # Interactive mode: set params once, run tests repeatedly
+  rosetta --interactive --dbms tdsql,mysql --serve
+
   # Parse only (debug)
   rosetta --test path/to/test.test --parse-only
         """,
@@ -321,6 +324,9 @@ Examples:
                         "after execution")
     p.add_argument("--port", "-p", type=int, default=19527,
                    help="Port for the HTTP server (default: 19527)")
+    p.add_argument("--interactive", "-i", action="store_true",
+                   help="Enter interactive mode: set base parameters "
+                        "once, then submit test paths repeatedly")
 
     return p.parse_args(argv)
 
@@ -354,6 +360,10 @@ def main(argv=None):
         print_success(f"Config written: {args.gen_config}")
         flush_all()
         return 0
+
+    # Interactive mode — does not require --test
+    if args.interactive:
+        return _enter_interactive(args)
 
     if not args.test:
         print_error("--test is required. Use --help for usage.")
@@ -480,6 +490,51 @@ def main(argv=None):
             console.print(f"[yellow]HTML report not found: {html_path}[/yellow]")
 
     return 0 if (all_pass and not runner.failed_connections) else 1
+
+
+def _enter_interactive(args) -> int:
+    """Load config and launch the interactive session."""
+    from .interactive import InteractiveSession
+
+    if not os.path.isfile(args.config):
+        print_error(f"Config file not found: {args.config}")
+        flush_all()
+        return 1
+
+    all_configs = load_config(args.config)
+    if not all_configs:
+        print_error(f"No databases configured in {args.config}")
+        flush_all()
+        return 1
+
+    try:
+        configs = filter_configs(all_configs, args.dbms)
+    except ValueError as e:
+        print_error(str(e))
+        flush_all()
+        return 1
+
+    if not configs:
+        print_error("No databases selected for testing")
+        flush_all()
+        return 1
+
+    output_dir = os.path.abspath(args.output_dir)
+
+    session = InteractiveSession(
+        configs=configs,
+        output_dir=output_dir,
+        database=args.database,
+        baseline=args.baseline,
+        skip_explain=args.skip_explain,
+        skip_analyze=args.skip_analyze,
+        skip_show_create=args.skip_show_create,
+        output_format=args.format,
+        serve=args.serve,
+        port=args.port,
+    )
+    session.run()
+    return 0
 
 
 def _find_free_port() -> int:

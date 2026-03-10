@@ -1,0 +1,439 @@
+"""Interactive terminal session for Rosetta.
+
+Allows users to repeatedly submit MTR test paths and execute them without
+restarting the program.  Base parameters (config, dbms, baseline, etc.) are
+fixed at launch; only the test file path changes between iterations.
+"""
+
+import glob
+import http.server
+import logging
+import os
+import socket
+import subprocess
+import threading
+import time as _time
+from pathlib import Path
+from typing import Dict, List, Optional
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.styles import Style
+
+from .config import DEFAULT_TEST_DB
+from .models import DBMSConfig
+from .reporter.history import generate_index_html
+from .ui import (console, flush_all, print_error, print_info,
+                 print_summary, print_warning)
+
+log = logging.getLogger("rosetta")
+
+
+# ---------------------------------------------------------------------------
+# Path auto-completion
+# ---------------------------------------------------------------------------
+
+class TestFileCompleter(Completer):
+    """Auto-complete .test file paths and directories."""
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor.strip()
+        if not text:
+            text = "./"
+        expanded = os.path.expanduser(text)
+        if os.path.isdir(expanded):
+            if not expanded.endswith("/"):
+                expanded += "/"
+        pattern = expanded + "*"
+
+        for path in sorted(glob.glob(pattern)):
+            if os.path.isdir(path):
+                yield Completion(path + "/", start_position=-len(text),
+                                 display=os.path.basename(path) + "/",
+                                 display_meta="dir")
+            elif path.endswith(".test"):
+                yield Completion(path, start_position=-len(text),
+                                 display=os.path.basename(path),
+                                 display_meta="test")
+
+
+# ---------------------------------------------------------------------------
+# Prompt style
+# ---------------------------------------------------------------------------
+
+_PROMPT_STYLE = Style.from_dict({
+    "prompt": "bold cyan",
+    "path": "bold white",
+})
+
+
+# ---------------------------------------------------------------------------
+# HTTP server management
+# ---------------------------------------------------------------------------
+
+class _SilentHandler(http.server.SimpleHTTPRequestHandler):
+    """HTTP handler that suppresses access log output."""
+
+    def log_message(self, format, *args):  # noqa: A002
+        pass  # Suppress all request logs
+
+
+class ReportServer:
+    """Manages a background HTTP server for viewing HTML reports."""
+
+    def __init__(self, directory: str, port: int = 0):
+        self.directory = os.path.abspath(directory)
+        self.port = port
+        self._server: Optional[http.server.HTTPServer] = None
+        self._thread: Optional[threading.Thread] = None
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def base_url(self) -> str:
+        return f"http://localhost:{self.port}"
+
+    def start(self) -> str:
+        """Start the server and return the base URL."""
+        if self.running:
+            return self.base_url
+        if self.port == 0:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("", 0))
+                self.port = s.getsockname()[1]
+        os.makedirs(self.directory, exist_ok=True)
+        directory = self.directory
+        handler = lambda *a, **kw: _SilentHandler(
+            *a, directory=directory, **kw)
+        self._server = http.server.HTTPServer(("0.0.0.0", self.port), handler)
+        self._thread = threading.Thread(target=self._server.serve_forever,
+                                        daemon=True)
+        self._thread.start()
+        return self.base_url
+
+    def stop(self):
+        if self._server:
+            t = threading.Thread(target=self._server.shutdown, daemon=True)
+            t.start()
+            t.join(timeout=3)
+            self._server = None
+            self._thread = None
+
+
+# ---------------------------------------------------------------------------
+# Interactive session
+# ---------------------------------------------------------------------------
+
+class InteractiveSession:
+    """Interactive REPL that accepts repeated test file submissions."""
+
+    COMMANDS = {
+        "help":    "Show available commands",
+        "status":  "Show current configuration",
+        "history": "Show executed tests in this session",
+        "server":  "Show report server URL",
+        "open":    "Open latest HTML report in IDE",
+        "clear":   "Clear the screen",
+        "quit":    "Exit (also: exit, q)",
+    }
+
+    def __init__(self, configs: List[DBMSConfig], output_dir: str,
+                 database: str = DEFAULT_TEST_DB,
+                 baseline: Optional[str] = None,
+                 skip_explain: bool = False,
+                 skip_analyze: bool = False,
+                 skip_show_create: bool = False,
+                 output_format: str = "all",
+                 serve: bool = False, port: int = 19527):
+        self.configs = configs
+        self.output_dir = os.path.abspath(output_dir)
+        self.database = database
+        self.baseline = baseline
+        self.skip_explain = skip_explain
+        self.skip_analyze = skip_analyze
+        self.skip_show_create = skip_show_create
+        self.output_format = output_format
+        self.serve = serve
+        self.port = port
+        self._run_history: List[Dict] = []
+        self._report_server: Optional[ReportServer] = None
+
+    # -- server helpers -----------------------------------------------------
+
+    def _ensure_server(self) -> Optional[ReportServer]:
+        if not self.serve:
+            return None
+        if self._report_server and self._report_server.running:
+            return self._report_server
+        self._report_server = ReportServer(self.output_dir, self.port)
+        try:
+            self._report_server.start()
+            return self._report_server
+        except OSError as e:
+            console.print(f"  [red]✗[/red] Server failed: {e}")
+            return None
+
+    def _open_in_ide(self, url: str):
+        try:
+            subprocess.Popen(["code", "--open-url", url],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            pass
+
+    # -- test execution -----------------------------------------------------
+
+    def _run_test(self, test_file: str) -> bool:
+        from .cli import RosettaRunner
+
+        if not os.path.isfile(test_file):
+            print_error(f"Test file not found: {test_file}")
+            flush_all()
+            return False
+
+        run_stamp = _time.strftime("%Y%m%d_%H%M%S")
+        test_name = Path(test_file).stem
+        run_dir = os.path.join(self.output_dir, f"{test_name}_{run_stamp}")
+
+        print_info("DBMS targets:",
+                   ", ".join(c.name for c in self.configs))
+
+        runner = RosettaRunner(
+            test_file=test_file, configs=self.configs,
+            output_dir=run_dir, database=self.database,
+            baseline=self.baseline, skip_explain=self.skip_explain,
+            skip_analyze=self.skip_analyze,
+            skip_show_create=self.skip_show_create,
+            output_format=self.output_format)
+
+        comparisons = runner.run()
+
+        if not comparisons:
+            flush_all()
+            self._run_history.append({
+                "test": test_file, "time": _time.strftime("%H:%M:%S"),
+                "status": "FAIL", "run_dir": run_dir})
+            return False
+
+        # Update 'latest' symlink
+        latest_link = os.path.join(self.output_dir, "latest")
+        try:
+            if os.path.islink(latest_link):
+                os.remove(latest_link)
+            os.symlink(os.path.basename(run_dir), latest_link)
+        except OSError:
+            pass
+
+        generate_index_html(self.output_dir)
+        all_pass = print_summary(comparisons, runner.failed_connections)
+        flush_all()
+
+        passed = all_pass and not runner.failed_connections
+        self._run_history.append({
+            "test": test_file, "time": _time.strftime("%H:%M:%S"),
+            "status": "PASS" if passed else "FAIL", "run_dir": run_dir})
+
+        # Open in browser
+        srv = self._ensure_server()
+        if srv:
+            html_file = f"{test_name}.html"
+            html_path = os.path.join(run_dir, html_file)
+            if os.path.isfile(html_path):
+                url = (f"{srv.base_url}"
+                       f"/{os.path.basename(run_dir)}/{html_file}")
+                console.print(
+                    f"\n  [cyan]📊 Report:[/cyan] "
+                    f"[bold link={url}]{url}[/bold link]\n")
+                self._open_in_ide(url)
+
+        return passed
+
+    # -- command handlers ---------------------------------------------------
+
+    def _cmd_help(self):
+        console.print("\n  [bold cyan]Available commands:[/bold cyan]")
+        for cmd, desc in self.COMMANDS.items():
+            console.print(f"    [bold]{cmd:10s}[/bold] {desc}")
+        console.print(
+            "\n  Or enter a [bold].test[/bold] file path to execute.\n")
+
+    def _cmd_status(self):
+        console.print(f"\n  [cyan]Config:[/cyan]")
+        console.print(
+            f"    DBMS:     "
+            f"[bold]{', '.join(c.name for c in self.configs)}[/bold]")
+        console.print(f"    Baseline: [bold]{self.baseline or 'none'}[/bold]")
+        console.print(f"    Database: [bold]{self.database}[/bold]")
+        console.print(f"    Output:   [bold]{self.output_dir}[/bold]")
+        console.print(f"    Format:   [bold]{self.output_format}[/bold]")
+        console.print(f"    Runs:     [bold]{len(self._run_history)}[/bold]")
+        if self._report_server and self._report_server.running:
+            console.print(
+                f"    Server:   "
+                f"[bold green]{self._report_server.base_url}[/bold green]")
+        console.print()
+
+    def _cmd_history(self):
+        if not self._run_history:
+            console.print("\n  [dim]No tests executed yet.[/dim]\n")
+            return
+        console.print(f"\n  [bold cyan]Session history "
+                      f"({len(self._run_history)} runs):[/bold cyan]")
+        for i, entry in enumerate(self._run_history, 1):
+            status_style = ("green" if entry["status"] == "PASS"
+                            else "red")
+            console.print(
+                f"    {i:3d}. [{status_style}]{entry['status']:4s}"
+                f"[/{status_style}]  "
+                f"[dim]{entry['time']}[/dim]  {entry['test']}")
+        console.print()
+
+    def _cmd_server(self):
+        srv = self._ensure_server()
+        if srv and srv.running:
+            idx_url = f"{srv.base_url}/index.html"
+            console.print(
+                f"\n  [green]●[/green] Server running: "
+                f"[bold link={idx_url}]{idx_url}[/bold link]\n")
+        else:
+            console.print("\n  [dim]Server not running "
+                          "(use --serve to enable).[/dim]\n")
+
+    def _cmd_open(self):
+        latest = os.path.join(self.output_dir, "latest")
+        if not os.path.islink(latest):
+            console.print("\n  [dim]No results yet.[/dim]\n")
+            return
+        real_dir = os.path.realpath(latest)
+        htmls = [f for f in os.listdir(real_dir) if f.endswith(".html")]
+        if not htmls:
+            console.print("\n  [dim]No HTML report found.[/dim]\n")
+            return
+        srv = self._ensure_server()
+        if not srv:
+            console.print("\n  [dim]Server not available.[/dim]\n")
+            return
+        url = (f"{srv.base_url}"
+               f"/{os.path.basename(real_dir)}/{htmls[0]}")
+        console.print(f"\n  Opening: [bold]{url}[/bold]\n")
+        self._open_in_ide(url)
+
+    # -- main loop ----------------------------------------------------------
+
+    def run(self):
+        """Start the interactive REPL."""
+        session: PromptSession = PromptSession(
+            history=InMemoryHistory(),
+            completer=TestFileCompleter(),
+            style=_PROMPT_STYLE,
+            complete_while_typing=True,
+        )
+
+        # Print welcome
+        #   ╔ + 55×═ + ╗
+        #   ║ + 55 chars content + ║
+        #   ╚ + 55×═ + ╝
+        border = "═" * 55
+        title = "Rosetta Interactive Mode"
+        hint = "Enter .test file paths to execute, or type 'help'"
+        # Center-pad content to 55 visible characters
+        title_line = f"  {title}  ".center(55)
+        hint_line = f"  {hint}  ".center(55)
+        console.print()
+        console.print(f"  [bold cyan]╔{border}╗[/bold cyan]")
+        console.print(f"  [bold cyan]║[/bold cyan]"
+                       f"[bold white]{title_line}[/bold white]"
+                       f"[bold cyan]║[/bold cyan]")
+        console.print(f"  [bold cyan]║[/bold cyan]"
+                       f"[dim]{hint_line}[/dim]"
+                       f"[bold cyan]║[/bold cyan]")
+        console.print(f"  [bold cyan]╚{border}╝[/bold cyan]")
+        console.print()
+
+        # Show status
+        console.print(
+            f"  [dim]DBMS:[/dim] "
+            f"[bold]{', '.join(c.name for c in self.configs)}[/bold]  "
+            f"[dim]Baseline:[/dim] "
+            f"[bold]{self.baseline or 'auto'}[/bold]  "
+            f"[dim]Database:[/dim] [bold]{self.database}[/bold]")
+
+        # Start server early if requested
+        srv = self._ensure_server()
+        if srv and srv.running:
+            console.print(
+                f"  [dim]Server:[/dim] "
+                f"[bold green]{srv.base_url}[/bold green]")
+        console.print()
+
+        run_count = 0
+
+        while True:
+            try:
+                prompt_msg = HTML(
+                    '<prompt>rosetta</prompt> <path>▶</path> ')
+                user_input = session.prompt(prompt_msg).strip()
+            except (EOFError, KeyboardInterrupt):
+                break
+
+            if not user_input:
+                continue
+
+            cmd = user_input.lower()
+
+            # Exit commands
+            if cmd in ("quit", "exit", "q"):
+                break
+
+            # Built-in commands
+            if cmd == "help":
+                self._cmd_help()
+                continue
+            if cmd == "status":
+                self._cmd_status()
+                continue
+            if cmd == "history":
+                self._cmd_history()
+                continue
+            if cmd == "server":
+                self._cmd_server()
+                continue
+            if cmd == "open":
+                self._cmd_open()
+                continue
+            if cmd == "clear":
+                console.clear()
+                continue
+
+            # Treat as file path
+            test_path = os.path.expanduser(user_input)
+            if not os.path.isabs(test_path):
+                test_path = os.path.abspath(test_path)
+
+            run_count += 1
+            console.print()
+            console.rule(
+                f"[bold cyan] Run #{run_count}: "
+                f"{os.path.basename(test_path)} [/bold cyan]")
+            console.print()
+
+            self._run_test(test_path)
+
+            console.print(
+                "  [dim]Ready for next test. "
+                "Type a path or 'help' for commands.[/dim]\n")
+
+        # Cleanup
+        console.print()
+        if self._run_history:
+            console.print(
+                f"  [dim]Session complete: "
+                f"{len(self._run_history)} test(s) executed.[/dim]")
+        if self._report_server:
+            self._report_server.stop()
+            console.print("  [dim]Report server stopped.[/dim]")
+        console.print("  [bold cyan]Goodbye! 👋[/bold cyan]\n")
