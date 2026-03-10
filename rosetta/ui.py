@@ -1,0 +1,342 @@
+"""Rich terminal UI for Rosetta."""
+
+import logging
+import threading
+import time
+from typing import Dict, List, Optional
+
+from rich.console import Console, Group
+from rich.panel import Panel
+from rich.progress import (BarColumn, MofNCompleteColumn, Progress,
+                           SpinnerColumn, TextColumn, TimeElapsedColumn,
+                           TimeRemainingColumn)
+from rich.rule import Rule
+from rich.table import Table
+from rich.text import Text
+
+from .models import CompareResult
+
+# The real stderr console for final output and live progress.
+console = Console(stderr=True)
+
+_log = logging.getLogger("rosetta")
+_BOX = "cyan"
+
+# Collects rich renderables for final Panel output.
+_renderables: List = []
+
+
+def _add(renderable):
+    """Add a renderable to the output buffer."""
+    _renderables.append(renderable)
+
+
+def flush_all(title: str = "Rosetta"):
+    """Flush all buffered renderables as a single Panel."""
+    if not _renderables:
+        return
+
+    group = Group(*_renderables)
+    console.print(Panel(
+        group,
+        title=f"[bold]{title}[/bold]",
+        border_style=_BOX,
+        expand=True,
+        padding=(0, 1),
+    ))
+    _renderables.clear()
+
+
+# ---------------------------------------------------------------------------
+# Banner
+# ---------------------------------------------------------------------------
+
+BANNER_TEXT = (
+    "[bold cyan]"
+    r"  ____                _   _" "\n"
+    r" |  _ \ ___  ___  ___| |_| |_ __ _" "\n"
+    r" | |_) / _ \/ __|/ _ \ __| __/ _` |" "\n"
+    r" |  _ < (_) \__ \  __/ |_| || (_| |" "\n"
+    r" |_| \_\___/|___/\___|\__|\__\__,_|"
+    "[/bold cyan]\n"
+    "[dim]Cross-DBMS SQL Behavioral Consistency Verification[/dim]\n"
+)
+
+
+def print_banner():
+    """Buffer the Rosetta banner."""
+    _add(Text.from_markup(BANNER_TEXT))
+
+
+# ---------------------------------------------------------------------------
+# Phase headers
+# ---------------------------------------------------------------------------
+
+def print_phase(title: str, detail: str = ""):
+    """Buffer a phase header."""
+    text = f"[bold white]{title}[/bold white]"
+    if detail:
+        text += f"  [dim]{detail}[/dim]"
+    _add(Text(""))
+    _add(Rule(Text.from_markup(text), style=_BOX))
+
+
+# ---------------------------------------------------------------------------
+# Info messages
+# ---------------------------------------------------------------------------
+
+def print_info(msg: str, highlight: str = ""):
+    """Buffer an informational line."""
+    if highlight:
+        _add(Text.from_markup(f"  [cyan]>[/cyan] {msg} [bold]{highlight}[/bold]"))
+    else:
+        _add(Text.from_markup(f"  [cyan]>[/cyan] {msg}"))
+
+
+def print_success(msg: str):
+    """Buffer a success message."""
+    _add(Text.from_markup(f"  [green]✓[/green] {msg}"))
+
+
+def print_warning(msg: str):
+    """Buffer a warning message."""
+    _add(Text.from_markup(f"  [yellow]⚠[/yellow] {msg}"))
+
+
+def print_error(msg: str):
+    """Buffer an error message."""
+    _add(Text.from_markup(f"  [red]✗[/red] {msg}"))
+
+
+# ---------------------------------------------------------------------------
+# Execution progress bar
+# ---------------------------------------------------------------------------
+
+class ExecutionProgress:
+    """Context manager for a DBMS execution progress bar.
+
+    Multiple instances share a single rich Progress bar so that parallel
+    DBMS executions are displayed simultaneously.  The shared Progress is
+    created on the first ``__enter__`` and stopped when the last instance
+    exits.
+    """
+
+    _lock = threading.Lock()
+    _shared_progress: Optional[Progress] = None
+    _ref_count = 0
+
+    def __init__(self, dbms_name: str, total: int):
+        self.dbms_name = dbms_name
+        self.total = total
+        self._task_id = None
+        self._errors = 0
+        self._executed = 0
+        self._elapsed = 0.0
+        self._start_time = 0.0
+
+    # -- shared Progress lifecycle ------------------------------------------
+
+    @classmethod
+    def _acquire(cls) -> Progress:
+        with cls._lock:
+            if cls._shared_progress is None:
+                cls._shared_progress = Progress(
+                    SpinnerColumn(),
+                    TextColumn("[bold blue]{task.fields[dbms]}[/bold blue]"),
+                    BarColumn(bar_width=40),
+                    MofNCompleteColumn(),
+                    TextColumn("[dim]|[/dim]"),
+                    TimeElapsedColumn(),
+                    TextColumn("[dim]|[/dim]"),
+                    TimeRemainingColumn(),
+                    TextColumn("{task.fields[status]}"),
+                    console=console,
+                    transient=True,
+                )
+                cls._shared_progress.start()
+            cls._ref_count += 1
+            return cls._shared_progress
+
+    @classmethod
+    def _release(cls):
+        with cls._lock:
+            cls._ref_count -= 1
+            if cls._ref_count <= 0:
+                if cls._shared_progress is not None:
+                    cls._shared_progress.stop()
+                    cls._shared_progress = None
+                cls._ref_count = 0
+
+    # -- context manager ----------------------------------------------------
+
+    def __enter__(self):
+        self._start_time = time.monotonic()
+        progress = self._acquire()
+        self._task_id = progress.add_task(
+            "exec", total=self.total,
+            dbms=self.dbms_name, status="",
+        )
+        return self
+
+    def __exit__(self, *args):
+        self._elapsed = time.monotonic() - self._start_time
+        self._release()
+
+    def advance(self, error: bool = False):
+        """Advance progress by 1."""
+        if error:
+            self._errors += 1
+        self._executed += 1
+        status = (f"[red]{self._errors} err[/red]"
+                  if self._errors else "[green]ok[/green]")
+        prog = self.__class__._shared_progress
+        if prog is not None:
+            prog.update(self._task_id, advance=1, status=status)
+
+    def set_status(self, text: str):
+        """Set a custom status text."""
+        prog = self.__class__._shared_progress
+        if prog is not None:
+            prog.update(self._task_id, status=text)
+
+    def write_summary_to_buffer(self):
+        """Write a static one-line summary into the buffer (call after exit)."""
+        elapsed = f"{self._elapsed:.1f}s"
+        if self._errors:
+            status = f"[yellow]{self._executed} done, {self._errors} err[/yellow]"
+        else:
+            status = f"[green]{self._executed} done[/green]"
+        _add(Text.from_markup(
+            f"  [bold blue]{self.dbms_name}[/bold blue]  "
+            f"{self._executed}/{self.total}  "
+            f"[dim]{elapsed}[/dim]  {status}"
+        ))
+
+
+# ---------------------------------------------------------------------------
+# Summary table
+# ---------------------------------------------------------------------------
+
+def print_summary(comparisons: Dict[str, CompareResult],
+                  failed_connections: set = None):
+    """Buffer a rich summary table of comparison results."""
+    _add(Text(""))
+    _add(Rule(Text.from_markup("[bold white]Summary[/bold white]"), style=_BOX))
+    _add(Text(""))
+
+    table = Table(
+        header_style="bold",
+        show_lines=False,
+        padding=(0, 1),
+        expand=True,
+        show_edge=False,
+    )
+
+    table.add_column("Comparison", style="white", ratio=3)
+    table.add_column("Status", justify="center", min_width=6)
+    table.add_column("Match", justify="right", style="green")
+    table.add_column("Mismatch", justify="right")
+    table.add_column("Skip", justify="right", style="dim")
+    table.add_column("Total", justify="right")
+    table.add_column("Rate", justify="right", min_width=14)
+
+    if failed_connections:
+        for name in failed_connections:
+            table.add_row(
+                name, "[yellow]SKIP[/yellow]",
+                "-", "-", "-", "-",
+                "[dim]conn failed[/dim]",
+            )
+
+    all_pass = True
+    for key, cmp in comparisons.items():
+        is_pass = cmp.mismatched == 0
+        if not is_pass:
+            all_pass = False
+
+        status = ("[bold green]PASS[/bold green]" if is_pass
+                  else "[bold red]FAIL[/bold red]")
+        mismatch_style = "red bold" if cmp.mismatched > 0 else "dim"
+        rate = cmp.pass_rate
+        rate_color = ("green" if rate >= 100
+                      else "yellow" if rate >= 90
+                      else "red")
+
+        bar_len = 8
+        filled = int(rate / 100 * bar_len)
+        bar = (f"[{rate_color}]{'█' * filled}{'░' * (bar_len - filled)}"
+               f"[/{rate_color}] {rate:.1f}%")
+
+        table.add_row(
+            key, status,
+            str(cmp.matched),
+            Text(str(cmp.mismatched), style=mismatch_style),
+            str(cmp.skipped),
+            str(cmp.total_stmts),
+            bar,
+        )
+
+    _add(table)
+
+    # Overall verdict
+    _add(Text(""))
+    if all_pass and not (failed_connections):
+        _add(Text.from_markup("[bold green]  ★  OVERALL: ALL PASSED[/bold green]"))
+    elif all_pass:
+        _add(Text.from_markup(
+            "[bold yellow]  ★  OVERALL: ALL COMPARED PASSED[/bold yellow]"
+            "  [dim](some connections failed)[/dim]"))
+    else:
+        _add(Text.from_markup(
+            "[bold red]  ★  OVERALL: DIFFERENCES FOUND[/bold red]"))
+
+    return all_pass
+
+
+# ---------------------------------------------------------------------------
+# Report output
+# ---------------------------------------------------------------------------
+
+def print_report_file(path: str, label: str = ""):
+    """Buffer a generated report file path."""
+    label_text = f"[dim]{label}[/dim]  " if label else ""
+    _add(Text.from_markup(f"  [green]✓[/green] {label_text}[bold]{path}[/bold]"))
+
+
+# ---------------------------------------------------------------------------
+# HTTP server panel
+# ---------------------------------------------------------------------------
+
+def print_server_info(url: str, directory: str, *,
+                      history_url: str = ""):
+    """Print the HTTP server panel (standalone, after main panel)."""
+    lines = [
+        f"[bold cyan]URL:[/bold cyan]      {url}",
+        f"[dim]Dir:[/dim]      {directory}",
+    ]
+    if history_url:
+        lines.append(f"[dim]History:[/dim]  {history_url}")
+    lines.append("")
+    lines.append("Press [bold]Ctrl+C[/bold] to stop")
+    console.print()
+    console.print(Panel("\n".join(lines),
+                        title="[bold]HTML Report Server[/bold]",
+                        border_style=_BOX, expand=False))
+
+
+# ---------------------------------------------------------------------------
+# Logging handler that uses rich
+# ---------------------------------------------------------------------------
+
+class RichLogHandler(logging.Handler):
+    """Redirect log records to rich console with minimal formatting."""
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            if record.levelno >= logging.ERROR:
+                print_error(msg)
+            elif record.levelno >= logging.WARNING:
+                print_warning(msg)
+        except Exception:
+            self.handleError(record)
