@@ -7,6 +7,7 @@ fixed at launch; only the test file path changes between iterations.
 
 import glob
 import http.server
+import json
 import logging
 import os
 import socket
@@ -73,19 +74,149 @@ _PROMPT_STYLE = Style.from_dict({
 # HTTP server management
 # ---------------------------------------------------------------------------
 
-class _SilentHandler(http.server.SimpleHTTPRequestHandler):
-    """HTTP handler that suppresses access log output."""
+class _APIHandler(http.server.SimpleHTTPRequestHandler):
+    """HTTP handler with whitelist/buglist API endpoints and suppressed logging."""
+
+    # Class-level reference set by ReportServer before creating instances.
+    _whitelist = None  # type: ignore
+    _buglist = None    # type: ignore
 
     def log_message(self, format, *args):  # noqa: A002
         pass  # Suppress all request logs
+
+    # -- CORS ---------------------------------------------------------------
+
+    def _send_cors_headers(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods",
+                         "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    def do_OPTIONS(self):                       # noqa: N802
+        self.send_response(200)
+        self._send_cors_headers()
+        self.end_headers()
+
+    # -- API routing --------------------------------------------------------
+
+    def do_POST(self):                          # noqa: N802
+        if self.path.startswith("/api/whitelist/"):
+            self._handle_whitelist_api()
+        elif self.path.startswith("/api/buglist/"):
+            self._handle_buglist_api()
+        else:
+            self.send_error(404)
+
+    def _read_json(self) -> dict:
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length) if length else b"{}"
+        return json.loads(body)
+
+    def _respond_json(self, data: dict, status: int = 200):
+        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self._send_cors_headers()
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _handle_whitelist_api(self):
+        action = self.path.split("/api/whitelist/", 1)[-1].strip("/")
+        wl = self._whitelist
+        if wl is None:
+            self._respond_json({"ok": False, "error": "whitelist not loaded"},
+                               500)
+            return
+        try:
+            body = self._read_json()
+        except Exception:
+            body = {}
+
+        if action == "add":
+            fp = body.get("fingerprint", "")
+            if not fp:
+                self._respond_json({"ok": False,
+                                    "error": "fingerprint required"}, 400)
+                return
+            entry = wl.add(
+                fingerprint=fp,
+                stmt=body.get("stmt", ""),
+                dbms_a=body.get("dbms_a", ""),
+                dbms_b=body.get("dbms_b", ""),
+                block=body.get("block", 0),
+                reason=body.get("reason", ""),
+            )
+            self._respond_json({"ok": True, "entry": entry})
+
+        elif action == "remove":
+            fp = body.get("fingerprint", "")
+            removed = wl.remove(fp) if fp else False
+            self._respond_json({"ok": removed})
+
+        elif action == "clear":
+            wl.clear()
+            self._respond_json({"ok": True})
+
+        elif action == "list":
+            self._respond_json({"ok": True, "entries": wl.entries})
+
+        else:
+            self._respond_json({"ok": False, "error": "unknown action"}, 404)
+
+    def _handle_buglist_api(self):
+        action = self.path.split("/api/buglist/", 1)[-1].strip("/")
+        bl = self._buglist
+        if bl is None:
+            self._respond_json({"ok": False, "error": "buglist not loaded"},
+                               500)
+            return
+        try:
+            body = self._read_json()
+        except Exception:
+            body = {}
+
+        if action == "add":
+            fp = body.get("fingerprint", "")
+            if not fp:
+                self._respond_json({"ok": False,
+                                    "error": "fingerprint required"}, 400)
+                return
+            entry = bl.add(
+                fingerprint=fp,
+                stmt=body.get("stmt", ""),
+                dbms_a=body.get("dbms_a", ""),
+                dbms_b=body.get("dbms_b", ""),
+                block=body.get("block", 0),
+                reason=body.get("reason", ""),
+            )
+            self._respond_json({"ok": True, "entry": entry})
+
+        elif action == "remove":
+            fp = body.get("fingerprint", "")
+            removed = bl.remove(fp) if fp else False
+            self._respond_json({"ok": removed})
+
+        elif action == "clear":
+            bl.clear()
+            self._respond_json({"ok": True})
+
+        elif action == "list":
+            self._respond_json({"ok": True, "entries": bl.entries})
+
+        else:
+            self._respond_json({"ok": False, "error": "unknown action"}, 404)
 
 
 class ReportServer:
     """Manages a background HTTP server for viewing HTML reports."""
 
-    def __init__(self, directory: str, port: int = 0):
+    def __init__(self, directory: str, port: int = 0, whitelist=None,
+                 buglist=None):
         self.directory = os.path.abspath(directory)
         self.port = port
+        self.whitelist = whitelist
+        self.buglist = buglist
         self._server: Optional[http.server.HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
@@ -107,7 +238,12 @@ class ReportServer:
                 self.port = s.getsockname()[1]
         os.makedirs(self.directory, exist_ok=True)
         directory = self.directory
-        handler = lambda *a, **kw: _SilentHandler(
+        wl = self.whitelist
+        bl = self.buglist
+        # Inject whitelist and buglist reference into handler class
+        _APIHandler._whitelist = wl
+        _APIHandler._buglist = bl
+        handler = lambda *a, **kw: _APIHandler(
             *a, directory=directory, **kw)
         self._server = http.server.HTTPServer(("0.0.0.0", self.port), handler)
         self._thread = threading.Thread(target=self._server.serve_forever,
@@ -161,6 +297,12 @@ class InteractiveSession:
         self.port = port
         self._run_history: List[Dict] = []
         self._report_server: Optional[ReportServer] = None
+        # Whitelist — shared across all runs in this session
+        from .whitelist import Whitelist
+        self._whitelist = Whitelist(self.output_dir)
+        # Buglist — shared across all runs in this session
+        from .buglist import Buglist
+        self._buglist = Buglist(self.output_dir)
 
     # -- server helpers -----------------------------------------------------
 
@@ -169,7 +311,9 @@ class InteractiveSession:
             return None
         if self._report_server and self._report_server.running:
             return self._report_server
-        self._report_server = ReportServer(self.output_dir, self.port)
+        self._report_server = ReportServer(self.output_dir, self.port,
+                                           whitelist=self._whitelist,
+                                           buglist=self._buglist)
         try:
             self._report_server.start()
             return self._report_server
@@ -189,6 +333,7 @@ class InteractiveSession:
 
     def _run_test(self, test_file: str) -> bool:
         from .cli import RosettaRunner
+        from .reporter.history import generate_buglist_html, generate_whitelist_html
 
         if not os.path.isfile(test_file):
             print_error(f"Test file not found: {test_file}")
@@ -199,6 +344,10 @@ class InteractiveSession:
         test_name = Path(test_file).stem
         run_dir = os.path.join(self.output_dir, f"{test_name}_{run_stamp}")
 
+        # Reload whitelist and buglist to pick up any changes from the web UI
+        self._whitelist.load()
+        self._buglist.load()
+
         print_info("DBMS targets:",
                    ", ".join(c.name for c in self.configs))
 
@@ -208,7 +357,9 @@ class InteractiveSession:
             baseline=self.baseline, skip_explain=self.skip_explain,
             skip_analyze=self.skip_analyze,
             skip_show_create=self.skip_show_create,
-            output_format=self.output_format)
+            output_format=self.output_format,
+            whitelist=self._whitelist,
+            buglist=self._buglist)
 
         comparisons = runner.run()
 
@@ -229,6 +380,23 @@ class InteractiveSession:
             pass
 
         generate_index_html(self.output_dir)
+        generate_whitelist_html(self.output_dir)
+        generate_buglist_html(self.output_dir)
+
+        # Print whitelist summary
+        wl_count = sum(cmp.whitelisted for cmp in comparisons.values())
+        if wl_count:
+            console.print(
+                f"  [yellow]⚡ {wl_count} diff(s) matched whitelist"
+                f"[/yellow]")
+
+        # Print bug summary
+        bug_count = sum(cmp.bug_marked for cmp in comparisons.values())
+        if bug_count:
+            console.print(
+                f"  [red]🐛 {bug_count} diff(s) marked as bug"
+                f"[/red]")
+
         all_pass = print_summary(comparisons, runner.failed_connections)
         flush_all()
 

@@ -5,6 +5,8 @@ import re
 from typing import Dict, List, Optional
 
 from .models import CompareResult
+from .buglist import Buglist
+from .whitelist import Whitelist, diff_fingerprint
 
 # ---------------------------------------------------------------------------
 # Normalization regex patterns (compiled once at module load)
@@ -118,11 +120,19 @@ def block_has_unexpected_error(block: List[str]) -> bool:
 
 def compare_outputs(lines_a: List[str], lines_b: List[str],
                     name_a: str, name_b: str,
-                    baseline_name: Optional[str] = None) -> CompareResult:
+                    baseline_name: Optional[str] = None,
+                    whitelist: Optional[Whitelist] = None,
+                    buglist: Optional[Buglist] = None) -> CompareResult:
     """Compare two result outputs block-by-block.
 
     If baseline_name is set, blocks where the baseline has an unexpected
     error are skipped.
+
+    If *whitelist* is provided, each diff is annotated with a fingerprint
+    and ``whitelisted`` flag.  Whitelisted diffs are counted separately.
+
+    If *buglist* is provided, each diff is annotated with a ``bug_marked``
+    flag.  Bug-marked diffs still count toward the failure rate.
     """
     result = CompareResult(dbms_a=name_a, dbms_b=name_b)
 
@@ -171,14 +181,25 @@ def compare_outputs(lines_a: List[str], lines_b: List[str],
                     ctx_after.append({"block": ci + 1,
                                       "stmt": blk[0][:120]})
 
+            stmt = ba[0] if ba else (bb[0] if bb else "???")
+            fa = filter_warnings(ba)
+            fb = filter_warnings(bb)
+
+            fp = diff_fingerprint(stmt, fa, fb)
+            wl = whitelist.contains(fp) if whitelist else False
+            bm = buglist.contains(fp) if buglist else False
+
             result.diffs.append({
                 "block": i + 1,
-                "stmt": ba[0] if ba else (bb[0] if bb else "???"),
-                "lines_a": filter_warnings(ba),
-                "lines_b": filter_warnings(bb),
+                "stmt": stmt,
+                "lines_a": fa,
+                "lines_b": fb,
                 "diff": diff,
                 "context_before": ctx_before,
                 "context_after": ctx_after,
+                "fingerprint": fp,
+                "whitelisted": wl,
+                "bug_marked": bm,
             })
 
     return result

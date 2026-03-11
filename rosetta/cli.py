@@ -40,7 +40,9 @@ class RosettaRunner:
                  skip_explain: bool = False,
                  skip_analyze: bool = False,
                  skip_show_create: bool = False,
-                 output_format: str = "all"):
+                 output_format: str = "all",
+                 whitelist=None,
+                 buglist=None):
         self.test_file = test_file
         self.configs = configs
         self.output_dir = output_dir
@@ -50,6 +52,8 @@ class RosettaRunner:
         self.skip_analyze_global = skip_analyze
         self.skip_show_create_global = skip_show_create
         self.output_format = output_format
+        self.whitelist = whitelist
+        self.buglist = buglist
         self.results: Dict[str, List[str]] = {}
         self.failed_connections: set = set()
 
@@ -107,6 +111,8 @@ class RosettaRunner:
                     self.results[name],
                     self.baseline, name,
                     baseline_name=self.baseline,
+                    whitelist=self.whitelist,
+                    buglist=self.buglist,
                 )
         else:
             for i in range(len(names)):
@@ -116,6 +122,8 @@ class RosettaRunner:
                         self.results[names[i]],
                         self.results[names[j]],
                         names[i], names[j],
+                        whitelist=self.whitelist,
+                        buglist=self.buglist,
                     )
 
         return comparisons
@@ -425,6 +433,14 @@ def main(argv=None):
     print_info("DBMS targets:",
                ", ".join(c.name for c in configs))
 
+    # Load whitelist from output directory
+    from .whitelist import Whitelist
+    whitelist = Whitelist(output_dir)
+
+    # Load buglist from output directory
+    from .buglist import Buglist
+    buglist = Buglist(output_dir)
+
     # Run
     runner = RosettaRunner(
         test_file=args.test,
@@ -436,6 +452,8 @@ def main(argv=None):
         skip_analyze=args.skip_analyze,
         skip_show_create=args.skip_show_create,
         output_format=args.format,
+        whitelist=whitelist,
+        buglist=buglist,
     )
 
     if args.diff_only:
@@ -467,8 +485,11 @@ def main(argv=None):
     except OSError:
         pass
 
-    # Generate history index page
+    # Generate history index page and whitelist/buglist pages
     generate_index_html(output_dir)
+    from .reporter.history import generate_buglist_html, generate_whitelist_html
+    generate_whitelist_html(output_dir)
+    generate_buglist_html(output_dir)
 
     # Print rich summary table
     all_pass = print_summary(comparisons, runner.failed_connections)
@@ -485,7 +506,8 @@ def main(argv=None):
             # Serve from output_dir root so history is accessible
             relative_html = os.path.join(
                 os.path.basename(run_dir), html_file)
-            _serve_report(output_dir, relative_html, args.port)
+            _serve_report(output_dir, relative_html, args.port,
+                          whitelist=whitelist, buglist=buglist)
         else:
             console.print(f"[yellow]HTML report not found: {html_path}[/yellow]")
 
@@ -544,16 +566,24 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
-def _serve_report(directory: str, html_file: str, port: int = 0):
+def _serve_report(directory: str, html_file: str, port: int = 0,
+                  whitelist=None, buglist=None):
     """Start a local HTTP server and print the URL for the HTML report."""
     if port == 0:
         port = _find_free_port()
 
     abs_dir = os.path.abspath(directory)
 
-    handler = lambda *a, **kw: http.server.SimpleHTTPRequestHandler(
-        *a, directory=abs_dir, **kw
-    )
+    # Use the API-capable handler from interactive module if whitelist given
+    if whitelist is not None:
+        from .interactive import _APIHandler
+        _APIHandler._whitelist = whitelist
+        _APIHandler._buglist = buglist
+        handler = lambda *a, **kw: _APIHandler(
+            *a, directory=abs_dir, **kw)
+    else:
+        handler = lambda *a, **kw: http.server.SimpleHTTPRequestHandler(
+            *a, directory=abs_dir, **kw)
 
     try:
         server = http.server.HTTPServer(("0.0.0.0", port), handler)
