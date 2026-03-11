@@ -15,7 +15,9 @@ Rosetta 用于在多个数据库（MySQL、TDSQL、TiDB、OceanBase 等）上执
 - [配置文件](#配置文件)
 - [编写测试文件](#编写测试文件)
 - [运行测试](#运行测试)
+- [交互模式](#交互模式)
 - [查看报告](#查看报告)
+- [白名单与 Bug 标记](#白名单与-bug-标记)
 - [命令行参数](#命令行参数)
 - [高级用法](#高级用法)
 - [打包与分发](#打包与分发)
@@ -235,6 +237,36 @@ python3 rosetta.pyz --test my_test.test --parse-only
 
 ---
 
+## 交互模式
+
+交互模式提供一个 REPL 会话，可以反复提交 `.test` 文件路径执行测试，无需重启程序。
+
+### 启动交互模式
+
+```bash
+python3 rosetta.pyz --interactive --config dbms_config.json --dbms tdsql,mysql --serve
+```
+
+启动后会显示 `rosetta ▶` 提示符，输入 `.test` 文件路径即可执行测试。
+
+### 交互模式功能
+
+- **Tab 自动补全**：输入路径时按 Tab 自动补全 `.test` 文件和目录
+- **内置 HTTP 服务**：配合 `--serve` 自动启动 Web 服务，实时查看报告
+- **历史记录页面**：每次运行后自动更新 `index.html` 汇总页面
+- **白名单 / Bug 标记管理**：通过 Web UI 或 REST API 管理
+
+### 交互模式命令
+
+| 命令 | 说明 |
+|---|---|
+| `<路径>.test` | 执行指定的测试文件 |
+| `quit` / `exit` | 退出交互模式 |
+| `Ctrl+C` | 中断当前执行 |
+| `Ctrl+D` | 退出 |
+
+---
+
 ## 查看报告
 
 每次运行在 `results/` 下生成带时间戳的子目录：
@@ -248,23 +280,80 @@ results/
 │   ├── my_test.diff             # diff 文件
 │   └── my_test.html             # HTML 交互式报告
 ├── latest -> my_test_20260309_172119
-└── index.html                   # 历史运行汇总页面
+├── index.html                   # 历史运行汇总页面
+├── whitelist.json               # 白名单数据（所有运行共享）
+├── whitelist.html               # 白名单管理页面
+├── buglist.json                 # Bug 标记数据（所有运行共享）
+└── buglist.html                 # Bug 标记管理页面
 ```
 
 ### HTML 报告
 
-- **Summary 表格**：每对数据库的匹配数、差异数、通过率
+- **Summary 表格**：每对数据库的匹配数、差异数、白名单数、Bug 标记数、通过率
 - **Diff 详情**：点击展开差异 block，左右对比两个数据库输出
+- **白名单/Bug 操作按钮**：每个 diff block 可直接加白或标记 Bug
 - **上下文导航**：每个 diff 上方展示前后相邻 SQL，快速定位
 - **行号标识**：每条 SQL 带 `[Lxxx]` 前缀（对应 .test 文件行号），相同 SQL 也可唯一区分
 
 ### 文本报告
 
-包含 unified diff 格式输出和上下文信息，适合终端查看和 CI 集成。
+包含 unified diff 格式输出和上下文信息，适合终端查看和 CI 集成。Summary 表格也会展示白名单和 Bug 标记列（如有）。
 
 ### 历史页面
 
-`--serve` 启动 HTTP 服务后访问 `http://localhost:19527/index.html` 查看所有历史运行，支持按测试名和 DBMS 过滤。
+`--serve` 启动 HTTP 服务后访问 `http://localhost:19527/index.html` 查看所有历史运行，支持按测试名和 DBMS 过滤。历史页面同时提供白名单管理页面和 Bug 列表管理页面的入口。
+
+---
+
+## 白名单与 Bug 标记
+
+Rosetta 支持对单个 diff block 进行**白名单**和 **Bug 标记**管理，帮助跨测试运行追踪已知差异。
+
+### 白名单（Whitelist）
+
+白名单中的 diff **不计入失败数**——它们不再导致测试被判定为 FAIL。适用于已知的可接受差异（例如，不同数据库的特性差异但行为正确）。
+
+- 每个 diff 通过 **MD5 指纹**识别，基于标准化的 SQL 语句和两端输出计算
+- 白名单条目持久化在输出目录下的 `whitelist.json` 中
+- 白名单 diff 在 HTML 报告中以降低透明度和黄色 "Whitelisted" 徽章显示
+
+### Bug 标记（Buglist）
+
+Bug 标记是**仅供参考的标注**——标记的 diff 仍计入失败率，但会在视觉上区分显示，便于追踪已知 bug。
+
+- Bug 条目持久化在输出目录下的 `buglist.json` 中
+- Bug 标记的 diff 在 HTML 报告中以红色左边框和 "Bug" 徽章显示
+
+### 通过 HTML 报告管理
+
+在每个测试运行的 HTML 报告中，每个 diff block 都有操作按钮：
+
+- **加白** —— 将 diff 加入白名单，再次点击可移除
+- **标记Bug** —— 标记为已知 Bug，再次点击可移除
+
+更改立即生效并持久化到 JSON 文件。从历史页面重新打开报告时，白名单/Bug 标记状态会通过 API 自动同步。
+
+### 通过 REST API 管理
+
+启动 `--serve` 后，以下 API 端点可用：
+
+| 端点 | 方法 | 说明 | 请求体 |
+|---|---|---|---|
+| `/api/whitelist/list` | POST | 列出所有白名单条目 | `{}` |
+| `/api/whitelist/add` | POST | 添加白名单条目 | `{"fingerprint":"...", "stmt":"...", "dbms_a":"...", "dbms_b":"...", "block":0, "reason":""}` |
+| `/api/whitelist/remove` | POST | 移除白名单条目 | `{"fingerprint":"..."}` |
+| `/api/whitelist/clear` | POST | 清空白名单 | `{}` |
+| `/api/buglist/list` | POST | 列出所有 Bug 条目 | `{}` |
+| `/api/buglist/add` | POST | 添加 Bug 条目 | `{"fingerprint":"...", "stmt":"...", "dbms_a":"...", "dbms_b":"...", "block":0, "reason":""}` |
+| `/api/buglist/remove` | POST | 移除 Bug 条目 | `{"fingerprint":"..."}` |
+| `/api/buglist/clear` | POST | 清空 Bug 列表 | `{}` |
+
+### 管理页面
+
+历史首页提供两个独立管理页面的链接：
+
+- **whitelist.html** —— 查看、搜索、删除白名单条目
+- **buglist.html** —— 查看、搜索、删除 Bug 标记条目
 
 ---
 
@@ -287,6 +376,7 @@ results/
 | `--gen-config` | | | 生成示例配置并退出 |
 | `--serve` | `-s` | | 运行后启动 HTTP 服务 |
 | `--port` | `-p` | `19527` | HTTP 服务端口 |
+| `--interactive` | | | 进入交互模式（REPL 会话） |
 | `--verbose` | `-v` | | 详细日志 |
 
 ---

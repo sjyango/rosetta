@@ -58,6 +58,9 @@ rosetta --test <test_file> [options]
 | `--parse-only` | `False` | Only parse `.test` file and print statements (debug) |
 | `--diff-only` | `False` | Re-generate reports from existing `.result` files without executing |
 | `--gen-config` | — | Generate a sample config file at the given path and exit |
+| `--serve, -s` | `False` | Start HTTP server after test run |
+| `--port, -p` | `19527` | HTTP server port |
+| `--interactive` | `False` | Enter interactive mode (REPL session) |
 | `--verbose, -v` | `False` | Enable verbose logging |
 
 ## Examples
@@ -85,6 +88,25 @@ rosetta --test suite/tdsql/json/t/test.test --dbms tdsql,mysql --format html
 ```bash
 rosetta --test suite/tdsql/json/t/test.test --diff-only --format html
 ```
+
+### Start HTTP server to view reports
+
+```bash
+rosetta --test suite/tdsql/json/t/test.test --dbms tdsql,mysql --serve --port 8080
+```
+
+### Interactive mode (REPL session)
+
+```bash
+rosetta --interactive --config dbms_config.json --dbms tdsql,mysql --serve
+```
+
+In interactive mode, you get a REPL prompt where you can repeatedly submit `.test` file paths without restarting. Features include:
+
+- **Tab completion** for `.test` file paths
+- **Built-in HTTP server** with `--serve` for live report viewing
+- **History page** (`index.html`) automatically updated after each run
+- **Whitelist / Buglist management** via Web UI and REST API
 
 ### Parse-only mode (debug, no DB connection needed)
 
@@ -172,6 +194,54 @@ Rosetta generates the following files in the output directory:
 | `<test_name>.report.txt` | Text summary report |
 | `<test_name>.diff` | Unified diff output |
 | `<test_name>.html` | Interactive HTML report with dashboard and side-by-side diff |
+| `index.html` | History page listing all test runs |
+| `whitelist.json` | Persisted whitelist entries (auto-created) |
+| `buglist.json` | Persisted buglist entries (auto-created) |
+| `whitelist.html` | Whitelist management page |
+| `buglist.html` | Buglist management page |
+
+## Whitelist & Buglist
+
+Rosetta supports **whitelisting** and **bug-marking** individual diff blocks. This helps manage known differences across test runs.
+
+### Whitelist
+
+Whitelisted diffs are **excluded from the failure count** — they no longer cause a test to be reported as FAIL. Use this for known acceptable differences (e.g., DBMS-specific behavior that is correct but different).
+
+- Each diff is identified by an **MD5 fingerprint** computed from the normalised SQL statement and the outputs of both DBMS.
+- Whitelist entries are persisted in `whitelist.json` in the output directory.
+- Whitelisted diffs appear with reduced opacity and a yellow "Whitelisted" badge in the HTML report.
+
+### Buglist
+
+Bug-marked diffs are **informational only** — they still count toward the failure rate, but are visually distinguished so you can track known bugs across runs.
+
+- Bug entries are persisted in `buglist.json` in the output directory.
+- Bug-marked diffs appear with a red left border and a "Bug" badge in the HTML report.
+
+### Managing via HTML Report
+
+In the interactive HTML report for each test run, every diff block has action buttons:
+
+- **加白 (Whitelist)** — add the diff to the whitelist; click again to remove
+- **标记Bug (Mark Bug)** — mark the diff as a known bug; click again to remove
+
+Changes take effect immediately and are persisted to the JSON files. When reopening a report from the history page, the whitelist/buglist state is synced from the server via API.
+
+### Managing via REST API
+
+When running with `--serve`, the following API endpoints are available:
+
+| Endpoint | Method | Action | Body |
+|----------|--------|--------|------|
+| `/api/whitelist/list` | POST | List all whitelist entries | `{}` |
+| `/api/whitelist/add` | POST | Add a whitelist entry | `{"fingerprint": "...", "stmt": "...", "dbms_a": "...", "dbms_b": "...", "block": 0, "reason": ""}` |
+| `/api/whitelist/remove` | POST | Remove a whitelist entry | `{"fingerprint": "..."}` |
+| `/api/whitelist/clear` | POST | Clear all whitelist entries | `{}` |
+| `/api/buglist/list` | POST | List all buglist entries | `{}` |
+| `/api/buglist/add` | POST | Add a buglist entry | `{"fingerprint": "...", "stmt": "...", "dbms_a": "...", "dbms_b": "...", "block": 0, "reason": ""}` |
+| `/api/buglist/remove` | POST | Remove a buglist entry | `{"fingerprint": "..."}` |
+| `/api/buglist/clear` | POST | Clear all buglist entries | `{}` |
 
 ## Project Structure
 
@@ -187,9 +257,14 @@ Rosetta generates the following files in the output directory:
     ├── parser.py          # MTR .test file parser
     ├── executor.py        # DB connection management and SQL execution
     ├── comparator.py      # Result normalization and diff comparison
+    ├── whitelist.py       # Whitelist management (MD5 fingerprint, JSON persistence)
+    ├── buglist.py         # Buglist management (known bug tracking)
+    ├── interactive.py     # Interactive REPL session with HTTP server
     ├── reporter/
     │   ├── __init__.py
     │   ├── text.py        # Text report generator
-    │   └── html.py        # HTML visual report generator
+    │   ├── html.py        # HTML visual report generator (with whitelist/buglist UI)
+    │   └── history.py     # History index page and whitelist/buglist management pages
+    ├── ui.py              # Terminal UI helpers (summary table, progress)
     └── cli.py             # CLI entry point and orchestration
 ```
