@@ -8,15 +8,36 @@ Rosetta parses MySQL MTR-style `.test` files, executes the SQL statements agains
 
 - Python >= 3.8
 - PyMySQL >= 1.0
+- Rich >= 13.0
+- prompt_toolkit >= 3.0
 
 ## Installation
 
+### 方式一：pip 安装（推荐）
+
 ```bash
-cd .doc
+git clone https://github.com/sjyango/rosetta.git
+cd rosetta
 pip install -e .
 ```
 
-After installation, the `rosetta` command is available globally.
+安装后 `rosetta` 命令全局可用。
+
+### 方式二：.pyz 单文件
+
+使用打包脚本构建一个可直接运行的单文件：
+
+```bash
+./build.sh
+# 产出: dist/rosetta.pyz
+```
+
+运行时只需：
+
+```bash
+pip install pymysql "rich>=13.0" "prompt_toolkit>=3.0"
+python3 rosetta.pyz --help
+```
 
 ## Quick Start
 
@@ -25,9 +46,16 @@ After installation, the `rosetta` command is available globally.
 rosetta --gen-config dbms_config.json
 
 # 2. Edit dbms_config.json with your DBMS connection info
+vim dbms_config.json
 
 # 3. Run a test
-rosetta --test path/to/test.test --config dbms_config.json --dbms tdsql,mysql
+rosetta --test path/to/test.test --dbms tdsql,mysql
+
+# 4. Run with HTTP server to view HTML reports
+rosetta --test path/to/test.test --dbms tdsql,mysql --serve
+
+# 5. Interactive mode (REPL, run multiple tests without restarting)
+rosetta --interactive --dbms tdsql,mysql --serve
 ```
 
 ## Usage
@@ -46,10 +74,10 @@ rosetta --test <test_file> [options]
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--config, -c` | `.doc/dbms_config.json` | Path to DBMS config JSON file |
+| `--config, -c` | `dbms_config.json` | Path to DBMS config JSON file |
 | `--dbms` | *(all enabled)* | DBMS to compare, comma-separated (e.g. `tdsql,mysql,tidb`) |
 | `--baseline, -b` | `tdsql` | Baseline DBMS name for comparison |
-| `--output-dir, -o` | `.doc/cross_dbms_results` | Output directory for reports |
+| `--output-dir, -o` | `results` | Output directory for reports |
 | `--format, -f` | `all` | Output format: `text`, `html`, or `all` |
 | `--database, -d` | `cross_dbms_test_db` | Test database name |
 | `--skip-explain` | `True` | Skip EXPLAIN statements |
@@ -246,9 +274,11 @@ When running with `--serve`, the following API endpoints are available:
 ## Project Structure
 
 ```
-.doc/
+rosetta/
 ├── pyproject.toml         # Package metadata and console_scripts entry
 ├── setup.py               # Fallback install entry
+├── build.sh               # Build script for .pyz packaging
+├── dbms_config.sample.json # Sample DBMS config file
 └── rosetta/               # Python package
     ├── __init__.py        # Package definition
     ├── __main__.py        # python -m rosetta entry point
