@@ -237,6 +237,13 @@ class ReportServer:
                 s.bind(("", 0))
                 self.port = s.getsockname()[1]
         os.makedirs(self.directory, exist_ok=True)
+        # Pre-generate index/whitelist/buglist pages so / redirects work
+        from .reporter.history import (generate_buglist_html,
+                                       generate_index_html,
+                                       generate_whitelist_html)
+        generate_index_html(self.directory)
+        generate_whitelist_html(self.directory)
+        generate_buglist_html(self.directory)
         directory = self.directory
         wl = self.whitelist
         bl = self.buglist
