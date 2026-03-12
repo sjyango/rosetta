@@ -80,9 +80,24 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
     # Class-level reference set by ReportServer before creating instances.
     _whitelist = None  # type: ignore
     _buglist = None    # type: ignore
+    _configs: List[DBMSConfig] = []
+    _database: str = ""
 
     def log_message(self, format, *args):  # noqa: A002
         pass  # Suppress all request logs
+
+    # -- GET routing (redirect / → /index.html, serve API) -----------------
+
+    def do_GET(self):                           # noqa: N802
+        if self.path == "/":
+            self.send_response(302)
+            self.send_header("Location", "/index.html")
+            self.end_headers()
+            return
+        if self.path == "/api/dbms":
+            self._handle_dbms_list()
+            return
+        super().do_GET()
 
     # -- CORS ---------------------------------------------------------------
 
@@ -104,6 +119,8 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
             self._handle_whitelist_api()
         elif self.path.startswith("/api/buglist/"):
             self._handle_buglist_api()
+        elif self.path == "/api/execute":
+            self._handle_execute_api()
         else:
             self.send_error(404)
 
@@ -207,16 +224,146 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
         else:
             self._respond_json({"ok": False, "error": "unknown action"}, 404)
 
+    # -- Playground API -----------------------------------------------------
+
+    def _handle_dbms_list(self):
+        """GET /api/dbms — return configured DBMS list and database name."""
+        dbms_list = [{"name": c.name, "host": c.host, "port": c.port}
+                     for c in self._configs]
+        self._respond_json({
+            "ok": True,
+            "database": self._database,
+            "dbms": dbms_list,
+        })
+
+    def _handle_execute_api(self):
+        """POST /api/execute — execute SQL on selected DBMS targets.
+
+        Request body: {"sql": "...", "dbms": ["tdsql", "mysql"]}
+        Response: {"ok": true, "results": {"tdsql": {...}, "mysql": {...}}}
+        """
+        import concurrent.futures
+
+        from .executor import DBConnection, check_port
+
+        try:
+            body = self._read_json()
+        except Exception:
+            self._respond_json({"ok": False, "error": "invalid JSON"}, 400)
+            return
+
+        sql_text = body.get("sql", "").strip()
+        if not sql_text:
+            self._respond_json({"ok": False, "error": "sql is required"}, 400)
+            return
+
+        requested_dbms = body.get("dbms", [])
+        configs_map = {c.name: c for c in self._configs}
+
+        if not requested_dbms:
+            requested_dbms = list(configs_map.keys())
+
+        targets = []
+        for name in requested_dbms:
+            if name in configs_map:
+                targets.append(configs_map[name])
+
+        if not targets:
+            self._respond_json(
+                {"ok": False, "error": "no valid DBMS targets"}, 400)
+            return
+
+        database = self._database
+
+        # Split SQL into individual statements (by semicolons)
+        stmts = [s.strip() for s in sql_text.split(";") if s.strip()]
+
+        def _exec_on_dbms(config):
+            """Execute all statements on one DBMS, return result dict."""
+            result = {
+                "name": config.name,
+                "statements": [],
+                "error": None,
+            }
+
+            if not check_port(config.host, config.port):
+                result["error"] = (f"Cannot reach {config.host}:"
+                                   f"{config.port}")
+                return result
+
+            db = DBConnection(config, database)
+            try:
+                db.connect()
+            except Exception as e:
+                result["error"] = f"Connection failed: {e}"
+                return result
+
+            try:
+                for sql in stmts:
+                    stmt_result = {"sql": sql, "columns": None,
+                                   "rows": None, "error": None,
+                                   "affected_rows": 0}
+                    try:
+                        db.cursor.execute(sql)
+                        if db.cursor.description:
+                            stmt_result["columns"] = [
+                                desc[0]
+                                for desc in db.cursor.description
+                            ]
+                            rows = db.cursor.fetchall()
+                            # Convert to serializable format
+                            stmt_result["rows"] = [
+                                [_format_val(c) for c in row]
+                                for row in rows
+                            ]
+                        else:
+                            stmt_result["affected_rows"] = (
+                                db.cursor.rowcount or 0)
+                    except Exception as e:
+                        stmt_result["error"] = str(e)
+
+                    result["statements"].append(stmt_result)
+            finally:
+                db.cleanup_database()
+                db.close()
+
+            return result
+
+        # Execute in parallel across all DBMS targets
+        results = {}
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(targets)) as pool:
+            futures = {pool.submit(_exec_on_dbms, c): c for c in targets}
+            for fut in concurrent.futures.as_completed(futures):
+                r = fut.result()
+                results[r["name"]] = r
+
+        self._respond_json({"ok": True, "results": results})
+
+
+def _format_val(value) -> str:
+    """Format a cell value for JSON serialisation."""
+    if value is None:
+        return "NULL"
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    return str(value)
+
 
 class ReportServer:
     """Manages a background HTTP server for viewing HTML reports."""
 
     def __init__(self, directory: str, port: int = 0, whitelist=None,
-                 buglist=None):
+                 buglist=None, configs: Optional[List[DBMSConfig]] = None,
+                 database: str = ""):
         self.directory = os.path.abspath(directory)
         self.port = port
         self.whitelist = whitelist
         self.buglist = buglist
+        self.configs = configs or []
+        self.database = database
         self._server: Optional[http.server.HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
@@ -240,16 +387,20 @@ class ReportServer:
         # Pre-generate index/whitelist/buglist pages so / redirects work
         from .reporter.history import (generate_buglist_html,
                                        generate_index_html,
+                                       generate_playground_html,
                                        generate_whitelist_html)
         generate_index_html(self.directory)
         generate_whitelist_html(self.directory)
         generate_buglist_html(self.directory)
+        generate_playground_html(self.directory)
         directory = self.directory
         wl = self.whitelist
         bl = self.buglist
-        # Inject whitelist and buglist reference into handler class
+        # Inject references into handler class
         _APIHandler._whitelist = wl
         _APIHandler._buglist = bl
+        _APIHandler._configs = self.configs
+        _APIHandler._database = self.database
         handler = lambda *a, **kw: _APIHandler(
             *a, directory=directory, **kw)
         self._server = http.server.HTTPServer(("0.0.0.0", self.port), handler)
@@ -320,7 +471,9 @@ class InteractiveSession:
             return self._report_server
         self._report_server = ReportServer(self.output_dir, self.port,
                                            whitelist=self._whitelist,
-                                           buglist=self._buglist)
+                                           buglist=self._buglist,
+                                           configs=self.configs,
+                                           database=self.database)
         try:
             self._report_server.start()
             return self._report_server

@@ -129,7 +129,12 @@ h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; }
 </head>
 <body>
 <div class="container">
-  <h1>Rosetta History</h1>
+  <div style="display:flex;align-items:center;gap:16px;margin-bottom:4px">
+    <h1>Rosetta History</h1>
+    <a href="playground.html" style="color:var(--green);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#9654; Playground</a>
+    <a href="whitelist.html" style="color:var(--yellow);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#9782; Whitelist</a>
+    <a href="buglist.html" style="color:var(--red);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#128027; Buglist</a>
+  </div>
   <div class="subtitle">Cross-DBMS SQL behavioral consistency verification</div>
 
   <div class="toolbar">
@@ -297,6 +302,7 @@ h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; }
   <div style="display:flex;align-items:center;gap:16px;margin-bottom:4px">
     <h1>&#9782; Whitelist</h1>
     <a href="index.html" class="btn-nav">&#9664; History</a>
+    <a href="playground.html" style="color:var(--green);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#9654; Playground</a>
   </div>
   <div class="subtitle">Manage whitelisted diffs — these are excluded from mismatch counts</div>
 
@@ -523,6 +529,7 @@ h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; }
   <div style="display:flex;align-items:center;gap:16px;margin-bottom:4px">
     <h1>&#128027; Buglist</h1>
     <a href="index.html" class="btn-nav">&#9664; History</a>
+    <a href="playground.html" style="color:var(--green);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#9654; Playground</a>
     <a href="whitelist.html" style="color:var(--yellow);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#9782; Whitelist</a>
   </div>
   <div class="subtitle">Manage bug-marked diffs — these still count toward the failure rate</div>
@@ -668,3 +675,462 @@ def generate_buglist_html(output_dir: str):
     with open(bl_path, "w", encoding="utf-8") as f:
         f.write(page)
     log.info("Buglist page written: %s", bl_path)
+
+
+# ---------------------------------------------------------------------------
+# SQL Playground page
+# ---------------------------------------------------------------------------
+
+_PLAYGROUND_TEMPLATE = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rosetta — SQL Playground</title>
+<style>
+:root {
+  --bg: #0d1117; --bg2: #161b22; --bg3: #21262d;
+  --fg: #c9d1d9; --fg2: #8b949e;
+  --green: #3fb950; --green-bg: #12261e;
+  --red: #f85149; --red-bg: #2d1315;
+  --blue: #58a6ff; --yellow: #d29922;
+  --orange: #db8b0b;
+  --border: #30363d; --accent: #1f6feb;
+  --diff-add: #1a4721; --diff-del: #5b2125;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  background: var(--bg); color: var(--fg); line-height: 1.5; }
+
+/* Header */
+.header { padding: 16px 24px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 16px; }
+.header h1 { font-size: 22px; }
+.btn-nav { color: var(--blue); font-size: 14px; border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 12px; background: none; text-decoration: none; }
+.btn-nav:hover { border-color: var(--blue); }
+
+/* Layout */
+.main { display: flex; flex-direction: column; height: calc(100vh - 60px); }
+
+/* Input area */
+.input-area { padding: 16px 24px; border-bottom: 1px solid var(--border);
+  background: var(--bg2); flex-shrink: 0; }
+.input-row { display: flex; gap: 12px; align-items: flex-start; }
+.sql-input { flex: 1; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 8px; color: var(--fg); padding: 12px 16px; font-size: 14px;
+  font-family: 'SF Mono', Consolas, 'Courier New', monospace;
+  min-height: 80px; max-height: 200px; resize: vertical; outline: none;
+  line-height: 1.6; }
+.sql-input:focus { border-color: var(--accent); }
+.sql-input::placeholder { color: var(--fg2); }
+.right-controls { display: flex; flex-direction: column; gap: 8px; }
+.btn-exec { background: var(--accent); color: #fff; border: none;
+  border-radius: 8px; padding: 12px 28px; font-size: 15px; font-weight: 600;
+  cursor: pointer; white-space: nowrap; }
+.btn-exec:hover { opacity: 0.9; }
+.btn-exec:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-clear { background: var(--bg3); color: var(--fg2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 16px; font-size: 13px; cursor: pointer; }
+.btn-clear:hover { color: var(--fg); border-color: var(--fg2); }
+
+/* DBMS selector */
+.dbms-selector { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap;
+  align-items: center; }
+.dbms-selector label { font-size: 13px; color: var(--fg2); margin-right: 4px; }
+.dbms-chip { display: inline-flex; align-items: center; gap: 4px;
+  background: var(--bg3); border: 1px solid var(--border); border-radius: 6px;
+  padding: 4px 10px; font-size: 13px; cursor: pointer; user-select: none;
+  transition: all 0.15s; }
+.dbms-chip.active { background: var(--accent); border-color: var(--accent);
+  color: #fff; }
+.dbms-chip:hover { border-color: var(--fg2); }
+.db-info { font-size: 12px; color: var(--fg2); margin-left: 12px; }
+
+/* Results area */
+.results-area { flex: 1; overflow: auto; padding: 16px 24px; }
+
+/* Per-statement result block */
+.stmt-block { margin-bottom: 24px; }
+.stmt-sql { font-family: 'SF Mono', Consolas, monospace; font-size: 13px;
+  color: var(--blue); background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 8px 14px; margin-bottom: 10px;
+  word-break: break-all; }
+.stmt-label { font-size: 12px; color: var(--fg2); margin-bottom: 4px; }
+
+/* Grid of DBMS result panels */
+.results-grid { display: grid; gap: 12px; }
+.result-panel { background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden; }
+.result-panel.has-diff { border-color: var(--red); }
+.result-panel-header { padding: 8px 14px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  background: var(--bg3); }
+.result-panel-name { font-weight: 600; font-size: 14px; }
+.result-panel-meta { font-size: 12px; color: var(--fg2); }
+.result-panel-body { padding: 0; overflow-x: auto; }
+
+/* Data table */
+.data-table { width: 100%; border-collapse: collapse; font-size: 13px;
+  font-family: 'SF Mono', Consolas, monospace; }
+.data-table th { background: var(--bg3); padding: 6px 12px; text-align: left;
+  font-weight: 600; color: var(--fg2); border-bottom: 1px solid var(--border);
+  white-space: nowrap; }
+.data-table td { padding: 5px 12px; border-bottom: 1px solid var(--border);
+  white-space: nowrap; }
+.data-table tr:last-child td { border-bottom: none; }
+.cell-diff { background: var(--diff-del); border-radius: 3px; padding: 1px 4px; }
+.cell-match { }
+
+/* Error / info states */
+.result-error { color: var(--red); padding: 12px 14px; font-size: 13px;
+  font-family: 'SF Mono', Consolas, monospace; }
+.result-ok { color: var(--green); padding: 12px 14px; font-size: 13px; }
+.result-empty { color: var(--fg2); padding: 12px 14px; font-size: 13px; }
+
+/* Diff summary badge */
+.diff-badge { display: inline-block; padding: 2px 8px; border-radius: 4px;
+  font-size: 11px; font-weight: 600; }
+.diff-badge-match { background: var(--green-bg); color: var(--green); }
+.diff-badge-diff { background: var(--red-bg); color: var(--red); }
+
+/* Loading */
+.loading { text-align: center; padding: 40px; color: var(--fg2); }
+.loading .spinner { display: inline-block; width: 24px; height: 24px;
+  border: 3px solid var(--border); border-top-color: var(--accent);
+  border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 10px;
+  vertical-align: middle; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Empty state */
+.empty-state { text-align: center; padding: 80px 20px; color: var(--fg2); }
+.empty-state h2 { color: var(--fg); margin-bottom: 8px; font-size: 20px; }
+.empty-state p { font-size: 14px; }
+.empty-state kbd { background: var(--bg3); border: 1px solid var(--border);
+  border-radius: 4px; padding: 2px 6px; font-size: 12px; }
+
+/* Toast */
+.toast { position: fixed; bottom: 24px; right: 24px; padding: 12px 20px;
+  border-radius: 8px; font-size: 14px; color: #fff; z-index: 9999;
+  transition: opacity 0.3s; pointer-events: none; }
+.toast-error { background: var(--red); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>&#9654; SQL Playground</h1>
+  <a href="index.html" class="btn-nav">&#9664; History</a>
+  <a href="whitelist.html" class="btn-nav">&#9782; Whitelist</a>
+  <a href="buglist.html" class="btn-nav">&#128027; Buglist</a>
+</div>
+
+<div class="main">
+  <div class="input-area">
+    <div class="input-row">
+      <textarea class="sql-input" id="sql-input"
+        placeholder="Enter SQL statements here... (separate multiple with ;)&#10;&#10;Examples:&#10;  SELECT 1+1;&#10;  SHOW DATABASES;&#10;  CREATE TABLE t(id INT); INSERT INTO t VALUES(1); SELECT * FROM t;"
+        spellcheck="false"></textarea>
+      <div class="right-controls">
+        <button class="btn-exec" id="btn-exec" onclick="executeSql()">
+          &#9654; Execute
+        </button>
+        <button class="btn-clear" onclick="clearResults()">Clear</button>
+      </div>
+    </div>
+    <div class="dbms-selector" id="dbms-selector">
+      <label>DBMS targets:</label>
+      <!-- chips populated by JS -->
+    </div>
+  </div>
+
+  <div class="results-area" id="results-area">
+    <div class="empty-state">
+      <h2>Ready to execute</h2>
+      <p>Enter SQL above and click <b>Execute</b> or press <kbd>Ctrl+Enter</kbd></p>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" style="opacity:0"></div>
+
+<script>
+let DBMS_LIST = [];
+let ACTIVE_DBMS = new Set();
+let DATABASE = '';
+
+function showToast(msg, type) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast toast-' + (type || 'error');
+  t.style.opacity = '1';
+  setTimeout(() => { t.style.opacity = '0'; }, 3000);
+}
+
+function esc(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function apiCall(method, path, body) {
+  const port = location.port || '80';
+  const base = location.protocol + '//' + location.hostname + ':' + port;
+  const opts = { method, headers: {'Content-Type': 'application/json'} };
+  if (body) opts.body = JSON.stringify(body);
+  return fetch(base + path, opts).then(r => r.json());
+}
+
+// ---- DBMS chips ----
+function loadDbms() {
+  apiCall('GET', '/api/dbms').then(r => {
+    if (!r.ok) { showToast('Failed to load DBMS list'); return; }
+    DBMS_LIST = r.dbms || [];
+    DATABASE = r.database || '';
+    ACTIVE_DBMS = new Set(DBMS_LIST.map(d => d.name));
+    renderChips();
+  }).catch(e => showToast('API error: ' + e.message));
+}
+
+function renderChips() {
+  const container = document.getElementById('dbms-selector');
+  container.innerHTML = '<label>DBMS targets:</label>';
+  DBMS_LIST.forEach(d => {
+    const chip = document.createElement('span');
+    chip.className = 'dbms-chip' + (ACTIVE_DBMS.has(d.name) ? ' active' : '');
+    chip.textContent = d.name;
+    chip.title = d.host + ':' + d.port;
+    chip.onclick = () => {
+      if (ACTIVE_DBMS.has(d.name)) ACTIVE_DBMS.delete(d.name);
+      else ACTIVE_DBMS.add(d.name);
+      renderChips();
+    };
+    container.appendChild(chip);
+  });
+  if (DATABASE) {
+    const info = document.createElement('span');
+    info.className = 'db-info';
+    info.textContent = 'Database: ' + DATABASE;
+    container.appendChild(info);
+  }
+}
+
+// ---- Execute ----
+function executeSql() {
+  const sql = document.getElementById('sql-input').value.trim();
+  if (!sql) return;
+  if (ACTIVE_DBMS.size === 0) { showToast('Select at least one DBMS'); return; }
+
+  const btn = document.getElementById('btn-exec');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner" style="width:16px;height:16px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:6px"></span>Running...';
+
+  const area = document.getElementById('results-area');
+  area.innerHTML = '<div class="loading"><span class="spinner"></span>Executing on ' +
+    ACTIVE_DBMS.size + ' DBMS target(s)...</div>';
+
+  apiCall('POST', '/api/execute', {
+    sql: sql,
+    dbms: [...ACTIVE_DBMS]
+  }).then(r => {
+    btn.disabled = false;
+    btn.innerHTML = '&#9654; Execute';
+    if (!r.ok) {
+      area.innerHTML = '<div class="result-error">' + esc(r.error) + '</div>';
+      return;
+    }
+    renderResults(r.results, sql);
+  }).catch(e => {
+    btn.disabled = false;
+    btn.innerHTML = '&#9654; Execute';
+    showToast('Request failed: ' + e.message);
+  });
+}
+
+// ---- Render results ----
+function renderResults(results, originalSql) {
+  const area = document.getElementById('results-area');
+  area.innerHTML = '';
+
+  const dbmsNames = [...ACTIVE_DBMS].filter(n => results[n]);
+  if (dbmsNames.length === 0) {
+    area.innerHTML = '<div class="empty-state"><p>No results returned.</p></div>';
+    return;
+  }
+
+  // Check for connection-level errors
+  const connErrors = dbmsNames.filter(n => results[n].error);
+  const okNames = dbmsNames.filter(n => !results[n].error);
+
+  // Get max statement count
+  const maxStmts = Math.max(...dbmsNames.map(n => (results[n].statements || []).length), 0);
+
+  // Grid columns
+  const gridCols = dbmsNames.length <= 2 ? dbmsNames.length :
+                   dbmsNames.length <= 4 ? 2 : 3;
+
+  // Render each statement
+  const stmts = originalSql.split(';').filter(s => s.trim());
+  for (let si = 0; si < maxStmts; si++) {
+    const block = document.createElement('div');
+    block.className = 'stmt-block';
+
+    // SQL label
+    const sqlDiv = document.createElement('div');
+    sqlDiv.className = 'stmt-sql';
+    sqlDiv.innerHTML = (maxStmts > 1 ? '<span class="stmt-label">Statement ' + (si+1) + '/' + maxStmts + '</span> ' : '') +
+      esc(stmts[si] || '');
+    block.appendChild(sqlDiv);
+
+    // Compute diff info for this statement across all DBMS
+    const stmtResults = {};
+    dbmsNames.forEach(n => {
+      const r = results[n];
+      if (r.error) {
+        stmtResults[n] = { type: 'conn_error', error: r.error };
+      } else if (r.statements && r.statements[si]) {
+        stmtResults[n] = r.statements[si];
+      } else {
+        stmtResults[n] = { type: 'missing' };
+      }
+    });
+
+    // Determine a reference result for diff (first OK result)
+    const refName = okNames[0];
+    const refResult = refName ? stmtResults[refName] : null;
+
+    // Grid
+    const grid = document.createElement('div');
+    grid.className = 'results-grid';
+    grid.style.gridTemplateColumns = 'repeat(' + gridCols + ', 1fr)';
+
+    dbmsNames.forEach(name => {
+      const sr = stmtResults[name];
+      const panel = document.createElement('div');
+      panel.className = 'result-panel';
+
+      const isDiff = refResult && name !== refName && hasDiff(refResult, sr);
+      if (isDiff) panel.classList.add('has-diff');
+
+      // Header
+      const header = document.createElement('div');
+      header.className = 'result-panel-header';
+      let badge = '';
+      if (refResult && name !== refName) {
+        badge = isDiff
+          ? ' <span class="diff-badge diff-badge-diff">DIFF</span>'
+          : ' <span class="diff-badge diff-badge-match">MATCH</span>';
+      }
+      header.innerHTML = '<span class="result-panel-name">' + esc(name) + badge + '</span>' +
+        (sr.columns ? '<span class="result-panel-meta">' + (sr.rows ? sr.rows.length : 0) + ' row(s)</span>' : '');
+      panel.appendChild(header);
+
+      // Body
+      const body = document.createElement('div');
+      body.className = 'result-panel-body';
+
+      if (sr.type === 'conn_error') {
+        body.innerHTML = '<div class="result-error">Connection error: ' + esc(sr.error) + '</div>';
+      } else if (sr.type === 'missing') {
+        body.innerHTML = '<div class="result-empty">No result</div>';
+      } else if (sr.error) {
+        body.innerHTML = '<div class="result-error">' + esc(sr.error) + '</div>';
+      } else if (sr.columns && sr.rows) {
+        const table = buildTable(sr, refResult && name !== refName ? refResult : null);
+        body.appendChild(table);
+      } else {
+        body.innerHTML = '<div class="result-ok">OK — ' + (sr.affected_rows || 0) + ' row(s) affected</div>';
+      }
+
+      panel.appendChild(body);
+      grid.appendChild(panel);
+    });
+
+    block.appendChild(grid);
+    area.appendChild(block);
+  }
+}
+
+function hasDiff(a, b) {
+  if (!a || !b) return true;
+  if (a.error && !b.error) return true;
+  if (!a.error && b.error) return true;
+  if (a.error && b.error) return a.error !== b.error;
+  // Compare columns
+  if (JSON.stringify(a.columns) !== JSON.stringify(b.columns)) return true;
+  // Compare rows
+  if (JSON.stringify(a.rows) !== JSON.stringify(b.rows)) return true;
+  // Compare affected_rows for non-SELECT
+  if (!a.columns && !b.columns && a.affected_rows !== b.affected_rows) return true;
+  return false;
+}
+
+function buildTable(sr, refSr) {
+  const table = document.createElement('table');
+  table.className = 'data-table';
+
+  // Header
+  const thead = document.createElement('thead');
+  const hRow = document.createElement('tr');
+  (sr.columns || []).forEach((col, ci) => {
+    const th = document.createElement('th');
+    const refCol = refSr && refSr.columns ? refSr.columns[ci] : col;
+    if (refSr && col !== refCol) {
+      th.innerHTML = '<span class="cell-diff">' + esc(col) + '</span>';
+    } else {
+      th.textContent = col;
+    }
+    hRow.appendChild(th);
+  });
+  thead.appendChild(hRow);
+  table.appendChild(thead);
+
+  // Body
+  const tbody = document.createElement('tbody');
+  (sr.rows || []).forEach((row, ri) => {
+    const tr = document.createElement('tr');
+    row.forEach((cell, ci) => {
+      const td = document.createElement('td');
+      const refRow = refSr && refSr.rows ? refSr.rows[ri] : null;
+      const refCell = refRow ? refRow[ci] : cell;
+      if (refSr && String(cell) !== String(refCell)) {
+        td.innerHTML = '<span class="cell-diff">' + esc(cell) + '</span>';
+      } else {
+        td.textContent = cell;
+      }
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  return table;
+}
+
+// ---- Clear ----
+function clearResults() {
+  document.getElementById('results-area').innerHTML =
+    '<div class="empty-state"><h2>Ready to execute</h2>' +
+    '<p>Enter SQL above and click <b>Execute</b> or press <kbd>Ctrl+Enter</kbd></p></div>';
+}
+
+// ---- Keyboard shortcut ----
+document.getElementById('sql-input').addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+    e.preventDefault();
+    executeSql();
+  }
+});
+
+// ---- Init ----
+loadDbms();
+</script>
+</body>
+</html>"""
+
+
+def generate_playground_html(output_dir: str):
+    """Generate SQL Playground page."""
+    page = _PLAYGROUND_TEMPLATE
+    pg_path = os.path.join(output_dir, "playground.html")
+    with open(pg_path, "w", encoding="utf-8") as f:
+        f.write(page)
+    log.info("Playground page written: %s", pg_path)

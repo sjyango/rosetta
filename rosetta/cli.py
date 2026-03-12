@@ -507,7 +507,8 @@ def main(argv=None):
             relative_html = os.path.join(
                 os.path.basename(run_dir), html_file)
             _serve_report(output_dir, relative_html, args.port,
-                          whitelist=whitelist, buglist=buglist)
+                          whitelist=whitelist, buglist=buglist,
+                          configs=configs, database=args.database)
         else:
             console.print(f"[yellow]HTML report not found: {html_path}[/yellow]")
 
@@ -567,18 +568,25 @@ def _find_free_port() -> int:
 
 
 def _serve_report(directory: str, html_file: str, port: int = 0,
-                  whitelist=None, buglist=None):
+                  whitelist=None, buglist=None, configs=None,
+                  database: str = ""):
     """Start a local HTTP server and print the URL for the HTML report."""
     if port == 0:
         port = _find_free_port()
 
     abs_dir = os.path.abspath(directory)
 
+    # Pre-generate playground page
+    from .reporter.history import generate_playground_html
+    generate_playground_html(abs_dir)
+
     # Use the API-capable handler from interactive module if whitelist given
     if whitelist is not None:
         from .interactive import _APIHandler
         _APIHandler._whitelist = whitelist
         _APIHandler._buglist = buglist
+        _APIHandler._configs = configs or []
+        _APIHandler._database = database
         handler = lambda *a, **kw: _APIHandler(
             *a, directory=abs_dir, **kw)
     else:
