@@ -697,129 +697,192 @@ _PLAYGROUND_TEMPLATE = r"""<!DOCTYPE html>
   --orange: #db8b0b;
   --border: #30363d; --accent: #1f6feb;
   --diff-add: #1a4721; --diff-del: #5b2125;
+  --glow: rgba(31,111,235,0.25);
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
   background: var(--bg); color: var(--fg); line-height: 1.5; }
 
+/* Scrollbar — dark theme */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--bg); border-radius: 6px; }
+::-webkit-scrollbar-thumb { background: var(--bg3); border-radius: 6px;
+  border: 2px solid var(--bg); }
+::-webkit-scrollbar-thumb:hover { background: var(--fg2); }
+::-webkit-scrollbar-corner { background: var(--bg); }
+.sql-input::-webkit-scrollbar { width: 8px; }
+.sql-input::-webkit-scrollbar-track { background: var(--bg); border-radius: 0 10px 10px 0; }
+.sql-input::-webkit-scrollbar-thumb { background: var(--bg3); border-radius: 6px;
+  border: 2px solid var(--bg); }
+.sql-input::-webkit-scrollbar-thumb:hover { background: var(--fg2); }
+/* Firefox scrollbar */
+* { scrollbar-width: thin; scrollbar-color: var(--bg3) var(--bg); }
+
 /* Header */
-.header { padding: 16px 24px; border-bottom: 1px solid var(--border);
-  display: flex; align-items: center; gap: 16px; }
-.header h1 { font-size: 22px; }
-.btn-nav { color: var(--blue); font-size: 14px; border: 1px solid var(--border);
-  border-radius: 6px; padding: 4px 12px; background: none; text-decoration: none; }
-.btn-nav:hover { border-color: var(--blue); }
+.header { padding: 14px 28px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 16px;
+  background: linear-gradient(180deg, var(--bg2) 0%, var(--bg) 100%); }
+.header h1 { font-size: 22px; display: flex; align-items: center; gap: 8px; }
+.header h1 .icon { font-size: 18px; color: var(--green); }
+.btn-nav { color: var(--fg2); font-size: 13px; border: 1px solid var(--border);
+  border-radius: 6px; padding: 5px 14px; background: var(--bg3); text-decoration: none;
+  transition: all 0.15s; }
+.btn-nav:hover { border-color: var(--blue); color: var(--blue); background: var(--bg2); }
 
 /* Layout */
-.main { display: flex; flex-direction: column; height: calc(100vh - 60px); }
+.main { display: flex; flex-direction: column; height: calc(100vh - 56px); }
 
 /* Input area */
-.input-area { padding: 16px 24px; border-bottom: 1px solid var(--border);
+.input-area { padding: 20px 28px; border-bottom: 1px solid var(--border);
   background: var(--bg2); flex-shrink: 0; }
-.input-row { display: flex; gap: 12px; align-items: flex-start; }
+.input-label { font-size: 12px; color: var(--fg2); text-transform: uppercase;
+  letter-spacing: 0.5px; font-weight: 600; margin-bottom: 8px; display: flex;
+  align-items: center; gap: 6px; }
+.input-label .hint { text-transform: none; font-weight: 400; letter-spacing: 0;
+  color: var(--fg2); opacity: 0.7; }
+.input-row { display: flex; gap: 14px; align-items: stretch; }
 .sql-input { flex: 1; background: var(--bg); border: 1px solid var(--border);
-  border-radius: 8px; color: var(--fg); padding: 12px 16px; font-size: 14px;
+  border-radius: 10px; color: var(--fg); padding: 16px 20px; font-size: 14px;
   font-family: 'SF Mono', Consolas, 'Courier New', monospace;
-  min-height: 80px; max-height: 200px; resize: vertical; outline: none;
-  line-height: 1.6; }
-.sql-input:focus { border-color: var(--accent); }
-.sql-input::placeholder { color: var(--fg2); }
-.right-controls { display: flex; flex-direction: column; gap: 8px; }
-.btn-exec { background: var(--accent); color: #fff; border: none;
-  border-radius: 8px; padding: 12px 28px; font-size: 15px; font-weight: 600;
-  cursor: pointer; white-space: nowrap; }
-.btn-exec:hover { opacity: 0.9; }
-.btn-exec:disabled { opacity: 0.5; cursor: not-allowed; }
+  min-height: 160px; max-height: 400px; resize: vertical; outline: none;
+  line-height: 1.7; transition: border-color 0.2s, box-shadow 0.2s;
+  tab-size: 2; }
+.sql-input:focus { border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--glow); }
+.sql-input::placeholder { color: var(--fg2); opacity: 0.6; }
+.right-controls { display: flex; flex-direction: column; gap: 10px;
+  justify-content: flex-start; min-width: 120px; }
+.btn-exec { background: linear-gradient(135deg, var(--accent), #388bfd);
+  color: #fff; border: none; border-radius: 10px; padding: 14px 28px;
+  font-size: 15px; font-weight: 600; cursor: pointer; white-space: nowrap;
+  transition: all 0.2s; box-shadow: 0 2px 8px rgba(31,111,235,0.3); }
+.btn-exec:hover { transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(31,111,235,0.4); }
+.btn-exec:active { transform: translateY(0); }
+.btn-exec:disabled { opacity: 0.5; cursor: not-allowed; transform: none;
+  box-shadow: none; }
 .btn-clear { background: var(--bg3); color: var(--fg2); border: 1px solid var(--border);
-  border-radius: 6px; padding: 6px 16px; font-size: 13px; cursor: pointer; }
-.btn-clear:hover { color: var(--fg); border-color: var(--fg2); }
+  border-radius: 8px; padding: 8px 16px; font-size: 13px; cursor: pointer;
+  transition: all 0.15s; }
+.btn-clear:hover { color: var(--fg); border-color: var(--fg2);
+  background: var(--bg); }
+.shortcut-hint { font-size: 11px; color: var(--fg2); text-align: center;
+  opacity: 0.7; }
+.shortcut-hint kbd { background: var(--bg3); border: 1px solid var(--border);
+  border-radius: 3px; padding: 1px 5px; font-size: 10px;
+  font-family: inherit; }
 
 /* DBMS selector */
-.dbms-selector { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap;
+.dbms-selector { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap;
   align-items: center; }
-.dbms-selector label { font-size: 13px; color: var(--fg2); margin-right: 4px; }
-.dbms-chip { display: inline-flex; align-items: center; gap: 4px;
-  background: var(--bg3); border: 1px solid var(--border); border-radius: 6px;
-  padding: 4px 10px; font-size: 13px; cursor: pointer; user-select: none;
-  transition: all 0.15s; }
-.dbms-chip.active { background: var(--accent); border-color: var(--accent);
+.dbms-selector label { font-size: 12px; color: var(--fg2); margin-right: 4px;
+  text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+.dbms-chip { display: inline-flex; align-items: center; gap: 6px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 6px 14px; font-size: 13px; cursor: pointer; user-select: none;
+  transition: all 0.2s; font-weight: 500; }
+.dbms-chip .cb { display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border: 2px solid var(--border); border-radius: 4px;
+  background: var(--bg); flex-shrink: 0; transition: all 0.15s;
+  font-size: 10px; color: transparent; line-height: 1; }
+.dbms-chip.active { background: rgba(31,111,235,0.12); border-color: var(--accent);
+  color: var(--blue); }
+.dbms-chip.active .cb { background: var(--accent); border-color: var(--accent);
   color: #fff; }
-.dbms-chip:hover { border-color: var(--fg2); }
-.db-info { font-size: 12px; color: var(--fg2); margin-left: 12px; }
+.dbms-chip:hover { border-color: var(--accent); }
+.dbms-chip .host-info { font-size: 11px; color: var(--fg2); margin-left: 2px; }
+.dbms-actions { display: inline-flex; gap: 4px; margin-left: 4px; }
+.dbms-actions button { background: none; border: 1px solid var(--border);
+  border-radius: 6px; color: var(--fg2); font-size: 11px; padding: 3px 10px;
+  cursor: pointer; transition: all 0.15s; }
+.dbms-actions button:hover { color: var(--fg); border-color: var(--fg2); }
+.dbms-count { font-size: 11px; color: var(--fg2); margin-left: 8px;
+  background: var(--bg3); padding: 3px 10px; border-radius: 10px; }
+.db-info { font-size: 12px; color: var(--fg2); margin-left: 8px;
+  background: var(--bg3); padding: 4px 10px; border-radius: 12px; }
 
 /* Results area */
-.results-area { flex: 1; overflow: auto; padding: 16px 24px; }
+.results-area { flex: 1; overflow: auto; padding: 20px 28px; }
 
 /* Per-statement result block */
-.stmt-block { margin-bottom: 24px; }
+.stmt-block { margin-bottom: 28px; }
 .stmt-sql { font-family: 'SF Mono', Consolas, monospace; font-size: 13px;
   color: var(--blue); background: var(--bg2); border: 1px solid var(--border);
-  border-radius: 6px; padding: 8px 14px; margin-bottom: 10px;
-  word-break: break-all; }
-.stmt-label { font-size: 12px; color: var(--fg2); margin-bottom: 4px; }
+  border-radius: 8px; padding: 10px 16px; margin-bottom: 12px;
+  word-break: break-all; border-left: 3px solid var(--accent); }
+.stmt-label { font-size: 12px; color: var(--fg2); margin-bottom: 4px;
+  font-weight: 600; }
 
-/* Grid of DBMS result panels */
-.results-grid { display: grid; gap: 12px; }
+/* Grid of DBMS result panels — always same row */
+.results-grid { display: flex; gap: 14px; overflow-x: auto; }
+.results-grid > .result-panel { flex: 1 1 0; min-width: 280px; }
 .result-panel { background: var(--bg2); border: 1px solid var(--border);
-  border-radius: 8px; overflow: hidden; }
-.result-panel.has-diff { border-color: var(--red); }
-.result-panel-header { padding: 8px 14px; border-bottom: 1px solid var(--border);
+  border-radius: 10px; overflow: hidden; transition: border-color 0.2s; }
+.result-panel:hover { border-color: var(--fg2); }
+.result-panel.has-diff { border-color: var(--red);
+  box-shadow: 0 0 0 1px var(--red-bg); }
+.result-panel-header { padding: 10px 16px; border-bottom: 1px solid var(--border);
   display: flex; align-items: center; justify-content: space-between;
   background: var(--bg3); }
-.result-panel-name { font-weight: 600; font-size: 14px; }
+.result-panel-name { font-weight: 600; font-size: 14px;
+  display: flex; align-items: center; gap: 8px; }
 .result-panel-meta { font-size: 12px; color: var(--fg2); }
 .result-panel-body { padding: 0; overflow-x: auto; }
 
 /* Data table */
 .data-table { width: 100%; border-collapse: collapse; font-size: 13px;
   font-family: 'SF Mono', Consolas, monospace; }
-.data-table th { background: var(--bg3); padding: 6px 12px; text-align: left;
+.data-table th { background: var(--bg3); padding: 8px 14px; text-align: left;
   font-weight: 600; color: var(--fg2); border-bottom: 1px solid var(--border);
   white-space: nowrap; }
-.data-table td { padding: 5px 12px; border-bottom: 1px solid var(--border);
+.data-table td { padding: 6px 14px; border-bottom: 1px solid var(--border);
   white-space: nowrap; }
 .data-table tr:last-child td { border-bottom: none; }
-.cell-diff { background: var(--diff-del); border-radius: 3px; padding: 1px 4px; }
+.data-table tr:hover td { background: rgba(255,255,255,0.02); }
+.cell-diff { background: var(--diff-del); border-radius: 3px; padding: 1px 5px; }
 .cell-match { }
 
 /* Error / info states */
-.result-error { color: var(--red); padding: 12px 14px; font-size: 13px;
+.result-error { color: var(--red); padding: 14px 16px; font-size: 13px;
   font-family: 'SF Mono', Consolas, monospace; }
-.result-ok { color: var(--green); padding: 12px 14px; font-size: 13px; }
-.result-empty { color: var(--fg2); padding: 12px 14px; font-size: 13px; }
+.result-ok { color: var(--green); padding: 14px 16px; font-size: 13px; }
+.result-empty { color: var(--fg2); padding: 14px 16px; font-size: 13px; }
 
 /* Diff summary badge */
-.diff-badge { display: inline-block; padding: 2px 8px; border-radius: 4px;
+.diff-badge { display: inline-block; padding: 2px 10px; border-radius: 12px;
   font-size: 11px; font-weight: 600; }
 .diff-badge-match { background: var(--green-bg); color: var(--green); }
 .diff-badge-diff { background: var(--red-bg); color: var(--red); }
 
 /* Loading */
-.loading { text-align: center; padding: 40px; color: var(--fg2); }
-.loading .spinner { display: inline-block; width: 24px; height: 24px;
+.loading { text-align: center; padding: 60px; color: var(--fg2); font-size: 15px; }
+.loading .spinner { display: inline-block; width: 28px; height: 28px;
   border: 3px solid var(--border); border-top-color: var(--accent);
-  border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 10px;
+  border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 12px;
   vertical-align: middle; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* Empty state */
-.empty-state { text-align: center; padding: 80px 20px; color: var(--fg2); }
-.empty-state h2 { color: var(--fg); margin-bottom: 8px; font-size: 20px; }
-.empty-state p { font-size: 14px; }
+.empty-state { text-align: center; padding: 100px 20px; color: var(--fg2); }
+.empty-state .icon-big { font-size: 48px; margin-bottom: 16px; opacity: 0.4; }
+.empty-state h2 { color: var(--fg); margin-bottom: 10px; font-size: 22px;
+  font-weight: 600; }
+.empty-state p { font-size: 14px; line-height: 1.8; }
 .empty-state kbd { background: var(--bg3); border: 1px solid var(--border);
-  border-radius: 4px; padding: 2px 6px; font-size: 12px; }
+  border-radius: 4px; padding: 2px 8px; font-size: 12px; }
 
 /* Toast */
 .toast { position: fixed; bottom: 24px; right: 24px; padding: 12px 20px;
-  border-radius: 8px; font-size: 14px; color: #fff; z-index: 9999;
-  transition: opacity 0.3s; pointer-events: none; }
+  border-radius: 10px; font-size: 14px; color: #fff; z-index: 9999;
+  transition: opacity 0.3s; pointer-events: none;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.4); }
 .toast-error { background: var(--red); }
 </style>
 </head>
 <body>
 
 <div class="header">
-  <h1>&#9654; SQL Playground</h1>
+  <h1><span class="icon">&#9654;</span> SQL Playground</h1>
   <a href="index.html" class="btn-nav">&#9664; History</a>
   <a href="whitelist.html" class="btn-nav">&#9782; Whitelist</a>
   <a href="buglist.html" class="btn-nav">&#128027; Buglist</a>
@@ -827,25 +890,28 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 
 <div class="main">
   <div class="input-area">
+    <div class="input-label">SQL Editor <span class="hint">— enter one or more statements separated by ;</span></div>
     <div class="input-row">
       <textarea class="sql-input" id="sql-input"
-        placeholder="Enter SQL statements here... (separate multiple with ;)&#10;&#10;Examples:&#10;  SELECT 1+1;&#10;  SHOW DATABASES;&#10;  CREATE TABLE t(id INT); INSERT INTO t VALUES(1); SELECT * FROM t;"
+        placeholder="SELECT 1 + 1;&#10;SHOW DATABASES;&#10;CREATE TABLE t(id INT);&#10;INSERT INTO t VALUES(1);&#10;SELECT * FROM t;"
         spellcheck="false"></textarea>
       <div class="right-controls">
         <button class="btn-exec" id="btn-exec" onclick="executeSql()">
           &#9654; Execute
         </button>
         <button class="btn-clear" onclick="clearResults()">Clear</button>
+        <span class="shortcut-hint"><kbd>Ctrl</kbd>+<kbd>Enter</kbd></span>
       </div>
     </div>
     <div class="dbms-selector" id="dbms-selector">
-      <label>DBMS targets:</label>
+      <label>Targets:</label>
       <!-- chips populated by JS -->
     </div>
   </div>
 
   <div class="results-area" id="results-area">
     <div class="empty-state">
+      <div class="icon-big">&#128640;</div>
       <h2>Ready to execute</h2>
       <p>Enter SQL above and click <b>Execute</b> or press <kbd>Ctrl+Enter</kbd></p>
     </div>
@@ -886,18 +952,19 @@ function loadDbms() {
     if (!r.ok) { showToast('Failed to load DBMS list'); return; }
     DBMS_LIST = r.dbms || [];
     DATABASE = r.database || '';
-    ACTIVE_DBMS = new Set(DBMS_LIST.map(d => d.name));
+    ACTIVE_DBMS = new Set(DBMS_LIST.filter(d => d.active).map(d => d.name));
     renderChips();
   }).catch(e => showToast('API error: ' + e.message));
 }
 
 function renderChips() {
   const container = document.getElementById('dbms-selector');
-  container.innerHTML = '<label>DBMS targets:</label>';
+  container.innerHTML = '<label>Targets:</label>';
   DBMS_LIST.forEach(d => {
     const chip = document.createElement('span');
     chip.className = 'dbms-chip' + (ACTIVE_DBMS.has(d.name) ? ' active' : '');
-    chip.textContent = d.name;
+    chip.innerHTML = '<span class="cb">' + (ACTIVE_DBMS.has(d.name) ? '&#10003;' : '') + '</span>' +
+      esc(d.name) + '<span class="host-info">' + esc(d.host + ':' + d.port) + '</span>';
     chip.title = d.host + ':' + d.port;
     chip.onclick = () => {
       if (ACTIVE_DBMS.has(d.name)) ACTIVE_DBMS.delete(d.name);
@@ -906,10 +973,27 @@ function renderChips() {
     };
     container.appendChild(chip);
   });
+  if (DBMS_LIST.length > 1) {
+    const actions = document.createElement('span');
+    actions.className = 'dbms-actions';
+    const btnAll = document.createElement('button');
+    btnAll.textContent = 'All';
+    btnAll.onclick = () => { ACTIVE_DBMS = new Set(DBMS_LIST.map(d => d.name)); renderChips(); };
+    const btnNone = document.createElement('button');
+    btnNone.textContent = 'None';
+    btnNone.onclick = () => { ACTIVE_DBMS.clear(); renderChips(); };
+    actions.appendChild(btnAll);
+    actions.appendChild(btnNone);
+    container.appendChild(actions);
+  }
+  const count = document.createElement('span');
+  count.className = 'dbms-count';
+  count.textContent = ACTIVE_DBMS.size + ' / ' + DBMS_LIST.length + ' selected';
+  container.appendChild(count);
   if (DATABASE) {
     const info = document.createElement('span');
     info.className = 'db-info';
-    info.textContent = 'Database: ' + DATABASE;
+    info.textContent = 'DB: ' + DATABASE;
     container.appendChild(info);
   }
 }
@@ -964,10 +1048,6 @@ function renderResults(results, originalSql) {
   // Get max statement count
   const maxStmts = Math.max(...dbmsNames.map(n => (results[n].statements || []).length), 0);
 
-  // Grid columns
-  const gridCols = dbmsNames.length <= 2 ? dbmsNames.length :
-                   dbmsNames.length <= 4 ? 2 : 3;
-
   // Render each statement
   const stmts = originalSql.split(';').filter(s => s.trim());
   for (let si = 0; si < maxStmts; si++) {
@@ -1001,7 +1081,6 @@ function renderResults(results, originalSql) {
     // Grid
     const grid = document.createElement('div');
     grid.className = 'results-grid';
-    grid.style.gridTemplateColumns = 'repeat(' + gridCols + ', 1fr)';
 
     dbmsNames.forEach(name => {
       const sr = stmtResults[name];

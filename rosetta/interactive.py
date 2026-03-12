@@ -81,6 +81,7 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
     _whitelist = None  # type: ignore
     _buglist = None    # type: ignore
     _configs: List[DBMSConfig] = []
+    _all_configs: List[DBMSConfig] = []
     _database: str = ""
 
     def log_message(self, format, *args):  # noqa: A002
@@ -227,9 +228,11 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
     # -- Playground API -----------------------------------------------------
 
     def _handle_dbms_list(self):
-        """GET /api/dbms — return configured DBMS list and database name."""
-        dbms_list = [{"name": c.name, "host": c.host, "port": c.port}
-                     for c in self._configs]
+        """GET /api/dbms — return all DBMS from config with active flags."""
+        active_names = {c.name for c in self._configs}
+        dbms_list = [{"name": c.name, "host": c.host, "port": c.port,
+                      "active": c.name in active_names}
+                     for c in self._all_configs]
         self._respond_json({
             "ok": True,
             "database": self._database,
@@ -258,7 +261,7 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         requested_dbms = body.get("dbms", [])
-        configs_map = {c.name: c for c in self._configs}
+        configs_map = {c.name: c for c in self._all_configs}
 
         if not requested_dbms:
             requested_dbms = list(configs_map.keys())
@@ -357,12 +360,14 @@ class ReportServer:
 
     def __init__(self, directory: str, port: int = 0, whitelist=None,
                  buglist=None, configs: Optional[List[DBMSConfig]] = None,
+                 all_configs: Optional[List[DBMSConfig]] = None,
                  database: str = ""):
         self.directory = os.path.abspath(directory)
         self.port = port
         self.whitelist = whitelist
         self.buglist = buglist
         self.configs = configs or []
+        self.all_configs = all_configs or self.configs
         self.database = database
         self._server: Optional[http.server.HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -400,6 +405,7 @@ class ReportServer:
         _APIHandler._whitelist = wl
         _APIHandler._buglist = bl
         _APIHandler._configs = self.configs
+        _APIHandler._all_configs = self.all_configs
         _APIHandler._database = self.database
         handler = lambda *a, **kw: _APIHandler(
             *a, directory=directory, **kw)
@@ -442,8 +448,10 @@ class InteractiveSession:
                  skip_analyze: bool = False,
                  skip_show_create: bool = False,
                  output_format: str = "all",
-                 serve: bool = False, port: int = 19527):
+                 serve: bool = False, port: int = 19527,
+                 all_configs: Optional[List[DBMSConfig]] = None):
         self.configs = configs
+        self.all_configs = all_configs or configs
         self.output_dir = os.path.abspath(output_dir)
         self.database = database
         self.baseline = baseline
@@ -473,6 +481,7 @@ class InteractiveSession:
                                            whitelist=self._whitelist,
                                            buglist=self._buglist,
                                            configs=self.configs,
+                                           all_configs=self.all_configs,
                                            database=self.database)
         try:
             self._report_server.start()

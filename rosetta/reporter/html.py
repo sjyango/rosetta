@@ -228,6 +228,7 @@ tr:hover { background: var(--bg3); }
   <div style="display:flex;align-items:center;gap:16px;margin-bottom:4px">
     <h1>Rosetta Report</h1>
     <a href="../index.html" style="color:var(--blue);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#9664; History</a>
+    <a href="../playground.html" style="color:var(--green);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#9654; Playground</a>
     <a href="../whitelist.html" style="color:var(--orange);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#9782; Whitelist</a>
     <a href="../buglist.html" style="color:var(--red);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#128027; Buglist</a>
   </div>

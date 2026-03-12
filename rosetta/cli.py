@@ -555,6 +555,7 @@ def _enter_interactive(args) -> int:
         output_format=args.format,
         serve=args.serve,
         port=args.port,
+        all_configs=all_configs,
     )
     session.run()
     return 0
