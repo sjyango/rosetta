@@ -86,3 +86,85 @@ class CompareResult:
         if effective == 0:
             return 100.0
         return ((self.matched + self.whitelisted) / effective) * 100.0
+
+
+# ---------------------------------------------------------------------------
+# Benchmark data models
+# ---------------------------------------------------------------------------
+
+class WorkloadMode(Enum):
+    """Benchmark workload execution mode."""
+    SERIAL = auto()
+    CONCURRENT = auto()
+
+
+@dataclass
+class BenchQuery:
+    """A single query in a benchmark workload."""
+    name: str
+    sql: str
+    weight: int = 1
+
+
+@dataclass
+class BenchWorkload:
+    """A complete benchmark workload definition."""
+    name: str = "custom"
+    setup: List[str] = field(default_factory=list)
+    queries: List[BenchQuery] = field(default_factory=list)
+    teardown: List[str] = field(default_factory=list)
+
+
+@dataclass
+class BenchmarkConfig:
+    """Runtime configuration for a benchmark run."""
+    mode: WorkloadMode = WorkloadMode.SERIAL
+    iterations: int = 100
+    warmup: int = 5
+    concurrency: int = 1
+    duration: float = 0.0  # seconds; 0 means use iterations
+    ramp_up: float = 0.0   # seconds to ramp up threads
+    filter_queries: List[str] = field(default_factory=list)  # --bench-filter
+    profile: bool = True    # --profile: enable perf flame graph capture
+    perf_freq: int = 99     # perf sampling frequency (Hz)
+
+
+@dataclass
+class QueryLatencyStats:
+    """Latency statistics for a single query."""
+    query_name: str
+    sql_template: str = ""
+    total_executions: int = 0
+    total_errors: int = 0
+    latencies_ms: List[float] = field(default_factory=list)
+    min_ms: float = 0.0
+    max_ms: float = 0.0
+    avg_ms: float = 0.0
+    p50_ms: float = 0.0
+    p95_ms: float = 0.0
+    p99_ms: float = 0.0
+    qps: float = 0.0
+    flamegraph_svg: str = ""  # SVG flame graph content (if profiling enabled)
+    explain_plan: str = ""    # EXPLAIN output (text format)
+    explain_tree: str = ""    # EXPLAIN FORMAT=TREE output (tree format)
+
+
+@dataclass
+class DBMSBenchResult:
+    """Benchmark results for a single DBMS."""
+    dbms_name: str
+    query_stats: List[QueryLatencyStats] = field(default_factory=list)
+    total_duration_s: float = 0.0
+    total_queries: int = 0
+    total_errors: int = 0
+    overall_qps: float = 0.0
+
+
+@dataclass
+class BenchmarkResult:
+    """Complete benchmark result across all DBMS instances."""
+    workload_name: str
+    mode: WorkloadMode
+    config: BenchmarkConfig
+    dbms_results: List[DBMSBenchResult] = field(default_factory=list)
+    timestamp: str = ""

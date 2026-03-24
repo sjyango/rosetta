@@ -352,6 +352,212 @@ def print_server_info(url: str, directory: str, *,
 
 
 # ---------------------------------------------------------------------------
+# Benchmark progress & summary
+# ---------------------------------------------------------------------------
+
+class BenchProgress:
+    """Context manager for benchmark execution progress.
+
+    Shows a live progress bar per DBMS during benchmark execution.
+    Reuses the same shared Progress approach as ExecutionProgress.
+    """
+
+    _lock = threading.Lock()
+    _shared_progress: Optional[Progress] = None
+    _ref_count = 0
+
+    def __init__(self, dbms_name: str, total_queries: int, iterations: int):
+        self.dbms_name = dbms_name
+        self.total = total_queries * iterations
+        self._task_id = None
+        self._completed = 0
+        self._start_time = 0.0
+        self._elapsed = 0.0
+
+    @classmethod
+    def _acquire(cls) -> Progress:
+        with cls._lock:
+            if cls._shared_progress is None:
+                cls._shared_progress = Progress(
+                    SpinnerColumn(),
+                    TextColumn(
+                        "[bold blue]{task.fields[dbms]}[/bold blue]"),
+                    BarColumn(bar_width=40),
+                    MofNCompleteColumn(),
+                    TextColumn("[dim]|[/dim]"),
+                    TimeElapsedColumn(),
+                    TextColumn("[dim]|[/dim]"),
+                    TextColumn("{task.fields[status]}"),
+                    console=console,
+                    transient=True,
+                )
+                cls._shared_progress.start()
+            cls._ref_count += 1
+            return cls._shared_progress
+
+    @classmethod
+    def _release(cls):
+        with cls._lock:
+            cls._ref_count -= 1
+            if cls._ref_count <= 0:
+                if cls._shared_progress is not None:
+                    cls._shared_progress.stop()
+                    cls._shared_progress = None
+                cls._ref_count = 0
+
+    def __enter__(self):
+        self._start_time = time.monotonic()
+        progress = self._acquire()
+        self._task_id = progress.add_task(
+            "bench", total=self.total,
+            dbms=self.dbms_name, status="[dim]warmup[/dim]",
+        )
+        return self
+
+    def __exit__(self, *args):
+        self._elapsed = time.monotonic() - self._start_time
+        self._release()
+
+    def advance(self, query_name: str = "", is_warmup: bool = False):
+        """Advance progress by 1."""
+        self._completed += 1
+        if is_warmup:
+            status = "[dim]warmup[/dim]"
+        else:
+            status = f"[cyan]{query_name}[/cyan]"
+        prog = self.__class__._shared_progress
+        if prog is not None:
+            prog.update(self._task_id, advance=1, status=status)
+
+    def set_status(self, text: str):
+        """Set custom status."""
+        prog = self.__class__._shared_progress
+        if prog is not None:
+            prog.update(self._task_id, status=text)
+
+    def write_summary_to_buffer(self):
+        """Write a one-line summary into the buffer."""
+        elapsed = f"{self._elapsed:.1f}s"
+        _add(Text.from_markup(
+            f"  [bold blue]{self.dbms_name}[/bold blue]  "
+            f"{self._completed} queries  "
+            f"[dim]{elapsed}[/dim]  [green]done[/green]"
+        ))
+
+
+def print_bench_summary(result):
+    """Buffer a rich benchmark summary table.
+
+    Args:
+        result: BenchmarkResult instance.
+    """
+    from .models import BenchmarkResult  # avoid circular at module level
+
+    _add(Text(""))
+    _add(Rule(Text.from_markup(
+        "[bold white]Benchmark Summary[/bold white]"), style=_BOX))
+    _add(Text(""))
+
+    # Config info
+    cfg = result.config
+    mode_str = result.mode.name
+    _add(Text.from_markup(
+        f"  Workload: [bold]{result.workload_name}[/bold]  "
+        f"Mode: [cyan]{mode_str}[/cyan]  "
+        f"Timestamp: [dim]{result.timestamp}[/dim]"
+    ))
+
+    # Show profiling status if enabled
+    if getattr(cfg, 'profile', False):
+        # Count flame graphs collected
+        fg_count = sum(
+            1 for dr in result.dbms_results
+            for qs in dr.query_stats
+            if qs.flamegraph_svg
+        )
+        _add(Text.from_markup(
+            f"  Profiling: [bold red]🔥 {fg_count} flame graph(s) "
+            f"captured[/bold red]"
+        ))
+
+    _add(Text(""))
+
+    # Per-DBMS summary table
+    table = Table(
+        header_style="bold",
+        show_lines=False,
+        padding=(0, 1),
+        expand=True,
+        show_edge=False,
+    )
+
+    table.add_column("DBMS", style="bold blue", ratio=2)
+    table.add_column("Queries", justify="right")
+    table.add_column("Errors", justify="right")
+    table.add_column("Duration", justify="right")
+    table.add_column("QPS", justify="right", style="green")
+
+    for dr in result.dbms_results:
+        err_style = "red bold" if dr.total_errors > 0 else "dim"
+        table.add_row(
+            dr.dbms_name,
+            str(dr.total_queries),
+            Text(str(dr.total_errors), style=err_style),
+            f"{dr.total_duration_s:.2f}s",
+            f"{dr.overall_qps:.1f}",
+        )
+
+    _add(table)
+    _add(Text(""))
+
+    # Per-query comparison (if multiple DBMS)
+    if len(result.dbms_results) >= 2:
+        _add(Rule(Text.from_markup(
+            "[bold white]Per-Query Comparison[/bold white]"), style=_BOX))
+        _add(Text(""))
+
+        # Collect all query names
+        all_queries = []
+        for dr in result.dbms_results:
+            for qs in dr.query_stats:
+                if qs.query_name not in all_queries:
+                    all_queries.append(qs.query_name)
+
+        for qname in all_queries:
+            qtable = Table(
+                title=f"[cyan]{qname}[/cyan]",
+                header_style="bold",
+                show_lines=False,
+                padding=(0, 1),
+                expand=True,
+                show_edge=False,
+            )
+            qtable.add_column("DBMS", style="blue", ratio=2)
+            qtable.add_column("Avg(ms)", justify="right")
+            qtable.add_column("P50", justify="right")
+            qtable.add_column("P95", justify="right")
+            qtable.add_column("P99", justify="right")
+            qtable.add_column("QPS", justify="right", style="green")
+
+            for dr in result.dbms_results:
+                qs = next(
+                    (s for s in dr.query_stats
+                     if s.query_name == qname), None)
+                if qs:
+                    qtable.add_row(
+                        dr.dbms_name,
+                        f"{qs.avg_ms:.2f}",
+                        f"{qs.p50_ms:.2f}",
+                        f"{qs.p95_ms:.2f}",
+                        f"{qs.p99_ms:.2f}",
+                        f"{qs.qps:.1f}",
+                    )
+
+            _add(qtable)
+            _add(Text(""))
+
+
+# ---------------------------------------------------------------------------
 # Logging handler that uses rich
 # ---------------------------------------------------------------------------
 

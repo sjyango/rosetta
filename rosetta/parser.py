@@ -147,6 +147,24 @@ class TestFileParser:
         self._parse_file(self.filepath)
         return self.statements
 
+    @classmethod
+    def parse_text(cls, text: str) -> List[Statement]:
+        """Parse raw MTR/SQL text (not from a file) and return SQL statements.
+
+        This is useful for the Playground where input comes from the UI
+        rather than a .test file.  It reuses the full MTR directive
+        filtering and multi-line SQL collection logic.
+        """
+        parser = cls.__new__(cls)
+        parser.filepath = "<text>"
+        parser.statements = []
+        parser._delimiter = ";"
+        parser.mysql_test_dir = None
+        parser._included = set()
+        lines = [ln + "\n" for ln in text.splitlines()]
+        parser._parse_lines(lines)
+        return [s for s in parser.statements if s.stmt_type == StmtType.SQL]
+
     def _parse_file(self, filepath: str):
         """Parse a single file, handling --source recursion."""
         abs_path = os.path.abspath(filepath)
@@ -156,7 +174,10 @@ class TestFileParser:
 
         with open(filepath, "r", encoding="utf-8") as f:
             lines = f.readlines()
+        self._parse_lines(lines)
 
+    def _parse_lines(self, lines: list):
+        """Core parsing logic shared by file-based and text-based parsing."""
         idx = 0
         pending_error: Optional[str] = None
         pending_sorted: bool = False

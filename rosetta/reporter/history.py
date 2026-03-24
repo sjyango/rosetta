@@ -16,6 +16,8 @@ log = logging.getLogger("rosetta")
 
 # Pattern: <test_name>_YYYYMMDD_HHMMSS
 _RUN_DIR_RE = re.compile(r"^(.+)_(\d{8}_\d{6})$")
+# Pattern for benchmark: bench_<workload>_YYYYMMDD_HHMMSS
+_BENCH_DIR_RE = re.compile(r"^bench_(.+)_(\d{8}_\d{6})$")
 
 
 def _scan_runs(output_dir: str) -> List[dict]:
@@ -25,6 +27,11 @@ def _scan_runs(output_dir: str) -> List[dict]:
         full = os.path.join(output_dir, entry)
         if not os.path.isdir(full):
             continue
+
+        # Check if this is a benchmark run
+        bm = _BENCH_DIR_RE.match(entry)
+        is_bench = bm is not None
+
         m = _RUN_DIR_RE.match(entry)
         if not m:
             continue
@@ -33,12 +40,26 @@ def _scan_runs(output_dir: str) -> List[dict]:
         stamp = m.group(2)  # YYYYMMDD_HHMMSS
 
         # Look for HTML report
-        html_file = f"{test_name}.html"
-        html_path = os.path.join(full, html_file)
-        has_html = os.path.isfile(html_path)
+        html_file = None
+        if is_bench:
+            # Benchmark HTML uses bench_<workload>.html
+            workload_name = bm.group(1)
+            candidate = f"bench_{workload_name}.html"
+            if os.path.isfile(os.path.join(full, candidate)):
+                html_file = candidate
+        if html_file is None:
+            # Standard test report
+            candidate = f"{test_name}.html"
+            if os.path.isfile(os.path.join(full, candidate)):
+                html_file = candidate
+
+        has_html = html_file is not None
+        html_path = os.path.join(full, html_file) if html_file else ""
 
         # Look for text report to extract summary
         report_file = f"{test_name}.report.txt"
+        if is_bench:
+            report_file = f"bench_{bm.group(1)}.report.txt"
         report_path = os.path.join(full, report_file)
         summary_line = ""
         if os.path.isfile(report_path):
@@ -61,6 +82,22 @@ def _scan_runs(output_dir: str) -> List[dict]:
             if f.count(".") >= 2
         ))
 
+        # For benchmark runs, try to extract DBMS names from JSON
+        if is_bench and not dbms_names:
+            json_path = os.path.join(full, "bench_result.json")
+            if os.path.isfile(json_path):
+                try:
+                    with open(json_path, "r", encoding="utf-8") as jf:
+                        jdata = json.load(jf)
+                    dbms_names = [
+                        dr["dbms_name"]
+                        for dr in jdata.get("dbms_results", [])
+                    ]
+                except Exception:
+                    pass
+
+        run_type = "benchmark" if is_bench else "test"
+
         runs.append({
             "dir_name": entry,
             "test_name": test_name,
@@ -71,6 +108,7 @@ def _scan_runs(output_dir: str) -> List[dict]:
             "report_link": f"{entry}/{report_file}" if os.path.isfile(report_path) else "",
             "dbms": dbms_names,
             "summary": summary_line,
+            "run_type": run_type,
         })
 
     runs.sort(key=lambda r: r["stamp"], reverse=True)
@@ -178,6 +216,9 @@ function render() {
     card.className = 'run-card';
 
     const dbmsTags = r.dbms.map(d => `<span class="dbms-tag">${esc(d)}</span>`).join('');
+    const typeBadge = r.run_type === 'benchmark'
+      ? '<span class="dbms-tag" style="background:var(--green-bg);color:var(--green);border-color:var(--green)">Benchmark</span>'
+      : '';
 
     let actions = '';
     if (r.has_html) {
@@ -190,7 +231,7 @@ function render() {
     card.innerHTML = `
       <div class="run-time">${esc(r.display_time)}</div>
       <div class="run-test">${esc(r.test_name)}</div>
-      <div class="run-dbms">${dbmsTags}</div>
+      <div class="run-dbms">${typeBadge}${dbmsTags}</div>
       <div class="run-actions">${actions}</div>
     `;
     listEl.appendChild(card);

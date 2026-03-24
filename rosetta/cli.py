@@ -18,7 +18,7 @@ from .comparator import compare_outputs
 from .config import (DEFAULT_TEST_DB, filter_configs, generate_sample_config,
                      load_config)
 from .executor import run_on_dbms
-from .models import CompareResult, DBMSConfig, Statement, StmtType
+from .models import CompareResult, DBMSConfig, Statement, StmtType, WorkloadMode
 from .parser import TestFileParser
 from .reporter.html import write_html_report
 from .reporter.history import generate_index_html
@@ -29,6 +29,25 @@ from .ui import (ExecutionProgress, RichLogHandler, console, flush_all,
                  print_summary, print_warning)
 
 log = logging.getLogger("rosetta")
+
+
+def _tty_write(data: str):
+    """Write escape codes directly to /dev/tty.
+
+    In environments where sys.stdout is a pipe (e.g. IDE terminals),
+    prompt_toolkit writes to /dev/tty but sys.stdout does not reach the
+    terminal.  This helper ensures escape sequences actually reach the
+    terminal device.
+    """
+    try:
+        fd = os.open("/dev/tty", os.O_WRONLY)
+        try:
+            os.write(fd, data.encode())
+        finally:
+            os.close(fd)
+    except OSError:
+        sys.stdout.write(data)
+        sys.stdout.flush()
 
 
 class RosettaRunner:
@@ -289,6 +308,15 @@ Examples:
   # Interactive mode: set params once, run tests repeatedly
   rosetta --interactive --dbms tdsql,mysql --serve
 
+  # Benchmark: run 5 rounds automatically
+  rosetta --benchmark --bench-file bench.json --repeat 5
+
+  # Interactive mode: choose MTR or Benchmark at startup
+  rosetta --interactive --dbms tdsql,mysql --iterations 100 --serve
+
+  # Interactive mode: skip selection, go directly to benchmark
+  rosetta --benchmark --interactive --dbms tdsql,mysql --iterations 100 --serve
+
   # Parse only (debug)
   rosetta --test path/to/test.test --parse-only
         """,
@@ -336,6 +364,60 @@ Examples:
                    help="Enter interactive mode: set base parameters "
                         "once, then submit test paths repeatedly")
 
+    # Benchmark arguments
+    bench = p.add_argument_group("Benchmark",
+                                 "Cross-DBMS performance comparison")
+    bench.add_argument("--benchmark", action="store_true",
+                       help="Run benchmark mode instead of "
+                            "consistency test")
+    bench.add_argument("--bench-file",
+                       help="Path to benchmark definition file "
+                            "(.json or .sql)")
+    bench.add_argument("--template",
+                       help="Use a built-in benchmark template "
+                            "(e.g. oltp_read_write, oltp_read_only, "
+                            "oltp_write_only)")
+    bench.add_argument("--list-templates", action="store_true",
+                       help="List available built-in benchmark "
+                            "templates and exit")
+    bench.add_argument("--iterations", type=int, default=100,
+                       help="Number of iterations per query in "
+                            "serial mode (default: 100)")
+    bench.add_argument("--warmup", type=int, default=5,
+                       help="Number of warmup iterations per query "
+                            "(default: 5)")
+    bench.add_argument("--concurrency", type=int, default=0,
+                       help="Concurrent threads (0 = serial mode, "
+                            ">0 = concurrent mode)")
+    bench.add_argument("--duration", type=float, default=30.0,
+                       help="Duration in seconds for concurrent "
+                            "mode (default: 30)")
+    bench.add_argument("--ramp-up", type=float, default=0.0,
+                       help="Ramp-up time in seconds for concurrent "
+                            "mode (default: 0)")
+    bench.add_argument("--bench-filter",
+                       help="Only run queries matching these names "
+                            "(comma-separated)")
+    bench.add_argument("--repeat", type=int, default=1,
+                       help="Number of benchmark rounds to run "
+                            "(default: 1). Each round produces its own "
+                            "timestamped report.")
+    bench.add_argument("--no-parallel-dbms", dest="parallel_dbms",
+                       action="store_false",
+                       help="Run benchmarks on DBMS targets sequentially "
+                            "instead of in parallel")
+    bench.set_defaults(parallel_dbms=True)
+    bench.add_argument("--profile", action="store_true", dest="profile",
+                       default=True,
+                       help="Enable CPU flame graph capture via perf "
+                            "for each query during benchmark execution "
+                            "(default: on)")
+    bench.add_argument("--no-profile", action="store_false", dest="profile",
+                       help="Disable CPU flame graph capture")
+    bench.add_argument("--perf-freq", type=int, default=99,
+                       help="perf sampling frequency in Hz "
+                            "(default: 99)")
+
     return p.parse_args(argv)
 
 
@@ -369,7 +451,21 @@ def main(argv=None):
         flush_all()
         return 0
 
-    # Interactive mode — does not require --test
+    # List built-in benchmark templates
+    if args.list_templates:
+        from .benchmark import BenchmarkLoader
+        templates = BenchmarkLoader.list_builtin_templates()
+        console.print("[bold]Available built-in benchmark templates:[/bold]")
+        for t in templates:
+            console.print(f"  [cyan]•[/cyan] {t}")
+        return 0
+
+    # Benchmark mode (non-interactive)
+    if args.benchmark and not args.interactive:
+        return _run_benchmark(args)
+
+    # Interactive mode — show mode selection (MTR / Benchmark)
+    # If --benchmark is also set, skips selection and goes directly to bench mode
     if args.interactive:
         return _enter_interactive(args)
 
@@ -515,9 +611,753 @@ def main(argv=None):
     return 0 if (all_pass and not runner.failed_connections) else 1
 
 
+def _run_benchmark(args) -> int:
+    """Execute the benchmark pipeline (supports --repeat N)."""
+    from .benchmark import (BenchmarkLoader, run_benchmark,
+                            BUILTIN_TEMPLATES)
+    from .models import BenchmarkConfig, WorkloadMode
+    from .reporter.bench_text import write_bench_text_report
+    from .reporter.bench_html import write_bench_html_report
+    from .ui import BenchProgress, print_bench_summary
+
+    # Load DBMS configs
+    if not os.path.isfile(args.config):
+        print_error(f"Config file not found: {args.config}")
+        flush_all()
+        return 1
+
+    all_configs = load_config(args.config)
+    if not all_configs:
+        print_error(f"No databases configured in {args.config}")
+        flush_all()
+        return 1
+
+    try:
+        configs = filter_configs(all_configs, args.dbms)
+    except ValueError as e:
+        print_error(str(e))
+        flush_all()
+        return 1
+
+    if not configs:
+        print_error("No databases selected for benchmark")
+        flush_all()
+        return 1
+
+    # Load workload
+    try:
+        if args.bench_file:
+            workload = BenchmarkLoader.from_file(args.bench_file)
+        elif args.template:
+            workload = BenchmarkLoader.from_builtin(args.template)
+        else:
+            # Default to oltp_read_write
+            print_info("No --bench-file or --template specified, "
+                       "using built-in", "oltp_read_write")
+            workload = BenchmarkLoader.from_builtin("oltp_read_write")
+    except (FileNotFoundError, ValueError) as e:
+        print_error(str(e))
+        flush_all()
+        return 1
+
+    # Build benchmark config
+    if args.concurrency > 0:
+        mode = WorkloadMode.CONCURRENT
+    else:
+        mode = WorkloadMode.SERIAL
+
+    filter_queries = []
+    if args.bench_filter:
+        filter_queries = [
+            n.strip() for n in args.bench_filter.split(",") if n.strip()
+        ]
+
+    bench_cfg = BenchmarkConfig(
+        mode=mode,
+        iterations=args.iterations,
+        warmup=args.warmup,
+        concurrency=args.concurrency if args.concurrency > 0 else 1,
+        duration=args.duration,
+        ramp_up=args.ramp_up,
+        filter_queries=filter_queries,
+        profile=getattr(args, 'profile', False),
+        perf_freq=getattr(args, 'perf_freq', 99),
+    )
+
+    # Apply filter to workload for display
+    display_workload = workload
+    if filter_queries:
+        try:
+            display_workload = BenchmarkLoader.filter_queries(
+                workload, filter_queries)
+        except ValueError as e:
+            print_error(str(e))
+            flush_all()
+            return 1
+
+    # Display plan
+    parallel_dbms = getattr(args, 'parallel_dbms', False)
+    repeat = max(1, getattr(args, 'repeat', 1))
+    output_dir = os.path.abspath(args.output_dir)
+    fmt = args.format
+
+    print_phase("Benchmark", workload.name)
+    print_info("Mode:", mode.name)
+    print_info("DBMS targets:",
+               ", ".join(c.name for c in configs))
+    if parallel_dbms and len(configs) > 1:
+        print_info("DBMS execution:", "[bold green]parallel[/bold green]")
+    elif not parallel_dbms and len(configs) > 1:
+        print_info("DBMS execution:", "sequential")
+    print_info("Queries:",
+               ", ".join(q.name for q in display_workload.queries))
+    if mode == WorkloadMode.SERIAL:
+        print_info("Iterations:",
+                    f"{bench_cfg.iterations}  Warmup: {bench_cfg.warmup}")
+    else:
+        print_info("Concurrency:",
+                    f"{bench_cfg.concurrency}  Duration: {bench_cfg.duration}s")
+    if filter_queries:
+        print_info("Filter:", ", ".join(filter_queries))
+    if repeat > 1:
+        print_info("Repeat:", f"{repeat} rounds")
+    if bench_cfg.profile:
+        print_info("Profiling:",
+                    f"[bold red]🔥 perf flame graph[/bold red] "
+                    f"(freq: {bench_cfg.perf_freq} Hz)")
+
+    # ------------------------------------------------------------------
+    # Inner function: execute a single benchmark round
+    # ------------------------------------------------------------------
+    def _run_one_round(round_num: int) -> int:
+        """Run one benchmark round. Returns 0 on success."""
+        if repeat > 1:
+            console.print(
+                f"\n[bold cyan]{'━' * 60}[/bold cyan]")
+            console.print(
+                f"[bold cyan]  Round {round_num}/{repeat}[/bold cyan]")
+            console.print(
+                f"[bold cyan]{'━' * 60}[/bold cyan]\n")
+
+        run_stamp = _time.strftime("%Y%m%d_%H%M%S")
+        run_dir = os.path.join(
+            output_dir,
+            f"bench_{workload.name}_{run_stamp}")
+        os.makedirs(run_dir, exist_ok=True)
+
+        # Execute benchmark
+        print_phase("Execute")
+
+        # Progress tracking (fresh each round)
+        progress_bars: Dict[str, BenchProgress] = {}
+        _progress_lock = threading.Lock()
+
+        n_queries = len(display_workload.queries)
+        if mode == WorkloadMode.SERIAL:
+            per_query = bench_cfg.iterations + bench_cfg.warmup
+        else:
+            per_query = 100
+
+        if parallel_dbms and len(configs) > 1:
+            for c in configs:
+                bp = BenchProgress(c.name, n_queries, per_query)
+                bp.__enter__()
+                progress_bars[c.name] = bp
+
+        def on_dbms_start(dbms_name):
+            with _progress_lock:
+                if dbms_name not in progress_bars:
+                    bp = BenchProgress(dbms_name, n_queries, per_query)
+                    bp.__enter__()
+                    progress_bars[dbms_name] = bp
+
+        def on_progress(dbms_name, query_name, iteration, total,
+                        is_warmup=False):
+            bp = progress_bars.get(dbms_name)
+            if bp:
+                bp.advance(query_name=query_name, is_warmup=is_warmup)
+
+        def on_dbms_done(dbms_name, dbms_result):
+            bp = progress_bars.get(dbms_name)
+            if bp:
+                bp.set_status(
+                    f"[green]{dbms_result.total_queries} queries, "
+                    f"{dbms_result.overall_qps:.1f} QPS[/green]")
+                bp.__exit__(None, None, None)
+                bp.write_summary_to_buffer()
+
+        def on_profile_start(dbms_name, query_name):
+            bp = progress_bars.get(dbms_name)
+            if bp:
+                bp.set_status(f"[red]🔥 profiling {query_name}[/red]")
+
+        def on_profile_done(dbms_name, query_name, sample_count):
+            bp = progress_bars.get(dbms_name)
+            if bp:
+                bp.set_status(
+                    f"[dim]🔥 {query_name}: {sample_count} samples[/dim]")
+
+        result = run_benchmark(
+            configs=configs,
+            workload=workload,
+            bench_cfg=bench_cfg,
+            database=args.database,
+            on_progress=on_progress,
+            on_dbms_start=on_dbms_start,
+            on_dbms_done=on_dbms_done,
+            on_profile_start=on_profile_start if bench_cfg.profile else None,
+            on_profile_done=on_profile_done if bench_cfg.profile else None,
+            parallel_dbms=parallel_dbms,
+        )
+
+        # Generate reports
+        print_phase("Reports")
+
+        if fmt in ("text", "all"):
+            text_path = os.path.join(
+                run_dir, f"bench_{workload.name}.report.txt")
+            write_bench_text_report(text_path, result)
+            print_report_file(text_path, label="text")
+
+        if fmt in ("html", "all"):
+            html_path = os.path.join(
+                run_dir, f"bench_{workload.name}.html")
+            write_bench_html_report(html_path, result)
+            print_report_file(html_path, label="html")
+
+        # Save raw JSON data
+        json_path = os.path.join(run_dir, "bench_result.json")
+        _save_bench_json(json_path, result)
+        print_report_file(json_path, label="json")
+
+        # Update 'latest' symlink
+        latest_link = os.path.join(output_dir, "latest")
+        try:
+            if os.path.islink(latest_link):
+                os.remove(latest_link)
+            os.symlink(os.path.basename(run_dir), latest_link)
+        except OSError:
+            pass
+
+        # Generate history index
+        generate_index_html(output_dir)
+
+        # Print rich summary
+        print_bench_summary(result)
+        flush_all()
+
+        return run_dir
+
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
+    last_run_dir = None
+    for rnd in range(1, repeat + 1):
+        try:
+            last_run_dir = _run_one_round(rnd)
+        except KeyboardInterrupt:
+            console.print(
+                f"\n[yellow]Interrupted at round {rnd}/{repeat}. "
+                f"Stopping.[/yellow]")
+            flush_all()
+            break
+        # Small pause between rounds to avoid timestamp collision
+        if rnd < repeat:
+            _time.sleep(1)
+
+    if repeat > 1:
+        console.print(
+            f"\n[bold green]All {repeat} rounds completed.[/bold green]")
+        flush_all()
+
+    # Serve if requested (use the latest run)
+    if args.serve and fmt in ("html", "all") and last_run_dir:
+        html_file = f"bench_{workload.name}.html"
+        html_path = os.path.join(last_run_dir, html_file)
+        if os.path.isfile(html_path):
+            relative_html = os.path.join(
+                os.path.basename(last_run_dir), html_file)
+            _serve_report(output_dir, relative_html, args.port)
+
+    return 0
+
+
+def _save_bench_json(path: str, result):
+    """Save benchmark result as JSON for later analysis."""
+    import json
+    data = {
+        "workload": result.workload_name,
+        "mode": result.mode.name,
+        "timestamp": result.timestamp,
+        "config": {
+            "iterations": result.config.iterations,
+            "warmup": result.config.warmup,
+            "concurrency": result.config.concurrency,
+            "duration": result.config.duration,
+            "filter_queries": result.config.filter_queries,
+        },
+        "dbms_results": [],
+    }
+    for dr in result.dbms_results:
+        dbms_data = {
+            "dbms_name": dr.dbms_name,
+            "total_duration_s": round(dr.total_duration_s, 3),
+            "total_queries": dr.total_queries,
+            "total_errors": dr.total_errors,
+            "overall_qps": round(dr.overall_qps, 2),
+            "query_stats": [],
+        }
+        for qs in dr.query_stats:
+            dbms_data["query_stats"].append({
+                "query_name": qs.query_name,
+                "total_executions": qs.total_executions,
+                "total_errors": qs.total_errors,
+                "min_ms": round(qs.min_ms, 3),
+                "max_ms": round(qs.max_ms, 3),
+                "avg_ms": round(qs.avg_ms, 3),
+                "p50_ms": round(qs.p50_ms, 3),
+                "p95_ms": round(qs.p95_ms, 3),
+                "p99_ms": round(qs.p99_ms, 3),
+                "qps": round(qs.qps, 2),
+            })
+        data["dbms_results"].append(dbms_data)
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def _select_bench_params(
+    iterations: int = 100,
+    warmup: int = 5,
+    profile: bool = True,
+) -> Optional[dict]:
+    """Show an interactive benchmark parameter configuration panel.
+
+    Uses arrow-key navigation:  Up/Down to move between fields,
+    Left/Right to change values.  Enter to confirm, Esc to cancel.
+
+    Returns a dict with ``iterations``, ``warmup``, ``profile`` keys,
+    or ``None`` if the user cancels.
+    """
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    from prompt_toolkit.keys import Keys
+    from prompt_toolkit.filters import Condition
+
+    ITER_PRESETS = [10, 50, 100, 200, 500, 1000]
+    WARMUP_PRESETS = [0, 5, 10, 20, 50]
+    PROFILE_LABELS = {False: "Off", True: "On"}
+
+    # Custom value state: None means "use preset", otherwise an int
+    custom_iter = [None]
+    custom_warmup = [None]
+
+    # Current state (mutable)
+    result = [None]
+    sel = [0]  # selected field index
+    it_idx = [ITER_PRESETS.index(iterations)
+              if iterations in ITER_PRESETS else 2]
+    wa_idx = [WARMUP_PRESETS.index(warmup)
+              if warmup in WARMUP_PRESETS else 1]
+    prof = [profile]
+
+    FIELDS = [
+        {"label": "Iterations", "type": "choice"},
+        {"label": "Warmup", "type": "choice"},
+        {"label": "Profile (flame graph)", "type": "toggle"},
+        {"label": "OK",    "type": "action"},
+        {"label": "Back",  "type": "action"},
+        {"label": "Quit",  "type": "action"},
+    ]
+
+    ACTION_OK = len(FIELDS) - 3
+    ACTION_BACK = len(FIELDS) - 2  # index of "Back"
+    ACTION_QUIT = len(FIELDS) - 1  # index of "Quit"
+
+    def _iter_val():
+        if custom_iter[0] is not None:
+            return custom_iter[0]
+        return ITER_PRESETS[it_idx[0]]
+
+    def _warmup_val():
+        if custom_warmup[0] is not None:
+            return custom_warmup[0]
+        return WARMUP_PRESETS[wa_idx[0]]
+
+    def _field_val(i):
+        if i == 0:
+            v = _iter_val()
+            if custom_iter[0] is not None:
+                return f"{v} (custom)"
+            return str(v)
+        elif i == 1:
+            v = _warmup_val()
+            if custom_warmup[0] is not None:
+                return f"{v} (custom)"
+            return str(v)
+        else:
+            return PROFILE_LABELS[prof[0]]
+
+    def _toggle_right(i):
+        if i == 0:
+            if custom_iter[0] is not None:
+                custom_iter[0] = None  # cycle out of custom → back to presets
+            else:
+                if it_idx[0] == len(ITER_PRESETS) - 1:
+                    # At last preset, wrap to "Custom…"
+                    custom_iter[0] = _iter_val()  # seed with current value
+                else:
+                    it_idx[0] += 1
+        elif i == 1:
+            if custom_warmup[0] is not None:
+                custom_warmup[0] = None
+            else:
+                if wa_idx[0] == len(WARMUP_PRESETS) - 1:
+                    custom_warmup[0] = _warmup_val()
+                else:
+                    wa_idx[0] += 1
+        else:
+            prof[0] = not prof[0]
+
+    def _toggle_left(i):
+        if i == 0:
+            if custom_iter[0] is not None:
+                custom_iter[0] = None  # cycle out of custom → back to last preset
+            else:
+                if it_idx[0] == 0:
+                    custom_iter[0] = _iter_val()
+                    it_idx[0] = 0  # stay at first preset when returning
+                else:
+                    it_idx[0] -= 1
+        elif i == 1:
+            if custom_warmup[0] is not None:
+                custom_warmup[0] = None
+            else:
+                if wa_idx[0] == 0:
+                    custom_warmup[0] = _warmup_val()
+                    wa_idx[0] = 0
+                else:
+                    wa_idx[0] -= 1
+        else:
+            prof[0] = not prof[0]
+
+    # Inline editing state for custom values
+    editing = [None]   # None or field index (0=Iterations, 1=Warmup)
+    edit_buf = [""]     # current text being typed
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("k")
+    def _up(event):
+        if editing[0] is not None:
+            return
+        sel[0] = (sel[0] - 1) % len(FIELDS)
+
+    @kb.add("down")
+    @kb.add("j")
+    def _down(event):
+        if editing[0] is not None:
+            return
+        sel[0] = (sel[0] + 1) % len(FIELDS)
+
+    @kb.add("left")
+    @kb.add("h")
+    def _left(event):
+        if editing[0] is not None:
+            return
+        _toggle_left(sel[0])
+
+    @kb.add("right")
+    @kb.add("l")
+    def _right(event):
+        if editing[0] is not None:
+            return
+        _toggle_right(sel[0])
+
+    @kb.add("backspace")
+    def _backspace(event):
+        if editing[0] is not None:
+            edit_buf[0] = edit_buf[0][:-1]
+
+    # Accept digit input only while in edit mode
+    @kb.add(Keys.Any, filter=Condition(lambda: editing[0] is not None))
+    def _type_char(event):
+        ch = event.data
+        if ch.isdigit():
+            edit_buf[0] += ch
+
+    @kb.add("enter")
+    def _confirm(event):
+        # --- currently in inline edit mode — confirm the value ---
+        if editing[0] is not None:
+            idx = editing[0]
+            if edit_buf[0]:
+                try:
+                    n = int(edit_buf[0])
+                    if n >= 0:
+                        if idx == 0:
+                            custom_iter[0] = n
+                        else:
+                            custom_warmup[0] = n
+                except ValueError:
+                    pass  # keep old value on invalid input
+            editing[0] = None
+            edit_buf[0] = ""
+            return
+
+        # --- on a custom field → enter edit mode ---
+        if sel[0] == 0 and custom_iter[0] is not None:
+            editing[0] = 0
+            edit_buf[0] = str(custom_iter[0])
+            return
+        if sel[0] == 1 and custom_warmup[0] is not None:
+            editing[0] = 1
+            edit_buf[0] = str(custom_warmup[0])
+            return
+
+        # --- handle OK / Back / Quit actions ---
+        if sel[0] == ACTION_OK:
+            result[0] = {
+                "iterations": _iter_val(),
+                "warmup": _warmup_val(),
+                "profile": prof[0],
+            }
+            event.app.exit()
+            return
+        if sel[0] == ACTION_BACK:
+            result[0] = {"action": "back"}
+            event.app.exit()
+            return
+        if sel[0] == ACTION_QUIT:
+            result[0] = None
+            event.app.exit()
+            return
+
+    @kb.add("c-c")
+    @kb.add("escape")
+    def _cancel(event):
+        if editing[0] is not None:
+            editing[0] = None
+            edit_buf[0] = ""
+            return
+        result[0] = None
+        event.app.exit()
+
+    def _get_text():
+        lines = []
+        border = "═" * 55
+        title = "Benchmark Configuration".center(55)
+        hint = ("←→ change · Enter confirm/custom · ↑↓ move"
+                " · Esc cancel").center(55)
+        lines.append(("bold cyan", f"  ╔{border}╗\n"))
+        lines.append(("bold cyan", "  ║"))
+        lines.append(("bold white", title))
+        lines.append(("bold cyan", "║\n"))
+        lines.append(("bold cyan", "  ║"))
+        lines.append(("", hint))
+        lines.append(("bold cyan", "║\n"))
+        lines.append(("bold cyan", f"  ╚{border}╝\n"))
+        lines.append(("", "\n"))
+
+        # If in edit mode, show only the editing field
+        if editing[0] is not None:
+            idx = editing[0]
+            label = FIELDS[idx]["label"]
+            lines.append(("bold cyan", "  ❯ "))
+            lines.append(("bold cyan", label))
+            lines.append(("", "  "))
+            lines.append(("bold white", f"[ {edit_buf[0]}▌ ]"))
+            lines.append(("", "\n"))
+            lines.append(("dim",
+                         "     Type a number, Enter to confirm, "
+                         "Esc to cancel\n"))
+            return lines
+
+        for i, field in enumerate(FIELDS):
+            is_sel = (i == sel[0])
+
+            if field["type"] == "action":
+                # Render as a simple highlighted label
+                if is_sel:
+                    prefix = ("bold cyan", "  ❯ ")
+                    label = ("bold cyan", field["label"])
+                else:
+                    prefix = ("", "    ")
+                    label = ("dim", field["label"])
+                lines.append(prefix)
+                lines.append(label)
+                lines.append(("", "\n"))
+                continue
+
+            prefix = ("bold cyan", "  ❯ ") if is_sel else ("", "    ")
+            label = ("bold cyan" if is_sel else "bold",
+                     field["label"])
+
+            val_str = _field_val(i)
+            if field["type"] == "choice":
+                if is_sel:
+                    val = ("bold yellow", f"◄ {val_str} ►")
+                else:
+                    val = ("dim", val_str)
+            else:  # toggle
+                if prof[0]:
+                    val = ("bold green" if is_sel else "green",
+                           f"● {val_str}")
+                else:
+                    val = ("dim", f"○ {val_str}")
+
+            lines.append(prefix)
+            lines.append(label)
+            lines.append(("", "  "))
+            lines.append(val)
+            lines.append(("", "\n"))
+
+        return lines
+
+    menu = Window(
+        content=FormattedTextControl(_get_text),
+        dont_extend_height=True,
+    )
+
+    app: Application = Application(
+        layout=Layout(HSplit([menu])),
+        key_bindings=kb,
+        full_screen=False,
+    )
+
+    # Save cursor, run, then restore and clear via /dev/tty
+    _tty_write("\033[s")
+    app.run()
+    _tty_write("\033[u\033[J")
+
+    return result[0]
+
+
+def _select_mode(configs, database: str) -> Optional[str]:
+    """Show an arrow-key mode selector and return 'mtr' or 'bench'.
+
+    Returns ``None`` if the user cancels (Ctrl-C / Esc).
+    """
+    import sys
+
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    MODES = [
+        ("mtr",   "MTR mode",       "run .test compatibility tests"),
+        ("bench", "Benchmark mode",  "run .json/.sql performance benchmarks"),
+        (None,    "Quit",            "exit"),
+    ]
+
+    QUIT_IDX = len(MODES) - 1
+
+    selected = [0]       # mutable index
+    result = [None]      # mutable result
+
+    # -- key bindings -------------------------------------------------------
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("k")
+    def _up(event):
+        selected[0] = (selected[0] - 1) % len(MODES)
+
+    @kb.add("down")
+    @kb.add("j")
+    def _down(event):
+        selected[0] = (selected[0] + 1) % len(MODES)
+
+    @kb.add("enter")
+    def _confirm(event):
+        key = MODES[selected[0]][0]
+        result[0] = key  # None for Quit, 'mtr' or 'bench' otherwise
+        event.app.exit()
+
+    @kb.add("c-c")
+    @kb.add("escape")
+    def _cancel(event):
+        result[0] = None
+        event.app.exit()
+
+    # -- layout -------------------------------------------------------------
+    def _get_menu_text():
+        lines = []
+        border = "═" * 55
+        title = "Rosetta Interactive Mode".center(55)
+        hint = "↑/↓ to move, Enter to select, Esc to quit".center(55)
+        lines.append(("bold cyan", f"  ╔{border}╗\n"))
+        lines.append(("bold cyan", "  ║"))
+        lines.append(("bold white", title))
+        lines.append(("bold cyan", "║\n"))
+        lines.append(("bold cyan", "  ║"))
+        lines.append(("", hint))
+        lines.append(("bold cyan", "║\n"))
+        lines.append(("bold cyan", f"  ╚{border}╝\n"))
+        lines.append(("", "\n"))
+
+        dbms_str = ", ".join(c.name for c in configs)
+        lines.append(("gray", "  DBMS: "))
+        lines.append(("bold", dbms_str))
+        lines.append(("gray", "  Database: "))
+        lines.append(("bold", database))
+        lines.append(("", "\n\n"))
+
+        for i, (key, label, desc) in enumerate(MODES):
+            is_quit = (key is None)
+            if i == selected[0]:
+                if is_quit:
+                    lines.append(("bold cyan", "  ❯ "))
+                    lines.append(("bold cyan", label))
+                else:
+                    lines.append(("bold cyan", "  ❯ "))
+                    lines.append(("bold cyan", f"{label:<18s}"))
+                    lines.append(("cyan", f"— {desc}"))
+            else:
+                if is_quit:
+                    lines.append(("", "    "))
+                    lines.append(("dim", label))
+                else:
+                    lines.append(("", "    "))
+                    lines.append(("", f"{label:<18s}"))
+                    lines.append(("gray", f"— {desc}"))
+            lines.append(("", "\n"))
+
+        return lines
+
+    menu = Window(
+        content=FormattedTextControl(_get_menu_text),
+        dont_extend_height=True,
+    )
+
+    app: Application = Application(
+        layout=Layout(HSplit([menu])),
+        key_bindings=kb,
+        full_screen=False,
+    )
+
+    # Save cursor, run, then restore and clear via /dev/tty
+    _tty_write("\033[s")
+    app.run()
+    _tty_write("\033[u\033[J")
+
+    return result[0]
+
+
 def _enter_interactive(args) -> int:
-    """Load config and launch the interactive session."""
-    from .interactive import InteractiveSession
+    """Load config and launch the interactive session.
+
+    When --benchmark is not specified, prompts the user to choose between
+    MTR mode and Benchmark mode before entering the corresponding REPL.
+    """
+    from .interactive import BenchInteractiveSession, InteractiveSession
 
     if not os.path.isfile(args.config):
         print_error(f"Config file not found: {args.config}")
@@ -538,26 +1378,125 @@ def _enter_interactive(args) -> int:
         return 1
 
     if not configs:
-        print_error("No databases selected for testing")
+        print_error("No databases selected")
         flush_all()
         return 1
 
     output_dir = os.path.abspath(args.output_dir)
 
-    session = InteractiveSession(
-        configs=configs,
-        output_dir=output_dir,
-        database=args.database,
-        baseline=args.baseline,
-        skip_explain=args.skip_explain,
-        skip_analyze=args.skip_analyze,
-        skip_show_create=args.skip_show_create,
-        output_format=args.format,
-        serve=args.serve,
-        port=args.port,
-        all_configs=all_configs,
-    )
-    session.run()
+    # Clear terminal before entering interactive mode
+    console.clear()
+
+    # ----- mode selection (skip if --benchmark already set) -----------------
+    force_bench = getattr(args, "benchmark", False)
+
+    if force_bench:
+        mode = "bench"
+    else:
+        mode = _select_mode(configs, args.database)
+        if mode is None:
+            # User cancelled
+            console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+            return 0
+
+    # ----- benchmark parameter configuration (interactive) ----------------
+    # Only in interactive benchmark mode — prompt for iterations/warmup/profile
+    bench_iterations = args.iterations
+    bench_warmup = args.warmup
+    bench_profile = getattr(args, 'profile', True)
+
+    # ----- launch selected session -----------------------------------------
+    while True:
+        if mode == "mtr":
+            session = InteractiveSession(
+                configs=configs,
+                output_dir=output_dir,
+                database=args.database,
+                baseline=args.baseline,
+                skip_explain=args.skip_explain,
+                skip_analyze=args.skip_analyze,
+                skip_show_create=args.skip_show_create,
+                output_format=args.format,
+                serve=args.serve,
+                port=args.port,
+                all_configs=all_configs,
+            )
+            reason = session.run()
+            # Stop the report server before leaving this session
+            # so the port is released for the next session.
+            if session._report_server:
+                session._report_server.stop()
+            if reason != "back":
+                break
+            console.clear()
+            mode = _select_mode(configs, args.database)
+            if mode is None:
+                console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                return 0
+            continue
+        else:
+            # --- benchmark: mode → params → repl (loop params ↔ repl) ---
+            back_to_mode = False
+            while True:
+                if not force_bench:
+                    params = _select_bench_params(
+                        iterations=bench_iterations,
+                        warmup=bench_warmup,
+                        profile=bench_profile,
+                    )
+                    if params is None:
+                        console.print(
+                            "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                        return 0
+                    if params.get("action") == "back":
+                        # Back to mode selection
+                        console.clear()
+                        mode = _select_mode(configs, args.database)
+                        if mode is None:
+                            console.print(
+                                "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                            return 0
+                        back_to_mode = True
+                        break  # exit inner loop
+                    bench_iterations = params["iterations"]
+                    bench_warmup = params["warmup"]
+                    bench_profile = params["profile"]
+
+                session = BenchInteractiveSession(
+                    configs=configs,
+                    output_dir=output_dir,
+                    database=args.database,
+                    iterations=bench_iterations,
+                    warmup=bench_warmup,
+                    concurrency=args.concurrency,
+                    duration=args.duration,
+                    ramp_up=args.ramp_up,
+                    bench_filter=args.bench_filter,
+                    repeat=getattr(args, 'repeat', 1),
+                    parallel_dbms=getattr(args, 'parallel_dbms', True),
+                    output_format=args.format,
+                    serve=args.serve,
+                    port=args.port,
+                    profile=bench_profile,
+                    perf_freq=getattr(args, 'perf_freq', 99),
+                )
+                reason = session.run()
+                # Stop the report server before leaving this session
+                # so the port is released for the next session.
+                if session._report_server:
+                    session._report_server.stop()
+                if reason == "quit":
+                    return 0
+                if reason != "back":
+                    break
+                # Back to bench params
+                console.clear()
+                continue  # re-show _select_bench_params
+
+            if back_to_mode:
+                continue  # re-evaluate mode in outer loop
+            break  # done
+
     return 0
 
 

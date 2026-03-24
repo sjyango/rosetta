@@ -7,3 +7,4 @@ build/
 results/
 dbms_config.json
 .codebuddy/
+benchmark/
