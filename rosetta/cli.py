@@ -287,136 +287,192 @@ def parse_args(argv=None):
     """Parse command-line arguments."""
     p = argparse.ArgumentParser(
         prog="rosetta",
-        description="Rosetta — Cross-DBMS SQL behavioral consistency "
-                    "verification tool. Run MTR-style .test files "
-                    "against multiple databases and compare results.",
+        description=(
+            "Rosetta — Cross-DBMS SQL testing & benchmarking toolkit.\n"
+            "\n"
+            "Three operating modes:\n"
+            "  MTR         Run .test files against multiple databases "
+            "and diff results\n"
+            "  Benchmark   Compare query performance across databases "
+            "with latency/QPS reports\n"
+            "  Playground  Launch an interactive SQL playground "
+            "in the browser\n"
+            "\n"
+            "Use --interactive (-i) to enter a REPL that lets you "
+            "switch between modes.\n"
+            "Without -i, run a single MTR test (--test) or benchmark "
+            "(--benchmark)."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog="""\
 Examples:
-  # Generate sample config
-  rosetta --gen-config dbms_config.json
+  # ── Setup ──────────────────────────────────────────────────
+  rosetta --gen-config dbms_config.json      Generate sample config
 
-  # Run test against specific DBMS
-  rosetta --test path/to/test.test --dbms tdsql,mysql
+  # ── MTR (consistency test) ─────────────────────────────────
+  rosetta -t path/to/test.test --dbms tdsql,mysql
+  rosetta -t path/to/test.test --dbms tdsql,mysql,tidb -b tdsql
+  rosetta -t path/to/test.test --diff-only   Re-diff without execution
+  rosetta -t path/to/test.test --parse-only  Debug: show parsed stmts
 
-  # Run with baseline comparison
-  rosetta --test path/to/test.test --dbms tdsql,mysql,tidb --baseline tdsql
-
-  # Re-generate reports from existing results (no execution)
-  rosetta --test path/to/test.test --diff-only
-
-  # Interactive mode: set params once, run tests repeatedly
-  rosetta --interactive --dbms tdsql,mysql --serve
-
-  # Benchmark: run 5 rounds automatically
+  # ── Benchmark ──────────────────────────────────────────────
+  rosetta --benchmark --bench-file bench.json --dbms tdsql,mysql
+  rosetta --benchmark --template oltp_read_write --iterations 200
   rosetta --benchmark --bench-file bench.json --repeat 5
+  rosetta --benchmark --bench-file bench.json --concurrency 16 --duration 60
+  rosetta --benchmark --list-templates        Show built-in templates
 
-  # Interactive mode: choose MTR or Benchmark at startup
-  rosetta --interactive --dbms tdsql,mysql --iterations 100 --serve
+  # ── Interactive / Playground ───────────────────────────────
+  rosetta -i --dbms tdsql,mysql -s           Choose mode at startup
+  rosetta -i --benchmark --dbms tdsql,mysql   Go straight to Benchmark
+  rosetta -i --dbms tdsql,mysql --port 8080   Custom server port
 
-  # Interactive mode: skip selection, go directly to benchmark
-  rosetta --benchmark --interactive --dbms tdsql,mysql --iterations 100 --serve
-
-  # Parse only (debug)
-  rosetta --test path/to/test.test --parse-only
-        """,
+  # ── Profiling ──────────────────────────────────────────────
+  rosetta --benchmark --bench-file b.json --profile --perf-freq 199
+  rosetta --benchmark --bench-file b.json --no-profile
+""",
     )
 
-    p.add_argument("--test", "-t",
-                   help="Path to .test file")
-    p.add_argument("--config", "-c", default="dbms_config.json",
-                   help="Path to DBMS config JSON file "
-                        "(default: dbms_config.json)")
-    p.add_argument("--dbms",
-                   help="DBMS to compare, comma-separated "
-                        "(e.g. tdsql,mysql,tidb). "
-                        "If not set, uses enabled flag in config.")
-    p.add_argument("--baseline", "-b", default="tdsql",
-                   help="Baseline DBMS name (default: tdsql)")
-    p.add_argument("--output-dir", "-o", default="results",
-                   help="Output directory (default: results)")
-    p.add_argument("--format", "-f", default="all",
-                   choices=["text", "html", "all"],
-                   help="Output format (default: all)")
-    p.add_argument("--database", "-d", default=DEFAULT_TEST_DB,
-                   help=f"Test database name (default: {DEFAULT_TEST_DB})")
-    p.add_argument("--skip-explain", action="store_true", default=True,
-                   help="Skip EXPLAIN statements (default: True)")
-    p.add_argument("--skip-analyze", action="store_true",
-                   help="Skip ANALYZE TABLE statements")
-    p.add_argument("--skip-show-create", action="store_true",
-                   help="Skip SHOW CREATE TABLE statements")
-    p.add_argument("--parse-only", action="store_true",
-                   help="Only parse .test file and print statements")
-    p.add_argument("--diff-only", action="store_true",
-                   help="Only re-generate reports from existing .result "
-                        "files (no DB execution)")
-    p.add_argument("--gen-config",
-                   help="Generate sample config at given path and exit")
-    p.add_argument("--verbose", "-v", action="store_true",
-                   help="Enable verbose logging")
-    p.add_argument("--serve", "-s", action="store_true",
-                   help="Start a local HTTP server to view HTML report "
-                        "after execution")
-    p.add_argument("--port", "-p", type=int, default=19527,
-                   help="Port for the HTTP server (default: 19527)")
-    p.add_argument("--interactive", "-i", action="store_true",
-                   help="Enter interactive mode: set base parameters "
-                        "once, then submit test paths repeatedly")
+    # -- Global options -------------------------------------------------------
+    general = p.add_argument_group(
+        "General", "Options shared across all modes")
+    general.add_argument(
+        "--config", "-c", default="dbms_config.json",
+        help="Path to DBMS config JSON (default: dbms_config.json)")
+    general.add_argument(
+        "--dbms",
+        help="DBMS targets, comma-separated (e.g. tdsql,mysql,tidb). "
+             "Omit to use 'enabled' flag in config")
+    general.add_argument(
+        "--database", "-d", default=DEFAULT_TEST_DB,
+        help=f"Test database name (default: {DEFAULT_TEST_DB})")
+    general.add_argument(
+        "--output-dir", "-o", default="results",
+        help="Output directory for reports (default: results)")
+    general.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="Enable verbose / debug logging")
+    general.add_argument(
+        "--gen-config",
+        help="Generate sample config at the given path and exit")
 
-    # Benchmark arguments
-    bench = p.add_argument_group("Benchmark",
-                                 "Cross-DBMS performance comparison")
-    bench.add_argument("--benchmark", action="store_true",
-                       help="Run benchmark mode instead of "
-                            "consistency test")
-    bench.add_argument("--bench-file",
-                       help="Path to benchmark definition file "
-                            "(.json or .sql)")
-    bench.add_argument("--template",
-                       help="Use a built-in benchmark template "
-                            "(e.g. oltp_read_write, oltp_read_only, "
-                            "oltp_write_only)")
-    bench.add_argument("--list-templates", action="store_true",
-                       help="List available built-in benchmark "
-                            "templates and exit")
-    bench.add_argument("--iterations", type=int, default=100,
-                       help="Number of iterations per query in "
-                            "serial mode (default: 100)")
-    bench.add_argument("--warmup", type=int, default=5,
-                       help="Number of warmup iterations per query "
-                            "(default: 5)")
-    bench.add_argument("--concurrency", type=int, default=0,
-                       help="Concurrent threads (0 = serial mode, "
-                            ">0 = concurrent mode)")
-    bench.add_argument("--duration", type=float, default=30.0,
-                       help="Duration in seconds for concurrent "
-                            "mode (default: 30)")
-    bench.add_argument("--ramp-up", type=float, default=0.0,
-                       help="Ramp-up time in seconds for concurrent "
-                            "mode (default: 0)")
-    bench.add_argument("--bench-filter",
-                       help="Only run queries matching these names "
-                            "(comma-separated)")
-    bench.add_argument("--repeat", type=int, default=1,
-                       help="Number of benchmark rounds to run "
-                            "(default: 1). Each round produces its own "
-                            "timestamped report.")
-    bench.add_argument("--no-parallel-dbms", dest="parallel_dbms",
-                       action="store_false",
-                       help="Run benchmarks on DBMS targets sequentially "
-                            "instead of in parallel")
+    # -- Interactive / server -------------------------------------------------
+    ui = p.add_argument_group(
+        "Interactive & Server",
+        "Enter a REPL or serve HTML reports in the browser")
+    ui.add_argument(
+        "--interactive", "-i", action="store_true",
+        help="Enter interactive mode — choose MTR / Benchmark / "
+             "Playground, then run tasks in a loop")
+    ui.add_argument(
+        "--serve", "-s", action="store_true",
+        help="Start a local HTTP server to view HTML reports "
+             "after execution")
+    ui.add_argument(
+        "--port", "-p", type=int, default=19527,
+        help="HTTP server port (default: 19527)")
+
+    # -- MTR options ----------------------------------------------------------
+    mtr = p.add_argument_group(
+        "MTR (Consistency Test)",
+        "Run .test files and compare results across databases")
+    mtr.add_argument(
+        "--test", "-t",
+        help="Path to .test file")
+    mtr.add_argument(
+        "--baseline", "-b", default="tdsql",
+        help="Baseline DBMS name for diff (default: tdsql)")
+    mtr.add_argument(
+        "--format", "-f", default="all",
+        choices=["text", "html", "all"],
+        help="Output format (default: all)")
+    mtr.add_argument(
+        "--skip-explain", action="store_true", default=True,
+        help="Skip EXPLAIN statements (default: on)")
+    mtr.add_argument(
+        "--skip-analyze", action="store_true",
+        help="Skip ANALYZE TABLE statements")
+    mtr.add_argument(
+        "--skip-show-create", action="store_true",
+        help="Skip SHOW CREATE TABLE statements")
+    mtr.add_argument(
+        "--parse-only", action="store_true",
+        help="Only parse .test file and print statements (no execution)")
+    mtr.add_argument(
+        "--diff-only", action="store_true",
+        help="Re-generate reports from existing .result files "
+             "(no DB execution)")
+
+    # -- Benchmark options ----------------------------------------------------
+    bench = p.add_argument_group(
+        "Benchmark",
+        "Compare query performance across databases with "
+        "latency / QPS reports")
+    bench.add_argument(
+        "--benchmark", action="store_true",
+        help="Enable benchmark mode")
+    bench.add_argument(
+        "--bench-file",
+        help="Benchmark definition file (.json or .sql)")
+    bench.add_argument(
+        "--template",
+        help="Use a built-in template "
+             "(e.g. oltp_read_write, oltp_read_only)")
+    bench.add_argument(
+        "--list-templates", action="store_true",
+        help="List built-in benchmark templates and exit")
+    bench.add_argument(
+        "--iterations", type=int, default=100,
+        help="Iterations per query — serial mode (default: 100)")
+    bench.add_argument(
+        "--warmup", type=int, default=5,
+        help="Warmup iterations per query (default: 5)")
+    bench.add_argument(
+        "--concurrency", type=int, default=0,
+        help="Concurrent threads; 0 = serial, >0 = concurrent "
+             "(default: 0)")
+    bench.add_argument(
+        "--duration", type=float, default=30.0,
+        help="Duration in seconds — concurrent mode (default: 30)")
+    bench.add_argument(
+        "--ramp-up", type=float, default=0.0,
+        help="Ramp-up seconds — concurrent mode (default: 0)")
+    bench.add_argument(
+        "--query-timeout", type=int, default=5,
+        help="Query timeout in seconds; slow queries will be logged as outliers "
+             "(default: 5, 0 to disable)")
+    bench.add_argument(
+        "--flamegraph-min-ms", type=int, default=1000,
+        help="Minimum total duration (ms) to show flamegraph in serial mode "
+             "(default: 1000, 0 to always show)")
+    bench.add_argument(
+        "--bench-filter",
+        help="Run only queries matching these names "
+             "(comma-separated)")
+    bench.add_argument(
+        "--repeat", type=int, default=1,
+        help="Number of benchmark rounds; each round produces "
+             "a timestamped report (default: 1)")
+    bench.add_argument(
+        "--no-parallel-dbms", dest="parallel_dbms",
+        action="store_false",
+        help="Run DBMS targets sequentially instead of in parallel")
     bench.set_defaults(parallel_dbms=True)
-    bench.add_argument("--profile", action="store_true", dest="profile",
-                       default=True,
-                       help="Enable CPU flame graph capture via perf "
-                            "for each query during benchmark execution "
-                            "(default: on)")
-    bench.add_argument("--no-profile", action="store_false", dest="profile",
-                       help="Disable CPU flame graph capture")
-    bench.add_argument("--perf-freq", type=int, default=99,
-                       help="perf sampling frequency in Hz "
-                            "(default: 99)")
+
+    # -- Profiling options ----------------------------------------------------
+    prof = p.add_argument_group(
+        "Profiling",
+        "CPU flame-graph capture via perf (benchmark mode)")
+    prof.add_argument(
+        "--profile", action="store_true", dest="profile",
+        default=True,
+        help="Enable flame-graph capture (default: on)")
+    prof.add_argument(
+        "--no-profile", action="store_false", dest="profile",
+        help="Disable flame-graph capture")
+    prof.add_argument(
+        "--perf-freq", type=int, default=99,
+        help="perf sampling frequency in Hz (default: 99)")
 
     return p.parse_args(argv)
 
@@ -682,6 +738,8 @@ def _run_benchmark(args) -> int:
         filter_queries=filter_queries,
         profile=getattr(args, 'profile', False),
         perf_freq=getattr(args, 'perf_freq', 99),
+        query_timeout=args.query_timeout,
+        flamegraph_min_ms=getattr(args, 'flamegraph_min_ms', 1000),
     )
 
     # Apply filter to workload for display
@@ -753,28 +811,55 @@ def _run_benchmark(args) -> int:
         _progress_lock = threading.Lock()
 
         n_queries = len(display_workload.queries)
-        if mode == WorkloadMode.SERIAL:
-            per_query = bench_cfg.iterations + bench_cfg.warmup
+        is_concurrent = (mode == WorkloadMode.CONCURRENT)
+        if is_concurrent:
+            duration = bench_cfg.duration if bench_cfg.duration > 0 else 30.0
+            per_query = 100  # placeholder, not used for time-based
         else:
-            per_query = 100
+            duration = 0.0
+            per_query = bench_cfg.iterations + bench_cfg.warmup
 
+        # Create progress bars upfront (they will show "setup..." initially)
         if parallel_dbms and len(configs) > 1:
             for c in configs:
-                bp = BenchProgress(c.name, n_queries, per_query)
+                bp = BenchProgress(
+                    c.name, n_queries, per_query,
+                    is_concurrent=is_concurrent, duration=duration)
                 bp.__enter__()
+                bp.set_status("[yellow]正在setup...[/yellow]")
                 progress_bars[c.name] = bp
+
+        def on_setup_start(dbms_name):
+            with _progress_lock:
+                if dbms_name not in progress_bars:
+                    bp = BenchProgress(
+                        dbms_name, n_queries, per_query,
+                        is_concurrent=is_concurrent, duration=duration)
+                    bp.__enter__()
+                    bp.set_status("[yellow]正在setup...[/yellow]")
+                    progress_bars[dbms_name] = bp
+
+        def on_setup_done(dbms_name, success):
+            bp = progress_bars.get(dbms_name)
+            if bp:
+                if success:
+                    bp.set_status("[green]setup完毕[/green]")
+                else:
+                    bp.set_status("[red]setup失败[/red]")
 
         def on_dbms_start(dbms_name):
             with _progress_lock:
                 if dbms_name not in progress_bars:
-                    bp = BenchProgress(dbms_name, n_queries, per_query)
+                    bp = BenchProgress(
+                        dbms_name, n_queries, per_query,
+                        is_concurrent=is_concurrent, duration=duration)
                     bp.__enter__()
                     progress_bars[dbms_name] = bp
 
         def on_progress(dbms_name, query_name, iteration, total,
                         is_warmup=False):
             bp = progress_bars.get(dbms_name)
-            if bp:
+            if bp and not is_concurrent:
                 bp.advance(query_name=query_name, is_warmup=is_warmup)
 
         def on_dbms_done(dbms_name, dbms_result):
@@ -797,18 +882,56 @@ def _run_benchmark(args) -> int:
                 bp.set_status(
                     f"[dim]🔥 {query_name}: {sample_count} samples[/dim]")
 
-        result = run_benchmark(
-            configs=configs,
-            workload=workload,
-            bench_cfg=bench_cfg,
-            database=args.database,
-            on_progress=on_progress,
-            on_dbms_start=on_dbms_start,
-            on_dbms_done=on_dbms_done,
-            on_profile_start=on_profile_start if bench_cfg.profile else None,
-            on_profile_done=on_profile_done if bench_cfg.profile else None,
-            parallel_dbms=parallel_dbms,
-        )
+        # For concurrent mode, timer thread will be started after setup phase
+        timer_stop_event = None
+        timer_thread = None
+        query_phase_started = threading.Event()
+
+        if is_concurrent:
+            timer_stop_event = threading.Event()
+
+            def _timer_update():
+                # Wait until query phase starts (all setups complete)
+                query_phase_started.wait()
+                while not timer_stop_event.is_set():
+                    for dbms_name, bp in list(progress_bars.items()):
+                        bp.update_time(status="")
+                    _time.sleep(0.5)
+
+            timer_thread = threading.Thread(target=_timer_update, daemon=True)
+            timer_thread.start()
+
+        def on_run_start():
+            # Reset timers when query phase begins (all setups complete)
+            # Keep "setup完毕" status visible until queries actually start
+            with _progress_lock:
+                for bp in progress_bars.values():
+                    bp.reset_timer()
+            # Signal timer thread to start updating
+            query_phase_started.set()
+
+        try:
+            result = run_benchmark(
+                configs=configs,
+                workload=workload,
+                bench_cfg=bench_cfg,
+                database=args.database,
+                on_progress=on_progress,
+                on_dbms_start=on_dbms_start,
+                on_dbms_done=on_dbms_done,
+                on_profile_start=on_profile_start if bench_cfg.profile else None,
+                on_profile_done=on_profile_done if bench_cfg.profile else None,
+                on_run_start=on_run_start,
+                on_setup_start=on_setup_start,
+                on_setup_done=on_setup_done,
+                parallel_dbms=parallel_dbms,
+            )
+        finally:
+            # Stop timer thread
+            if timer_stop_event is not None:
+                timer_stop_event.set()
+                if timer_thread is not None:
+                    timer_thread.join(timeout=1.0)
 
         # Generate reports
         print_phase("Reports")
@@ -889,6 +1012,11 @@ def _save_bench_json(path: str, result):
         "workload": result.workload_name,
         "mode": result.mode.name,
         "timestamp": result.timestamp,
+        "table_rows": result.table_rows,
+        "table_rows_detail": result.table_rows_detail or {},
+        "setup_sql": list(result.setup_sql) if result.setup_sql else [],
+        "teardown_sql": list(result.teardown_sql) if result.teardown_sql else [],
+        "queries_sql": list(result.queries_sql) if result.queries_sql else [],
         "config": {
             "iterations": result.config.iterations,
             "warmup": result.config.warmup,
@@ -929,15 +1057,39 @@ def _save_bench_json(path: str, result):
 def _select_bench_params(
     iterations: int = 100,
     warmup: int = 5,
+    concurrency: int = 8,
+    duration: float = 30.0,
+    ramp_up: float = 0.0,
     profile: bool = True,
 ) -> Optional[dict]:
     """Show an interactive benchmark parameter configuration panel.
 
-    Uses arrow-key navigation:  Up/Down to move between fields,
-    Left/Right to change values.  Enter to confirm, Esc to cancel.
+    First, select mode (SERIAL or CONCURRENT), then configure parameters
+    based on the selected mode.
 
-    Returns a dict with ``iterations``, ``warmup``, ``profile`` keys,
-    or ``None`` if the user cancels.
+    Returns a dict with mode-specific parameters, or ``None`` if cancelled.
+    """
+    # Step 1: Mode selection
+    mode_result = _select_bench_mode()
+    if mode_result is None:
+        return None
+    if mode_result.get("action") == "back":
+        return {"action": "back"}
+
+    mode = mode_result["mode"]  # "serial" or "concurrent"
+
+    # Step 2: Parameter configuration based on mode
+    if mode == "serial":
+        return _select_serial_params(iterations, warmup, profile)
+    else:
+        return _select_concurrent_params(concurrency, duration, ramp_up, profile)
+
+
+def _select_bench_mode() -> Optional[dict]:
+    """Show mode selection dialog for benchmark.
+
+    Returns dict with "mode" key ("serial" or "concurrent"),
+    or None if cancelled.
     """
     from prompt_toolkit import Application
     from prompt_toolkit.key_binding import KeyBindings
@@ -945,6 +1097,113 @@ def _select_bench_params(
     from prompt_toolkit.layout.containers import HSplit, Window
     from prompt_toolkit.layout.controls import FormattedTextControl
 
+    MODES = [
+        ("serial", "SERIAL",
+         "Sequential execution, fixed iterations per query"),
+        ("concurrent", "CONCURRENT",
+         "Multi-threaded stress test with duration-based execution"),
+    ]
+
+    selected = [0]
+    result = [None]
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("k")
+    def _up(event):
+        selected[0] = (selected[0] - 1) % len(MODES)
+
+    @kb.add("down")
+    @kb.add("j")
+    def _down(event):
+        selected[0] = (selected[0] + 1) % len(MODES)
+
+    @kb.add("enter")
+    def _confirm(event):
+        result[0] = {"mode": MODES[selected[0]][0]}
+        event.app.exit()
+
+    @kb.add("c-c")
+    @kb.add("escape")
+    def _cancel(event):
+        result[0] = None
+        event.app.exit()
+
+    @kb.add("b")
+    def _back(event):
+        result[0] = {"action": "back"}
+        event.app.exit()
+
+    def _get_text():
+        lines = []
+        border = "═" * 58
+        title = "Select Benchmark Mode".center(58)
+        hint = "↑↓ move · Enter select · B back · Esc cancel".center(58)
+
+        lines.append(("bold cyan", f"  ╔{border}╗\n"))
+        lines.append(("bold cyan", "  ║"))
+        lines.append(("bold white", title))
+        lines.append(("bold cyan", "║\n"))
+        lines.append(("bold cyan", "  ║"))
+        lines.append(("", hint))
+        lines.append(("bold cyan", "║\n"))
+        lines.append(("bold cyan", f"  ╚{border}╝\n"))
+        lines.append(("", "\n"))
+
+        for i, (mode_key, mode_name, mode_desc) in enumerate(MODES):
+            is_sel = (i == selected[0])
+            if is_sel:
+                lines.append(("bold cyan", "  ❯ "))
+                lines.append(("bold yellow", mode_name))
+                lines.append(("", "\n"))
+                lines.append(("", "      "))
+                lines.append(("dim", mode_desc))
+                lines.append(("", "\n"))
+            else:
+                lines.append(("", "    "))
+                lines.append(("bold", mode_name))
+                lines.append(("", "\n"))
+                lines.append(("", "      "))
+                lines.append(("dim", mode_desc))
+                lines.append(("", "\n"))
+
+        lines.append(("", "\n"))
+        lines.append(("dim", "  ────────────────────────────────────────\n"))
+        lines.append(("dim", "  SERIAL:      Each query runs N times sequentially\n"))
+        lines.append(("dim", "  CONCURRENT:  Multiple threads, duration-based test\n"))
+
+        return lines
+
+    menu = Window(
+        content=FormattedTextControl(_get_text),
+        dont_extend_height=True,
+    )
+
+    app: Application = Application(
+        layout=Layout(HSplit([menu])),
+        key_bindings=kb,
+        full_screen=False,
+    )
+
+    _tty_write("\033[s")
+    app.run()
+    _tty_write("\033[u\033[J")
+
+    return result[0]
+
+
+def _select_serial_params(
+    iterations: int = 100,
+    warmup: int = 5,
+    profile: bool = True,
+) -> Optional[dict]:
+    """Show parameter configuration for SERIAL mode."""
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
     from prompt_toolkit.keys import Keys
     from prompt_toolkit.filters import Condition
 
@@ -952,13 +1211,11 @@ def _select_bench_params(
     WARMUP_PRESETS = [0, 5, 10, 20, 50]
     PROFILE_LABELS = {False: "Off", True: "On"}
 
-    # Custom value state: None means "use preset", otherwise an int
     custom_iter = [None]
     custom_warmup = [None]
 
-    # Current state (mutable)
     result = [None]
-    sel = [0]  # selected field index
+    sel = [0]
     it_idx = [ITER_PRESETS.index(iterations)
               if iterations in ITER_PRESETS else 2]
     wa_idx = [WARMUP_PRESETS.index(warmup)
@@ -969,14 +1226,14 @@ def _select_bench_params(
         {"label": "Iterations", "type": "choice"},
         {"label": "Warmup", "type": "choice"},
         {"label": "Profile (flame graph)", "type": "toggle"},
-        {"label": "OK",    "type": "action"},
-        {"label": "Back",  "type": "action"},
-        {"label": "Quit",  "type": "action"},
+        {"label": "OK", "type": "action"},
+        {"label": "Back", "type": "action"},
+        {"label": "Quit", "type": "action"},
     ]
 
     ACTION_OK = len(FIELDS) - 3
-    ACTION_BACK = len(FIELDS) - 2  # index of "Back"
-    ACTION_QUIT = len(FIELDS) - 1  # index of "Quit"
+    ACTION_BACK = len(FIELDS) - 2
+    ACTION_QUIT = len(FIELDS) - 1
 
     def _iter_val():
         if custom_iter[0] is not None:
@@ -1005,11 +1262,10 @@ def _select_bench_params(
     def _toggle_right(i):
         if i == 0:
             if custom_iter[0] is not None:
-                custom_iter[0] = None  # cycle out of custom → back to presets
+                custom_iter[0] = None
             else:
                 if it_idx[0] == len(ITER_PRESETS) - 1:
-                    # At last preset, wrap to "Custom…"
-                    custom_iter[0] = _iter_val()  # seed with current value
+                    custom_iter[0] = _iter_val()
                 else:
                     it_idx[0] += 1
         elif i == 1:
@@ -1026,11 +1282,11 @@ def _select_bench_params(
     def _toggle_left(i):
         if i == 0:
             if custom_iter[0] is not None:
-                custom_iter[0] = None  # cycle out of custom → back to last preset
+                custom_iter[0] = None
             else:
                 if it_idx[0] == 0:
                     custom_iter[0] = _iter_val()
-                    it_idx[0] = 0  # stay at first preset when returning
+                    it_idx[0] = 0
                 else:
                     it_idx[0] -= 1
         elif i == 1:
@@ -1045,9 +1301,8 @@ def _select_bench_params(
         else:
             prof[0] = not prof[0]
 
-    # Inline editing state for custom values
-    editing = [None]   # None or field index (0=Iterations, 1=Warmup)
-    edit_buf = [""]     # current text being typed
+    editing = [None]
+    edit_buf = [""]
 
     kb = KeyBindings()
 
@@ -1084,7 +1339,6 @@ def _select_bench_params(
         if editing[0] is not None:
             edit_buf[0] = edit_buf[0][:-1]
 
-    # Accept digit input only while in edit mode
     @kb.add(Keys.Any, filter=Condition(lambda: editing[0] is not None))
     def _type_char(event):
         ch = event.data
@@ -1093,7 +1347,6 @@ def _select_bench_params(
 
     @kb.add("enter")
     def _confirm(event):
-        # --- currently in inline edit mode — confirm the value ---
         if editing[0] is not None:
             idx = editing[0]
             if edit_buf[0]:
@@ -1105,12 +1358,11 @@ def _select_bench_params(
                         else:
                             custom_warmup[0] = n
                 except ValueError:
-                    pass  # keep old value on invalid input
+                    pass
             editing[0] = None
             edit_buf[0] = ""
             return
 
-        # --- on a custom field → enter edit mode ---
         if sel[0] == 0 and custom_iter[0] is not None:
             editing[0] = 0
             edit_buf[0] = str(custom_iter[0])
@@ -1120,11 +1372,14 @@ def _select_bench_params(
             edit_buf[0] = str(custom_warmup[0])
             return
 
-        # --- handle OK / Back / Quit actions ---
         if sel[0] == ACTION_OK:
             result[0] = {
+                "mode": "serial",
                 "iterations": _iter_val(),
                 "warmup": _warmup_val(),
+                "concurrency": 0,
+                "duration": 0.0,
+                "ramp_up": 0.0,
                 "profile": prof[0],
             }
             event.app.exit()
@@ -1151,7 +1406,7 @@ def _select_bench_params(
     def _get_text():
         lines = []
         border = "═" * 55
-        title = "Benchmark Configuration".center(55)
+        title = "SERIAL Mode Configuration".center(55)
         hint = ("←→ change · Enter confirm/custom · ↑↓ move"
                 " · Esc cancel").center(55)
         lines.append(("bold cyan", f"  ╔{border}╗\n"))
@@ -1164,7 +1419,6 @@ def _select_bench_params(
         lines.append(("bold cyan", f"  ╚{border}╝\n"))
         lines.append(("", "\n"))
 
-        # If in edit mode, show only the editing field
         if editing[0] is not None:
             idx = editing[0]
             label = FIELDS[idx]["label"]
@@ -1182,7 +1436,6 @@ def _select_bench_params(
             is_sel = (i == sel[0])
 
             if field["type"] == "action":
-                # Render as a simple highlighted label
                 if is_sel:
                     prefix = ("bold cyan", "  ❯ ")
                     label = ("bold cyan", field["label"])
@@ -1204,7 +1457,7 @@ def _select_bench_params(
                     val = ("bold yellow", f"◄ {val_str} ►")
                 else:
                     val = ("dim", val_str)
-            else:  # toggle
+            else:
                 if prof[0]:
                     val = ("bold green" if is_sel else "green",
                            f"● {val_str}")
@@ -1230,7 +1483,346 @@ def _select_bench_params(
         full_screen=False,
     )
 
-    # Save cursor, run, then restore and clear via /dev/tty
+    _tty_write("\033[s")
+    app.run()
+    _tty_write("\033[u\033[J")
+
+    return result[0]
+
+
+def _select_concurrent_params(
+    concurrency: int = 8,
+    duration: float = 30.0,
+    ramp_up: float = 0.0,
+    profile: bool = True,
+) -> Optional[dict]:
+    """Show parameter configuration for CONCURRENT mode."""
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.keys import Keys
+    from prompt_toolkit.filters import Condition
+
+    CONCURRENCY_PRESETS = [1, 2, 4, 8, 16, 32, 64]
+    DURATION_PRESETS = [10.0, 30.0, 60.0, 120.0, 300.0]
+    RAMPUP_PRESETS = [0.0, 1.0, 2.0, 5.0, 10.0]
+    PROFILE_LABELS = {False: "Off", True: "On"}
+
+    custom_concurrency = [None]
+    custom_duration = [None]
+    custom_rampup = [None]
+
+    result = [None]
+    sel = [0]
+    cc_idx = [CONCURRENCY_PRESETS.index(concurrency)
+              if concurrency in CONCURRENCY_PRESETS else 3]
+    dur_idx = [DURATION_PRESETS.index(duration)
+               if duration in DURATION_PRESETS else 1]
+    ramp_idx = [RAMPUP_PRESETS.index(ramp_up)
+                if ramp_up in RAMPUP_PRESETS else 0]
+    prof = [profile]
+
+    FIELDS = [
+        {"label": "Concurrency (threads)", "type": "choice"},
+        {"label": "Duration (seconds)", "type": "choice"},
+        {"label": "Ramp-up (seconds)", "type": "choice"},
+        {"label": "Profile (flame graph)", "type": "toggle"},
+        {"label": "OK", "type": "action"},
+        {"label": "Back", "type": "action"},
+        {"label": "Quit", "type": "action"},
+    ]
+
+    ACTION_OK = len(FIELDS) - 3
+    ACTION_BACK = len(FIELDS) - 2
+    ACTION_QUIT = len(FIELDS) - 1
+
+    def _concurrency_val():
+        if custom_concurrency[0] is not None:
+            return custom_concurrency[0]
+        return CONCURRENCY_PRESETS[cc_idx[0]]
+
+    def _duration_val():
+        if custom_duration[0] is not None:
+            return custom_duration[0]
+        return DURATION_PRESETS[dur_idx[0]]
+
+    def _rampup_val():
+        if custom_rampup[0] is not None:
+            return custom_rampup[0]
+        return RAMPUP_PRESETS[ramp_idx[0]]
+
+    def _field_val(i):
+        if i == 0:
+            v = _concurrency_val()
+            if custom_concurrency[0] is not None:
+                return f"{v} (custom)"
+            return str(v)
+        elif i == 1:
+            v = _duration_val()
+            if custom_duration[0] is not None:
+                return f"{v} (custom)"
+            return str(v)
+        elif i == 2:
+            v = _rampup_val()
+            if custom_rampup[0] is not None:
+                return f"{v} (custom)"
+            return str(v)
+        else:
+            return PROFILE_LABELS[prof[0]]
+
+    def _toggle_right(i):
+        if i == 0:
+            if custom_concurrency[0] is not None:
+                custom_concurrency[0] = None
+            else:
+                if cc_idx[0] == len(CONCURRENCY_PRESETS) - 1:
+                    custom_concurrency[0] = _concurrency_val()
+                else:
+                    cc_idx[0] += 1
+        elif i == 1:
+            if custom_duration[0] is not None:
+                custom_duration[0] = None
+            else:
+                if dur_idx[0] == len(DURATION_PRESETS) - 1:
+                    custom_duration[0] = _duration_val()
+                else:
+                    dur_idx[0] += 1
+        elif i == 2:
+            if custom_rampup[0] is not None:
+                custom_rampup[0] = None
+            else:
+                if ramp_idx[0] == len(RAMPUP_PRESETS) - 1:
+                    custom_rampup[0] = _rampup_val()
+                else:
+                    ramp_idx[0] += 1
+        else:
+            prof[0] = not prof[0]
+
+    def _toggle_left(i):
+        if i == 0:
+            if custom_concurrency[0] is not None:
+                custom_concurrency[0] = None
+            else:
+                if cc_idx[0] == 0:
+                    custom_concurrency[0] = _concurrency_val()
+                    cc_idx[0] = 0
+                else:
+                    cc_idx[0] -= 1
+        elif i == 1:
+            if custom_duration[0] is not None:
+                custom_duration[0] = None
+            else:
+                if dur_idx[0] == 0:
+                    custom_duration[0] = _duration_val()
+                    dur_idx[0] = 0
+                else:
+                    dur_idx[0] -= 1
+        elif i == 2:
+            if custom_rampup[0] is not None:
+                custom_rampup[0] = None
+            else:
+                if ramp_idx[0] == 0:
+                    custom_rampup[0] = _rampup_val()
+                    ramp_idx[0] = 0
+                else:
+                    ramp_idx[0] -= 1
+        else:
+            prof[0] = not prof[0]
+
+    editing = [None]
+    edit_buf = [""]
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("k")
+    def _up(event):
+        if editing[0] is not None:
+            return
+        sel[0] = (sel[0] - 1) % len(FIELDS)
+
+    @kb.add("down")
+    @kb.add("j")
+    def _down(event):
+        if editing[0] is not None:
+            return
+        sel[0] = (sel[0] + 1) % len(FIELDS)
+
+    @kb.add("left")
+    @kb.add("h")
+    def _left(event):
+        if editing[0] is not None:
+            return
+        _toggle_left(sel[0])
+
+    @kb.add("right")
+    @kb.add("l")
+    def _right(event):
+        if editing[0] is not None:
+            return
+        _toggle_right(sel[0])
+
+    @kb.add("backspace")
+    def _backspace(event):
+        if editing[0] is not None:
+            edit_buf[0] = edit_buf[0][:-1]
+
+    @kb.add(Keys.Any, filter=Condition(lambda: editing[0] is not None))
+    def _type_char(event):
+        ch = event.data
+        if ch.isdigit() or ch == '.':
+            edit_buf[0] += ch
+
+    @kb.add("enter")
+    def _confirm(event):
+        if editing[0] is not None:
+            idx = editing[0]
+            if edit_buf[0]:
+                try:
+                    if idx == 0:
+                        n = int(edit_buf[0])
+                        if n >= 1:
+                            custom_concurrency[0] = n
+                    elif idx == 1:
+                        n = float(edit_buf[0])
+                        if n > 0:
+                            custom_duration[0] = n
+                    elif idx == 2:
+                        n = float(edit_buf[0])
+                        if n >= 0:
+                            custom_rampup[0] = n
+                except ValueError:
+                    pass
+            editing[0] = None
+            edit_buf[0] = ""
+            return
+
+        if sel[0] == 0 and custom_concurrency[0] is not None:
+            editing[0] = 0
+            edit_buf[0] = str(custom_concurrency[0])
+            return
+        if sel[0] == 1 and custom_duration[0] is not None:
+            editing[0] = 1
+            edit_buf[0] = str(custom_duration[0])
+            return
+        if sel[0] == 2 and custom_rampup[0] is not None:
+            editing[0] = 2
+            edit_buf[0] = str(custom_rampup[0])
+            return
+
+        if sel[0] == ACTION_OK:
+            result[0] = {
+                "mode": "concurrent",
+                "iterations": 100,
+                "warmup": 5,
+                "concurrency": _concurrency_val(),
+                "duration": _duration_val(),
+                "ramp_up": _rampup_val(),
+                "profile": prof[0],
+            }
+            event.app.exit()
+            return
+        if sel[0] == ACTION_BACK:
+            result[0] = {"action": "back"}
+            event.app.exit()
+            return
+        if sel[0] == ACTION_QUIT:
+            result[0] = None
+            event.app.exit()
+            return
+
+    @kb.add("c-c")
+    @kb.add("escape")
+    def _cancel(event):
+        if editing[0] is not None:
+            editing[0] = None
+            edit_buf[0] = ""
+            return
+        result[0] = None
+        event.app.exit()
+
+    def _get_text():
+        lines = []
+        border = "═" * 55
+        title = "CONCURRENT Mode Configuration".center(55)
+        hint = ("←→ change · Enter confirm/custom · ↑↓ move"
+                " · Esc cancel").center(55)
+        lines.append(("bold cyan", f"  ╔{border}╗\n"))
+        lines.append(("bold cyan", "  ║"))
+        lines.append(("bold white", title))
+        lines.append(("bold cyan", "║\n"))
+        lines.append(("bold cyan", "  ║"))
+        lines.append(("", hint))
+        lines.append(("bold cyan", "║\n"))
+        lines.append(("bold cyan", f"  ╚{border}╝\n"))
+        lines.append(("", "\n"))
+
+        if editing[0] is not None:
+            idx = editing[0]
+            label = FIELDS[idx]["label"]
+            lines.append(("bold cyan", "  ❯ "))
+            lines.append(("bold cyan", label))
+            lines.append(("", "  "))
+            lines.append(("bold white", f"[ {edit_buf[0]}▌ ]"))
+            lines.append(("", "\n"))
+            lines.append(("dim",
+                         "     Type a number, Enter to confirm, "
+                         "Esc to cancel\n"))
+            return lines
+
+        for i, field in enumerate(FIELDS):
+            is_sel = (i == sel[0])
+
+            if field["type"] == "action":
+                if is_sel:
+                    prefix = ("bold cyan", "  ❯ ")
+                    label = ("bold cyan", field["label"])
+                else:
+                    prefix = ("", "    ")
+                    label = ("dim", field["label"])
+                lines.append(prefix)
+                lines.append(label)
+                lines.append(("", "\n"))
+                continue
+
+            prefix = ("bold cyan", "  ❯ ") if is_sel else ("", "    ")
+            label = ("bold cyan" if is_sel else "bold",
+                     field["label"])
+
+            val_str = _field_val(i)
+            if field["type"] == "choice":
+                if is_sel:
+                    val = ("bold yellow", f"◄ {val_str} ►")
+                else:
+                    val = ("dim", val_str)
+            else:
+                if prof[0]:
+                    val = ("bold green" if is_sel else "green",
+                           f"● {val_str}")
+                else:
+                    val = ("dim", f"○ {val_str}")
+
+            lines.append(prefix)
+            lines.append(label)
+            lines.append(("", "  "))
+            lines.append(val)
+            lines.append(("", "\n"))
+
+        return lines
+
+    menu = Window(
+        content=FormattedTextControl(_get_text),
+        dont_extend_height=True,
+    )
+
+    app: Application = Application(
+        layout=Layout(HSplit([menu])),
+        key_bindings=kb,
+        full_screen=False,
+    )
+
     _tty_write("\033[s")
     app.run()
     _tty_write("\033[u\033[J")
@@ -1252,9 +1844,10 @@ def _select_mode(configs, database: str) -> Optional[str]:
     from prompt_toolkit.layout.controls import FormattedTextControl
 
     MODES = [
-        ("mtr",   "MTR mode",       "run .test compatibility tests"),
-        ("bench", "Benchmark mode",  "run .json/.sql performance benchmarks"),
-        (None,    "Quit",            "exit"),
+        ("mtr",        "MTR mode",        "run .test compatibility tests"),
+        ("playground", "Playground mode",  "run SQL Playground in browser"),
+        ("bench",      "Benchmark mode",   "run .json/.sql performance benchmarks"),
+        (None,         "Quit",             "exit"),
     ]
 
     QUIT_IDX = len(MODES) - 1
@@ -1407,7 +2000,122 @@ def _enter_interactive(args) -> int:
 
     # ----- launch selected session -----------------------------------------
     while True:
-        if mode == "mtr":
+        if mode == "playground":
+            # Start server and open Playground page in browser
+            from .interactive import ReportServer, _APIHandler
+            from .whitelist import Whitelist
+            from .buglist import Buglist
+
+            whitelist = Whitelist(output_dir)
+            buglist = Buglist(output_dir)
+
+            srv = ReportServer(
+                output_dir, port=args.port,
+                whitelist=whitelist,
+                buglist=buglist,
+                configs=configs,
+                all_configs=all_configs,
+                database=args.database,
+            )
+            try:
+                srv.start()
+            except OSError as e:
+                print_error(f"Failed to start server: {e}")
+                flush_all()
+                return 1
+
+            pg_url = f"{srv.base_url}/playground.html"
+            console.print(
+                f"\n  [green]●[/green] Playground: "
+                f"[bold link={pg_url}]{pg_url}[/bold link]")
+            # Open in IDE browser
+            try:
+                import subprocess as _sp
+                _sp.Popen(["code", "--open-url", pg_url],
+                          stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+            except FileNotFoundError:
+                pass
+
+            from prompt_toolkit import HTML as _HTML
+            from prompt_toolkit.history import InMemoryHistory as _IMH
+            from prompt_toolkit import PromptSession as _PS
+            from .interactive import _PROMPT_STYLE
+
+            _pg_placeholder = _HTML(
+                "<placeholder>Type 'help', 'back', or 'quit'"
+                "</placeholder>")
+            _pg_prompt = _HTML(
+                '<prompt>rosetta</prompt> <path>▶</path> ')
+            _pg_session = _PS(
+                history=_IMH(),
+                style=_PROMPT_STYLE,
+                multiline=False,
+            )
+
+            console.print()
+            # Wait for user command
+            while True:
+                try:
+                    user_input = _pg_session.prompt(
+                        _pg_prompt,
+                        placeholder=_pg_placeholder,
+                    ).strip()
+                except (EOFError, KeyboardInterrupt):
+                    srv.stop()
+                    console.print(
+                        "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                    return 0
+
+                if not user_input:
+                    continue
+
+                cmd = user_input.lower()
+
+                if cmd in ("back", "b"):
+                    break
+                elif cmd in ("quit", "exit", "q"):
+                    srv.stop()
+                    console.print(
+                        "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                    return 0
+                elif cmd == "help":
+                    console.print(
+                        "\n  [bold]Playground commands:[/bold]")
+                    console.print(
+                        f"  [green]open[/green]    "
+                        f"re-open playground in browser")
+                    console.print(
+                        f"  [green]back[/green]    "
+                        f"return to mode selection")
+                    console.print(
+                        f"  [green]quit[/green]    "
+                        f"exit rosetta\n")
+                elif cmd == "open":
+                    try:
+                        _sp.Popen(["code", "--open-url", pg_url],
+                                  stdout=_sp.DEVNULL,
+                                  stderr=_sp.DEVNULL)
+                        console.print(
+                            f"  [green]Opened:[/green] {pg_url}")
+                    except FileNotFoundError:
+                        console.print(
+                            f"  [dim]URL:[/dim] {pg_url}")
+                elif cmd:
+                    console.print(
+                        f"  [yellow]Unknown command:[/yellow] {cmd}")
+                    console.print(
+                        f"  [dim]Type 'help', 'back', "
+                        f"or 'quit'.[/dim]")
+
+            srv.stop()
+            console.clear()
+            mode = _select_mode(configs, args.database)
+            if mode is None:
+                console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                return 0
+            continue
+
+        elif mode == "mtr":
             session = InteractiveSession(
                 configs=configs,
                 output_dir=output_dir,
@@ -1437,11 +2145,19 @@ def _enter_interactive(args) -> int:
         else:
             # --- benchmark: mode → params → repl (loop params ↔ repl) ---
             back_to_mode = False
+            # Initialize bench params from CLI args
+            bench_mode = "serial" if args.concurrency == 0 else "concurrent"
+            bench_concurrency = args.concurrency if args.concurrency > 0 else 8
+            bench_duration = args.duration
+            bench_ramp_up = args.ramp_up
             while True:
                 if not force_bench:
                     params = _select_bench_params(
                         iterations=bench_iterations,
                         warmup=bench_warmup,
+                        concurrency=bench_concurrency,
+                        duration=bench_duration,
+                        ramp_up=bench_ramp_up,
                         profile=bench_profile,
                     )
                     if params is None:
@@ -1458,8 +2174,12 @@ def _enter_interactive(args) -> int:
                             return 0
                         back_to_mode = True
                         break  # exit inner loop
+                    bench_mode = params["mode"]
                     bench_iterations = params["iterations"]
                     bench_warmup = params["warmup"]
+                    bench_concurrency = params["concurrency"]
+                    bench_duration = params["duration"]
+                    bench_ramp_up = params["ramp_up"]
                     bench_profile = params["profile"]
 
                 session = BenchInteractiveSession(
@@ -1468,9 +2188,9 @@ def _enter_interactive(args) -> int:
                     database=args.database,
                     iterations=bench_iterations,
                     warmup=bench_warmup,
-                    concurrency=args.concurrency,
-                    duration=args.duration,
-                    ramp_up=args.ramp_up,
+                    concurrency=bench_concurrency if bench_mode == "concurrent" else 0,
+                    duration=bench_duration,
+                    ramp_up=bench_ramp_up,
                     bench_filter=args.bench_filter,
                     repeat=getattr(args, 'repeat', 1),
                     parallel_dbms=getattr(args, 'parallel_dbms', True),
@@ -1479,6 +2199,7 @@ def _enter_interactive(args) -> int:
                     port=args.port,
                     profile=bench_profile,
                     perf_freq=getattr(args, 'perf_freq', 99),
+                    flamegraph_min_ms=getattr(args, 'flamegraph_min_ms', 1000),
                 )
                 reason = session.run()
                 # Stop the report server before leaving this session

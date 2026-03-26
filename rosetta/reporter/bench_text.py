@@ -37,11 +37,39 @@ def write_bench_text_report(path: str, result: BenchmarkResult):
         if result.mode.name == "SERIAL":
             f.write(f"Iterations: {cfg.iterations}  Warmup: {cfg.warmup}\n")
         else:
-            f.write(f"Concurrency: {cfg.concurrency}  "
-                    f"Duration: {cfg.duration}s\n")
+            parts = [f"Concurrency: {cfg.concurrency}"]
+            if cfg.duration > 0:
+                parts.append(f"Duration: {cfg.duration}s")
+            if cfg.ramp_up > 0:
+                parts.append(f"Ramp-up: {cfg.ramp_up}s")
+            if cfg.warmup > 0:
+                parts.append(f"Warmup: {cfg.warmup}")
+            f.write("  ".join(parts) + "\n")
+        if result.table_rows > 0:
+            f.write(f"Rows: {result.table_rows:,}\n")
         if cfg.filter_queries:
             f.write(f"Filter: {', '.join(cfg.filter_queries)}\n")
         f.write("=" * 78 + "\n\n")
+
+        # Workload definition (setup / queries / teardown)
+        has_workload = result.setup_sql or result.teardown_sql or result.queries_sql
+        if has_workload:
+            f.write("-" * 78 + "\n")
+            f.write("WORKLOAD DEFINITION\n")
+            f.write("-" * 78 + "\n")
+            if result.setup_sql:
+                f.write("  [Setup]\n")
+                for sql in result.setup_sql:
+                    f.write(f"    {sql}\n")
+            if result.queries_sql:
+                f.write("  [Queries]\n")
+                for q in result.queries_sql:
+                    f.write(f"    {q['name']} (weight={q['weight']}): {q['sql']}\n")
+            if result.teardown_sql:
+                f.write("  [Teardown]\n")
+                for sql in result.teardown_sql:
+                    f.write(f"    {sql}\n")
+            f.write("\n")
 
         # Per-DBMS detail
         for dr in result.dbms_results:

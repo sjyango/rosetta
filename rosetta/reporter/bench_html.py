@@ -57,9 +57,16 @@ def _build_data(result: BenchmarkResult) -> dict:
         "iterations": result.config.iterations,
         "warmup": result.config.warmup,
         "concurrency": result.config.concurrency,
+        "duration": result.config.duration,
+        "ramp_up": result.config.ramp_up,
         "timestamp": result.timestamp or time.strftime("%Y-%m-%d %H:%M:%S"),
+        "table_rows": result.table_rows,
+        "table_rows_detail": result.table_rows_detail or {},
         "dbms": dbms_list,
         "has_profile": result.config.profile,
+        "setup_sql": list(result.setup_sql) if result.setup_sql else [],
+        "teardown_sql": list(result.teardown_sql) if result.teardown_sql else [],
+        "queries_sql": list(result.queries_sql) if result.queries_sql else [],
     }
 
 
@@ -97,6 +104,32 @@ h1 { color: var(--fg); margin-bottom: 4px; font-size: 24px; }
 h2 { font-size: 18px; margin-bottom: 16px; color: var(--fg); }
 .meta { color: var(--fg2); font-size: 14px; margin-bottom: 24px; }
 .meta span { margin-right: 16px; }
+
+/* Config panel */
+.config-panel { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+  padding: 20px 24px; margin-bottom: 24px; }
+.config-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px 24px; }
+.config-item { display: flex; flex-direction: column; gap: 2px; }
+.config-item .cfg-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px;
+  color: var(--fg2); font-weight: 600; }
+.config-item .cfg-value { font-size: 15px; font-weight: 600; color: var(--fg); }
+.config-item .cfg-value.highlight { color: var(--blue); }
+.config-item .cfg-value .badge-on { display: inline-block; padding: 1px 8px; border-radius: 4px;
+  font-size: 12px; font-weight: 600; background: #b91c1c; color: #fff; }
+.config-item .cfg-value .badge-off { display: inline-block; padding: 1px 8px; border-radius: 4px;
+  font-size: 12px; font-weight: 600; background: var(--bg3); color: var(--fg2); }
+.config-item .cfg-value .mode-serial { color: var(--green); }
+.config-item .cfg-value .mode-concurrent { color: var(--orange); }
+.table-rows-wrap { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; }
+.table-chip { display: inline-flex; align-items: center; gap: 6px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font-size: 12px;
+  line-height: 1.4; transition: border-color 0.15s; }
+.table-chip:hover { border-color: var(--fg2); }
+.table-chip .tc-name { color: var(--blue); font-family: 'SF Mono', Consolas, monospace;
+  font-size: 11px; font-weight: 500; }
+.table-chip .tc-count { color: var(--fg); font-weight: 600; font-size: 12px; }
+.table-chip .tc-sep { color: var(--border); }
 
 /* Cards */
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -167,6 +200,27 @@ tr:hover { background: var(--bg3); }
   background: var(--bg); border-radius: 6px; padding: 8px 12px; white-space: pre-wrap;
   word-break: break-all; line-height: 1.6; border: 1px solid var(--border); }
 
+/* Schema (setup SQL) */
+.schema-block { margin-bottom: 10px; }
+.schema-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+  font-size: 12px; color: var(--fg2); padding: 4px 10px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--bg3); user-select: none;
+  transition: all 0.15s; }
+.schema-toggle:hover { color: var(--fg); border-color: var(--fg2); }
+.schema-toggle .arrow { transition: transform 0.2s; font-size: 10px; }
+.schema-toggle.open .arrow { transform: rotate(90deg); }
+.schema-sql { font-family: 'SF Mono', Consolas, monospace; font-size: 12px; color: var(--fg2);
+  background: var(--bg); border-radius: 6px; padding: 12px 16px; white-space: pre-wrap;
+  word-break: break-all; line-height: 1.8; border: 1px solid var(--border); margin-top: 8px; }
+.schema-sql .kw { color: var(--purple); font-weight: 600; }
+.schema-sql .type { color: var(--green); }
+.schema-sql .name { color: var(--blue); }
+.schema-sql .num { color: var(--orange); }
+.schema-sql .paren { color: var(--fg2); }
+.schema-sql .str { color: var(--yellow); }
+.schema-count { font-size: 11px; color: var(--fg2); background: var(--bg);
+  padding: 1px 8px; border-radius: 10px; }
+
 /* EXPLAIN plan */
 .q-explain-wrap { margin-bottom: 8px; }
 .q-explain-label { font-size: 12px; font-weight: 600; margin-bottom: 4px; display: flex;
@@ -228,16 +282,22 @@ tr:hover { background: var(--bg3); }
 <body>
 <div id="fg-tooltip"><div class="tt-name"></div><div class="tt-info"></div></div>
 <div class="container">
-  <div style="display:flex;align-items:center;gap:16px;margin-bottom:4px">
+  <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px">
+    <svg width="44" height="44" viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <!-- Stone tablet shape -->
+      <rect x="4" y="2" width="36" height="40" rx="4" ry="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+      <!-- Three bar columns representing benchmark comparison -->
+      <rect x="10" y="22" width="6" height="14" rx="1.5" fill="#3b82f6" opacity="0.9"/>
+      <rect x="19" y="14" width="6" height="22" rx="1.5" fill="#10b981" opacity="0.9"/>
+      <rect x="28" y="18" width="6" height="18" rx="1.5" fill="#f59e0b" opacity="0.9"/>
+      <!-- Top decorative lines (Rosetta stone inscriptions) -->
+      <line x1="10" y1="7" x2="34" y2="7" stroke="#30363d" stroke-width="1.2" stroke-linecap="round"/>
+      <line x1="10" y1="10" x2="28" y2="10" stroke="#30363d" stroke-width="1.2" stroke-linecap="round"/>
+    </svg>
     <h1>Rosetta Benchmark Report</h1>
     <a href="../index.html" style="color:var(--blue);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#9664; History</a>
   </div>
-  <div class="meta">
-    <span>Workload: <strong id="m-workload"></strong></span>
-    <span>Mode: <strong id="m-mode"></strong></span>
-    <span id="m-iters"></span>
-    <span>Time: <span id="m-time"></span></span>
-  </div>
+  <div class="config-panel" id="config-panel"></div>
 
   <!-- Dashboard cards -->
   <div class="cards" id="cards"></div>
@@ -256,6 +316,12 @@ tr:hover { background: var(--bg3); }
   <div class="section">
     <h2>Overall QPS</h2>
     <div id="qps-chart"></div>
+  </div>
+
+  <!-- Workload Definition (Setup / Queries / Teardown) -->
+  <div class="section" id="schema-section" style="display:none">
+    <h2>&#128220; Workload Definition</h2>
+    <div id="schema-content"></div>
   </div>
 
   <!-- Per-Query detail dropdown -->
@@ -289,14 +355,93 @@ function fmtMs(v) {
   return v.toFixed(1);
 }
 
-// -- Meta --
-document.getElementById('m-workload').textContent = DATA.workload;
-document.getElementById('m-mode').textContent = DATA.mode;
-document.getElementById('m-iters').innerHTML =
-  DATA.mode === 'SERIAL'
-    ? 'Iterations: <strong>' + DATA.iterations + '</strong> Warmup: <strong>' + DATA.warmup + '</strong>'
-    : 'Concurrency: <strong>' + DATA.concurrency + '</strong>';
-document.getElementById('m-time').textContent = DATA.timestamp;
+// -- Config Panel --
+(function() {
+  var panel = document.getElementById('config-panel');
+  var modeClass = DATA.mode === 'SERIAL' ? 'mode-serial' : 'mode-concurrent';
+  var items = '';
+
+  // Workload
+  items += '<div class="config-item"><span class="cfg-label">Workload</span>' +
+    '<span class="cfg-value highlight">' + esc(DATA.workload) + '</span></div>';
+
+  // Mode
+  items += '<div class="config-item"><span class="cfg-label">Mode</span>' +
+    '<span class="cfg-value"><span class="' + modeClass + '">' + DATA.mode + '</span></span></div>';
+
+  if (DATA.mode === 'SERIAL') {
+    // Iterations
+    items += '<div class="config-item"><span class="cfg-label">Iterations</span>' +
+      '<span class="cfg-value">' + DATA.iterations + '</span></div>';
+    // Warmup
+    items += '<div class="config-item"><span class="cfg-label">Warmup</span>' +
+      '<span class="cfg-value">' + DATA.warmup + '</span></div>';
+  } else {
+    // Concurrency
+    items += '<div class="config-item"><span class="cfg-label">Concurrency</span>' +
+      '<span class="cfg-value">' + DATA.concurrency + '</span></div>';
+    // Duration
+    if (DATA.duration > 0) {
+      items += '<div class="config-item"><span class="cfg-label">Duration</span>' +
+        '<span class="cfg-value">' + DATA.duration + 's</span></div>';
+    }
+    // Ramp-up
+    items += '<div class="config-item"><span class="cfg-label">Ramp-up</span>' +
+      '<span class="cfg-value">' + (DATA.ramp_up > 0 ? DATA.ramp_up + 's' : '0') + '</span></div>';
+  }
+
+  // Profiling
+  if (DATA.has_profile) {
+    items += '<div class="config-item"><span class="cfg-label">Profiling</span>' +
+      '<span class="cfg-value"><span class="badge-on">🔥 ON</span></span></div>';
+  } else {
+    items += '<div class="config-item"><span class="cfg-label">Profiling</span>' +
+      '<span class="cfg-value"><span class="badge-off">OFF</span></span></div>';
+  }
+
+  // Time (same row as above)
+  items += '<div class="config-item"><span class="cfg-label">Time</span>' +
+    '<span class="cfg-value" style="color:var(--fg2);font-weight:400;font-size:13px">' +
+    esc(DATA.timestamp) + '</span></div>';
+
+  // Rows — per-table detail as chips
+  var detail = DATA.table_rows_detail || {};
+  var tables = Object.keys(detail);
+  if (tables.length > 0) {
+    var rowsHtml = '<div class="config-item" style="grid-column:1/-1">' +
+      '<span class="cfg-label">Table Rows</span><div class="table-rows-wrap">';
+    tables.sort();
+    tables.forEach(function(t) {
+      rowsHtml += '<span class="table-chip">' +
+        '<span class="tc-name">' + esc(t) + '</span>' +
+        '<span class="tc-sep">·</span>' +
+        '<span class="tc-count">' + detail[t].toLocaleString() + '</span></span>';
+    });
+    rowsHtml += '</div></div>';
+    items += rowsHtml;
+  } else if (DATA.table_rows > 0) {
+    items += '<div class="config-item"><span class="cfg-label">Rows (total)</span>' +
+      '<span class="cfg-value">' + DATA.table_rows.toLocaleString() + '</span></div>';
+  } else {
+    // Fallback: extract table names from setup SQL
+    var setupTables = [];
+    (DATA.setup_sql || []).forEach(function(sql) {
+      var m = sql.match(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?(\w+)`?/i);
+      if (m) setupTables.push(m[1]);
+    });
+    if (setupTables.length > 0) {
+      var rowsHtml = '<div class="config-item" style="grid-column:1/-1">' +
+        '<span class="cfg-label">Tables</span><div class="table-rows-wrap">';
+      setupTables.forEach(function(t) {
+        rowsHtml += '<span class="table-chip"><span class="tc-name">' + esc(t) + '</span></span>';
+      });
+      rowsHtml += '</div></div>';
+      items += rowsHtml;
+    }
+  }
+
+  panel.innerHTML = '<div class="config-grid">' + items + '</div>';
+})();
 
 // -- Dashboard cards --
 (function() {
@@ -455,6 +600,197 @@ function renderQpsChart() {
       '<div class="chart-val">' + d.total_duration + 's</div></div>';
   });
   el.innerHTML = html;
+}
+
+// -- Schema (Setup SQL) rendering --
+function highlightSQL(sql) {
+  // Tokenise first to protect strings/numbers, then highlight keywords on the rest.
+  // This avoids the esc()-then-regex breakage with &#39; entities.
+  var tokens = [];
+  var re = /('(?:[^'\\]|\\.)*')|(\b\d+(?:\.\d+)?\b)/g;
+  var last = 0, m;
+  while ((m = re.exec(sql)) !== null) {
+    if (m.index > last) tokens.push({type:'code', text: sql.slice(last, m.index)});
+    if (m[1] !== undefined) tokens.push({type:'str', text: m[1]});
+    else tokens.push({type:'num', text: m[2]});
+    last = re.lastIndex;
+  }
+  if (last < sql.length) tokens.push({type:'code', text: sql.slice(last)});
+
+  var kwRe = /\b(CREATE|TABLE|IF|NOT|EXISTS|INSERT|INTO|SELECT|FROM|WHERE|VALUES|DROP|ALTER|ADD|SET|PRIMARY|KEY|AUTO_INCREMENT|DEFAULT|NULL|UNIQUE|INDEX|CONSTRAINT|FOREIGN|REFERENCES|ON|DELETE|UPDATE|CASCADE|CHECK|ENGINE|CHARSET|COLLATE|COMMENT|LIMIT|AS|AND|OR|IN|ROUND|RAND|CONCAT|SUM|CASE|WHEN|THEN|ELSE|END|VIRTUAL|STORED|GENERATED|ALWAYS|FLOOR|ELT|JSON_ARRAY|JSON_OBJECT|JSON_LENGTH|GLOBAL|ARRAY|CAST|MEMBER|OF|BETWEEN)\b/gi;
+  var typeRe = /\b(INT|INTEGER|BIGINT|SMALLINT|TINYINT|MEDIUMINT|FLOAT|DOUBLE|DECIMAL|NUMERIC|VARCHAR|CHAR|TEXT|BLOB|DATE|DATETIME|TIMESTAMP|TIME|YEAR|BOOLEAN|BOOL|ENUM|JSON)\b/gi;
+
+  var out = '';
+  tokens.forEach(function(t) {
+    if (t.type === 'str') {
+      out += '<span class="str">' + esc(t.text) + '</span>';
+    } else if (t.type === 'num') {
+      out += '<span class="num">' + esc(t.text) + '</span>';
+    } else {
+      var s = esc(t.text);
+      s = s.replace(kwRe, '<span class="kw">$1</span>');
+      s = s.replace(typeRe, '<span class="type">$1</span>');
+      out += s;
+    }
+  });
+  return out;
+}
+
+function formatCreateTable(sql) {
+  // Smart formatting: only break at top-level commas and the outer parens
+  // of the column definition list, not inside type parens like DECIMAL(10,2)
+  // or expressions like CASE WHEN ... END.
+  if (sql.indexOf('\n') !== -1) return sql; // already multi-line
+
+  // Find the first '(' that opens the column definition list
+  var header = '';
+  var body = sql;
+  var firstParen = sql.indexOf('(');
+  if (firstParen === -1) return sql;
+  header = sql.slice(0, firstParen);
+  body = sql.slice(firstParen); // starts with '('
+
+  // Walk the body tracking paren depth; break on commas at depth==1
+  var depth = 0;
+  var lines = [];
+  var cur = '';
+  for (var i = 0; i < body.length; i++) {
+    var ch = body[i];
+    if (ch === "'") {
+      // skip string literal
+      var j = i + 1;
+      while (j < body.length && body[j] !== "'") { if (body[j] === '\\') j++; j++; }
+      cur += body.slice(i, j + 1);
+      i = j;
+      continue;
+    }
+    if (ch === '(') { depth++; cur += ch; continue; }
+    if (ch === ')') {
+      depth--;
+      if (depth === 0) {
+        // This is the closing paren of the column list
+        if (cur.length > 0) lines.push(cur);
+        cur = body.slice(i); // rest including ')' and ENGINE etc.
+        break;
+      }
+      cur += ch;
+      continue;
+    }
+    if (ch === ',' && depth === 1) {
+      lines.push(cur);
+      cur = '';
+      continue;
+    }
+    cur += ch;
+  }
+
+  if (lines.length <= 1) return sql; // nothing to format
+
+  // Build formatted output
+  // First line: header + '(' + first column def
+  // Remove leading '(' from first item
+  var firstCol = lines[0].replace(/^\(\s*/, '');
+  var result = header + '(\n  ' + firstCol.trim();
+  for (var k = 1; k < lines.length; k++) {
+    result += ',\n  ' + lines[k].trim();
+  }
+  // Append closing part: ')' + ENGINE/etc suffix
+  var suffix = cur.replace(/^\)/, '');
+  result += '\n)' + suffix;
+  return result;
+}
+
+function formatOtherSQL(sql) {
+  // Format long INSERT/SET/other SQL for readability
+  if (sql.indexOf('\n') !== -1) return sql;
+  var s = sql;
+  // INSERT INTO ... SELECT: break at major clauses
+  if (/^\s*INSERT\s+INTO/i.test(s)) {
+    s = s.replace(/\)\s*SELECT\b/gi, ')\nSELECT');
+    s = s.replace(/\bSELECT\b/gi, function(m, off) { return off > 0 ? '\nSELECT' : m; });
+    s = s.replace(/\bFROM\b/gi, '\nFROM');
+    s = s.replace(/\bWHERE\b/gi, '\nWHERE');
+    s = s.replace(/\bLIMIT\b/gi, '\nLIMIT');
+    // Clean up double newlines
+    s = s.replace(/\n\n+/g, '\n');
+    s = s.replace(/^\n/, '');
+  }
+  return s;
+}
+
+function renderSchema() {
+  var setupSql = DATA.setup_sql || [];
+  var teardownSql = DATA.teardown_sql || [];
+  var queriesSql = DATA.queries_sql || [];
+
+  // Show section if any data exists
+  if (setupSql.length === 0 && teardownSql.length === 0 && queriesSql.length === 0) return;
+
+  var section = document.getElementById('schema-section');
+  section.style.display = '';
+  var container = document.getElementById('schema-content');
+
+  var html = '';
+
+  // --- Setup SQL ---
+  if (setupSql.length > 0) {
+    html += '<div class="schema-block">' +
+      '<div class="schema-toggle open" id="setup-toggle" onclick="toggleWorkloadSection(\'setup\')">' +
+      '<span class="arrow">&#9654;</span> Setup ' +
+      '<span class="schema-count">' + setupSql.length + ' statement(s)</span></div>' +
+      '<div id="setup-body">';
+    setupSql.forEach(function(sql) {
+      var formatted = /^\s*CREATE\s+TABLE/i.test(sql) ? formatCreateTable(sql) : formatOtherSQL(sql);
+      html += '<div class="schema-sql" style="margin-top:8px">' + highlightSQL(formatted) + '</div>';
+    });
+    html += '</div></div>';
+  }
+
+  // --- Queries ---
+  if (queriesSql.length > 0) {
+    html += '<div class="schema-block">' +
+      '<div class="schema-toggle" id="queries-toggle" onclick="toggleWorkloadSection(\'queries\')">' +
+      '<span class="arrow">&#9654;</span> Queries ' +
+      '<span class="schema-count">' + queriesSql.length + ' query(s)</span></div>' +
+      '<div id="queries-body" style="display:none">';
+    queriesSql.forEach(function(q) {
+      html += '<div style="margin-top:10px">' +
+        '<div style="font-size:12px;color:var(--blue);font-weight:600;margin-bottom:4px">' +
+        esc(q.name) +
+        '<span style="color:var(--fg2);font-weight:400;margin-left:8px">weight: ' + q.weight + '</span>' +
+        '</div>' +
+        '<div class="schema-sql">' + highlightSQL(q.sql) + '</div>' +
+        '</div>';
+    });
+    html += '</div></div>';
+  }
+
+  // --- Teardown SQL ---
+  if (teardownSql.length > 0) {
+    html += '<div class="schema-block">' +
+      '<div class="schema-toggle" id="teardown-toggle" onclick="toggleWorkloadSection(\'teardown\')">' +
+      '<span class="arrow">&#9654;</span> Teardown ' +
+      '<span class="schema-count">' + teardownSql.length + ' statement(s)</span></div>' +
+      '<div id="teardown-body" style="display:none">';
+    teardownSql.forEach(function(sql) {
+      html += '<div class="schema-sql" style="margin-top:8px">' + highlightSQL(sql) + '</div>';
+    });
+    html += '</div></div>';
+  }
+
+  container.innerHTML = html;
+}
+
+function toggleWorkloadSection(name) {
+  var toggle = document.getElementById(name + '-toggle');
+  var body = document.getElementById(name + '-body');
+  if (body.style.display === 'none') {
+    body.style.display = '';
+    toggle.classList.add('open');
+  } else {
+    body.style.display = 'none';
+    toggle.classList.remove('open');
+  }
 }
 
 // -- Per-Query Dropdown + Detail Panel --
@@ -814,6 +1150,7 @@ function fgResetZoom(svg, frames, chartWidth, xPad, fontSize) {
 renderChartMetricTabs();
 initChart();
 renderQpsChart();
+renderSchema();
 renderQuerySelector();
 </script>
 </body>

@@ -107,6 +107,14 @@ class BenchQuery:
 
 
 @dataclass
+class TestCase:
+    """A single test case with pre-rendered SQL."""
+    query_name: str
+    sql: str  # Already rendered, ready to execute
+    original_sql: str  # Original template for reference
+
+
+@dataclass
 class BenchWorkload:
     """A complete benchmark workload definition."""
     name: str = "custom"
@@ -127,6 +135,9 @@ class BenchmarkConfig:
     filter_queries: List[str] = field(default_factory=list)  # --bench-filter
     profile: bool = True    # --profile: enable perf flame graph capture
     perf_freq: int = 99     # perf sampling frequency (Hz)
+    seed: int = 42          # random seed for reproducibility and fairness
+    query_timeout: int = 5  # query timeout in seconds (0 = disabled)
+    flamegraph_min_ms: int = 1000  # min total duration (ms) to show flamegraph in serial mode
 
 
 @dataclass
@@ -158,6 +169,8 @@ class DBMSBenchResult:
     total_queries: int = 0
     total_errors: int = 0
     overall_qps: float = 0.0
+    table_rows: int = 0  # total rows after setup
+    table_rows_detail: Dict[str, int] = field(default_factory=dict)  # {table_name: row_count}
 
 
 @dataclass
@@ -168,3 +181,8 @@ class BenchmarkResult:
     config: BenchmarkConfig
     dbms_results: List[DBMSBenchResult] = field(default_factory=list)
     timestamp: str = ""
+    table_rows: int = 0  # total rows in the test table after setup
+    table_rows_detail: Dict[str, int] = field(default_factory=dict)  # {table_name: row_count}
+    setup_sql: List[str] = field(default_factory=list)  # setup DDL/DML stmts
+    teardown_sql: List[str] = field(default_factory=list)  # teardown stmts
+    queries_sql: List[Dict] = field(default_factory=list)  # [{name, sql, weight}]

@@ -413,7 +413,8 @@ class ReportServer:
         _APIHandler._database = self.database
         handler = lambda *a, **kw: _APIHandler(
             *a, directory=directory, **kw)
-        self._server = http.server.HTTPServer(("0.0.0.0", self.port), handler)
+        self._server = http.server.HTTPServer(
+            ("0.0.0.0", self.port), handler)
         self._thread = threading.Thread(target=self._server.serve_forever,
                                         daemon=True)
         self._thread.start()
@@ -424,6 +425,13 @@ class ReportServer:
             t = threading.Thread(target=self._server.shutdown, daemon=True)
             t.start()
             t.join(timeout=3)
+            # Close the listening socket so the port is released immediately.
+            # shutdown() only stops serve_forever(); without server_close()
+            # the socket stays open and the port remains occupied.
+            try:
+                self._server.server_close()
+            except Exception:
+                pass
             self._server = None
             self._thread = None
 
@@ -482,6 +490,9 @@ class InteractiveSession:
             return None
         if self._report_server and self._report_server.running:
             return self._report_server
+        # Stop previous server if it exists but is no longer running
+        if self._report_server:
+            self._report_server.stop()
         self._report_server = ReportServer(self.output_dir, self.port,
                                            whitelist=self._whitelist,
                                            buglist=self._buglist,
@@ -860,7 +871,9 @@ class BenchInteractiveSession:
                  serve: bool = False,
                  port: int = 19527,
                  profile: bool = False,
-                 perf_freq: int = 99):
+                 perf_freq: int = 99,
+                 query_timeout: int = 5,
+                 flamegraph_min_ms: int = 1000):
         self.configs = configs
         self.output_dir = os.path.abspath(output_dir)
         self.database = database
@@ -877,6 +890,8 @@ class BenchInteractiveSession:
         self.port = port
         self.profile = profile
         self.perf_freq = perf_freq
+        self.query_timeout = query_timeout
+        self.flamegraph_min_ms = flamegraph_min_ms
         self._run_history: List[Dict] = []
         self._report_server: Optional[ReportServer] = None
 
@@ -887,6 +902,9 @@ class BenchInteractiveSession:
             return None
         if self._report_server and self._report_server.running:
             return self._report_server
+        # Stop previous server if it exists but is no longer running
+        if self._report_server:
+            self._report_server.stop()
         self._report_server = ReportServer(self.output_dir, self.port)
         try:
             self._report_server.start()
@@ -955,6 +973,8 @@ class BenchInteractiveSession:
             filter_queries=filter_queries,
             profile=self.profile,
             perf_freq=self.perf_freq,
+            query_timeout=self.query_timeout,
+            flamegraph_min_ms=self.flamegraph_min_ms,
         )
 
         # Apply filter
@@ -1021,31 +1041,73 @@ class BenchInteractiveSession:
             _progress_lock = threading.Lock()
 
             n_queries = len(display_workload.queries)
-            if mode == WorkloadMode.SERIAL:
-                per_query = bench_cfg.iterations + bench_cfg.warmup
+            is_concurrent = (mode == WorkloadMode.CONCURRENT)
+            if is_concurrent:
+                duration = bench_cfg.duration if bench_cfg.duration > 0 else 30.0
+                per_query = 100  # placeholder, not used for time-based
             else:
-                per_query = 100
+                duration = 0.0
+                per_query = bench_cfg.iterations + bench_cfg.warmup
 
+            # Create progress bars upfront (they will show "setup..." initially)
             if self.parallel_dbms and len(configs) > 1:
                 for c in configs:
-                    bp = BenchProgress(c.name, n_queries, per_query)
+                    bp = BenchProgress(
+                        c.name, n_queries, per_query,
+                        is_concurrent=is_concurrent, duration=duration)
                     bp.__enter__()
+                    bp.set_status("[yellow]正在setup...[/yellow]")
                     progress_bars[c.name] = bp
+
+            def on_setup_start(dbms_name):
+                with _progress_lock:
+                    if dbms_name not in progress_bars:
+                        bp = BenchProgress(
+                            dbms_name, n_queries, per_query,
+                            is_concurrent=is_concurrent, duration=duration)
+                        bp.__enter__()
+                        bp.set_status("[yellow]正在setup...[/yellow]")
+                        progress_bars[dbms_name] = bp
+
+            def on_setup_done(dbms_name, success):
+                bp = progress_bars.get(dbms_name)
+                if bp:
+                    if success:
+                        bp.set_status("[green]setup完毕[/green]")
+                    else:
+                        bp.set_status("[red]setup失败[/red]")
 
             def on_dbms_start(dbms_name):
                 with _progress_lock:
                     if dbms_name not in progress_bars:
                         bp = BenchProgress(
-                            dbms_name, n_queries, per_query)
+                            dbms_name, n_queries, per_query,
+                            is_concurrent=is_concurrent, duration=duration)
                         bp.__enter__()
                         progress_bars[dbms_name] = bp
+
+            def on_run_start():
+                # Reset timers when query phase begins (all setups complete)
+                # Keep "setup完毕" status visible until queries actually start
+                with _progress_lock:
+                    for bp in progress_bars.values():
+                        bp.reset_timer()
+                # Signal timer thread to start updating
+                query_phase_started.set()
 
             def on_progress(dbms_name, query_name, iteration,
                             total, is_warmup=False):
                 bp = progress_bars.get(dbms_name)
                 if bp:
-                    bp.advance(query_name=query_name,
-                               is_warmup=is_warmup)
+                    if is_concurrent:
+                        # In concurrent mode, update time-based progress
+                        bp.update_time(status=f"[cyan]{query_name}[/cyan]")
+                    else:
+                        # In serial mode, show per-query iteration progress
+                        bp.advance(query_name=query_name,
+                                   iteration=iteration,
+                                   total=total,
+                                   is_warmup=is_warmup)
 
             def on_dbms_done(dbms_name, dbms_result):
                 bp = progress_bars.get(dbms_name)
@@ -1069,20 +1131,49 @@ class BenchInteractiveSession:
                         f"[dim]🔥 {query_name}: "
                         f"{sample_count} samples[/dim]")
 
-            result = run_benchmark(
-                configs=configs,
-                workload=workload,
-                bench_cfg=bench_cfg,
-                database=self.database,
-                on_progress=on_progress,
-                on_dbms_start=on_dbms_start,
-                on_dbms_done=on_dbms_done,
-                on_profile_start=(on_profile_start
-                                  if bench_cfg.profile else None),
-                on_profile_done=(on_profile_done
-                                 if bench_cfg.profile else None),
-                parallel_dbms=self.parallel_dbms,
-            )
+            # For concurrent mode, timer thread will be started after setup phase
+            timer_stop_event = None
+            timer_thread = None
+            query_phase_started = threading.Event()
+
+            if is_concurrent:
+                timer_stop_event = threading.Event()
+
+                def _timer_update():
+                    # Wait until query phase starts (all setups complete)
+                    query_phase_started.wait()
+                    while not timer_stop_event.is_set():
+                        for bp in list(progress_bars.values()):
+                            bp.update_time(status="")
+                        _time.sleep(0.5)
+
+                timer_thread = threading.Thread(target=_timer_update, daemon=True)
+                timer_thread.start()
+
+            try:
+                result = run_benchmark(
+                    configs=configs,
+                    workload=workload,
+                    bench_cfg=bench_cfg,
+                    database=self.database,
+                    on_progress=on_progress,
+                    on_dbms_start=on_dbms_start,
+                    on_dbms_done=on_dbms_done,
+                    on_profile_start=(on_profile_start
+                                      if bench_cfg.profile else None),
+                    on_profile_done=(on_profile_done
+                                     if bench_cfg.profile else None),
+                    on_run_start=on_run_start,
+                    on_setup_start=on_setup_start,
+                    on_setup_done=on_setup_done,
+                    parallel_dbms=self.parallel_dbms,
+                )
+            finally:
+                # Stop timer thread
+                if timer_stop_event is not None:
+                    timer_stop_event.set()
+                    if timer_thread is not None:
+                        timer_thread.join(timeout=1.0)
 
             # Reports
             print_phase("Reports")
@@ -1287,12 +1378,30 @@ class BenchInteractiveSession:
         # Show config
         mode_str = ("CONCURRENT" if self.concurrency > 0
                     else "SERIAL")
+        if self.concurrency > 0:
+            config_parts = [
+                f"[dim]Mode:[/dim] [bold]{mode_str}[/bold]",
+                f"[dim]Concurrency:[/dim] [bold]{self.concurrency}[/bold]",
+            ]
+            if self.duration > 0:
+                config_parts.append(
+                    f"[dim]Duration:[/dim] [bold]{self.duration}s[/bold]")
+            if self.ramp_up > 0:
+                config_parts.append(
+                    f"[dim]Ramp-up:[/dim] [bold]{self.ramp_up}s[/bold]")
+            if self.warmup > 0:
+                config_parts.append(
+                    f"[dim]Warmup:[/dim] [bold]{self.warmup}[/bold]")
+        else:
+            config_parts = [
+                f"[dim]Mode:[/dim] [bold]{mode_str}[/bold]",
+                f"[dim]Iterations:[/dim] [bold]{self.iterations}[/bold]",
+                f"[dim]Warmup:[/dim] [bold]{self.warmup}[/bold]",
+            ]
         console.print(
             f"  [dim]DBMS:[/dim] "
             f"[bold]{', '.join(c.name for c in self.configs)}[/bold]  "
-            f"[dim]Mode:[/dim] [bold]{mode_str}[/bold]  "
-            f"[dim]Iterations:[/dim] [bold]{self.iterations}[/bold]  "
-            f"[dim]Warmup:[/dim] [bold]{self.warmup}[/bold]")
+            + "  ".join(config_parts))
         if self.repeat > 1:
             console.print(
                 f"  [dim]Repeat:[/dim] [bold]{self.repeat}[/bold]  "

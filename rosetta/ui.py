@@ -360,37 +360,63 @@ class BenchProgress:
 
     Shows a live progress bar per DBMS during benchmark execution.
     Reuses the same shared Progress approach as ExecutionProgress.
+
+    For SERIAL mode: shows iteration count (N/M)
+    For CONCURRENT mode: shows time progress (20s/30s)
     """
 
     _lock = threading.Lock()
     _shared_progress: Optional[Progress] = None
     _ref_count = 0
 
-    def __init__(self, dbms_name: str, total_queries: int, iterations: int):
+    def __init__(self, dbms_name: str, total_queries: int, iterations: int,
+                 is_concurrent: bool = False, duration: float = 0.0):
         self.dbms_name = dbms_name
-        self.total = total_queries * iterations
+        self.is_concurrent = is_concurrent
+        if is_concurrent and duration > 0:
+            self.total = int(duration)  # seconds for time-based progress
+        else:
+            self.total = total_queries * iterations
+        self.duration = duration
         self._task_id = None
         self._completed = 0
         self._start_time = 0.0
         self._elapsed = 0.0
 
     @classmethod
-    def _acquire(cls) -> Progress:
+    def _acquire(cls, is_concurrent: bool = False) -> Progress:
         with cls._lock:
             if cls._shared_progress is None:
-                cls._shared_progress = Progress(
-                    SpinnerColumn(),
-                    TextColumn(
-                        "[bold blue]{task.fields[dbms]}[/bold blue]"),
-                    BarColumn(bar_width=40),
-                    MofNCompleteColumn(),
-                    TextColumn("[dim]|[/dim]"),
-                    TimeElapsedColumn(),
-                    TextColumn("[dim]|[/dim]"),
-                    TextColumn("{task.fields[status]}"),
-                    console=console,
-                    transient=True,
-                )
+                if is_concurrent:
+                    # Time-based progress for concurrent mode
+                    cls._shared_progress = Progress(
+                        SpinnerColumn(),
+                        TextColumn(
+                            "[bold blue]{task.fields[dbms]}[/bold blue]"),
+                        BarColumn(bar_width=40),
+                        TextColumn("[cyan]{task.fields[elapsed_s]}s[/cyan]"),
+                        TextColumn("[dim]/[/dim]"),
+                        TextColumn("[cyan]{task.fields[total_s]}s[/cyan]"),
+                        TextColumn("[dim]|[/dim]"),
+                        TextColumn("{task.fields[status]}"),
+                        console=console,
+                        transient=True,
+                    )
+                else:
+                    # Iteration-based progress for serial mode
+                    cls._shared_progress = Progress(
+                        SpinnerColumn(),
+                        TextColumn(
+                            "[bold blue]{task.fields[dbms]}[/bold blue]"),
+                        BarColumn(bar_width=40),
+                        MofNCompleteColumn(),
+                        TextColumn("[dim]|[/dim]"),
+                        TimeElapsedColumn(),
+                        TextColumn("[dim]|[/dim]"),
+                        TextColumn("{task.fields[status]}"),
+                        console=console,
+                        transient=True,
+                    )
                 cls._shared_progress.start()
             cls._ref_count += 1
             return cls._shared_progress
@@ -407,33 +433,87 @@ class BenchProgress:
 
     def __enter__(self):
         self._start_time = time.monotonic()
-        progress = self._acquire()
-        self._task_id = progress.add_task(
-            "bench", total=self.total,
-            dbms=self.dbms_name, status="[dim]warmup[/dim]",
-        )
+        progress = self._acquire(is_concurrent=self.is_concurrent)
+        if self.is_concurrent and self.duration > 0:
+            self._task_id = progress.add_task(
+                "bench", total=self.total,
+                dbms=self.dbms_name, status="[dim]setup...[/dim]",
+                elapsed_s=0, total_s=int(self.duration),
+            )
+        else:
+            self._task_id = progress.add_task(
+                "bench", total=self.total,
+                dbms=self.dbms_name, status="[dim]warmup[/dim]",
+            )
         return self
+
+    def reset_timer(self):
+        """Reset the start time for concurrent mode (call after setup)."""
+        self._start_time = time.monotonic()
 
     def __exit__(self, *args):
         self._elapsed = time.monotonic() - self._start_time
         self._release()
 
-    def advance(self, query_name: str = "", is_warmup: bool = False):
-        """Advance progress by 1."""
+    def advance(self, query_name: str = "", iteration: int = 0,
+                total: int = 0, is_warmup: bool = False):
+        """Advance overall progress by 1 (for serial mode).
+
+        The progress bar tracks the overall test case count (warmup + iterations
+        across all queries).  The status text shows which query is running and
+        its per-query iteration count.
+
+        Args:
+            query_name: Current query name
+            iteration: Current iteration for this query (1-indexed)
+            total: Total iterations for this query
+            is_warmup: Whether this is a warmup iteration
+        """
         self._completed += 1
         if is_warmup:
             status = "[dim]warmup[/dim]"
         else:
-            status = f"[cyan]{query_name}[/cyan]"
+            status = f"{query_name}"
         prog = self.__class__._shared_progress
         if prog is not None:
             prog.update(self._task_id, advance=1, status=status)
 
-    def set_status(self, text: str):
-        """Set custom status."""
+    def update_time(self, status: str = ""):
+        """Update progress based on elapsed time (for concurrent mode).
+        
+        Args:
+            status: Optional status text to display.
+        """
+        elapsed = time.monotonic() - self._start_time
+        elapsed_int = int(elapsed)
         prog = self.__class__._shared_progress
         if prog is not None:
-            prog.update(self._task_id, status=text)
+            prog.update(
+                self._task_id,
+                completed=elapsed_int,
+                elapsed_s=elapsed_int,
+                status=status,
+            )
+
+    def set_status(self, text: str):
+        """Set custom status.
+        
+        Args:
+            text: Status text to display.
+        """
+        prog = self.__class__._shared_progress
+        if prog is not None:
+            if self.is_concurrent and self.duration > 0:
+                elapsed = time.monotonic() - self._start_time
+                elapsed_int = int(elapsed)
+                prog.update(
+                    self._task_id,
+                    status=text,
+                    elapsed_s=elapsed_int,
+                    completed=elapsed_int,
+                )
+            else:
+                prog.update(self._task_id, status=text)
 
     def write_summary_to_buffer(self):
         """Write a one-line summary into the buffer."""
@@ -451,7 +531,7 @@ def print_bench_summary(result):
     Args:
         result: BenchmarkResult instance.
     """
-    from .models import BenchmarkResult  # avoid circular at module level
+    from .models import BenchmarkResult, WorkloadMode  # avoid circular at module level
 
     _add(Text(""))
     _add(Rule(Text.from_markup(
@@ -461,13 +541,32 @@ def print_bench_summary(result):
     # Config info
     cfg = result.config
     mode_str = result.mode.name
+
+    # Build config details based on mode
+    if result.mode == WorkloadMode.CONCURRENT:
+        config_parts = [
+            f"Mode: [cyan]{mode_str}[/cyan]",
+            f"Concurrency: [cyan]{cfg.concurrency}[/cyan]",
+            f"Duration: [cyan]{cfg.duration}s[/cyan]",
+        ]
+        if cfg.ramp_up > 0:
+            config_parts.append(f"Ramp-up: [cyan]{cfg.ramp_up}s[/cyan]")
+        if cfg.warmup > 0:
+            config_parts.append(f"Warmup: [cyan]{cfg.warmup}[/cyan]")
+    else:
+        config_parts = [
+            f"Mode: [cyan]{mode_str}[/cyan]",
+            f"Iterations: [cyan]{cfg.iterations}[/cyan]",
+            f"Warmup: [cyan]{cfg.warmup}[/cyan]",
+        ]
+
     _add(Text.from_markup(
         f"  Workload: [bold]{result.workload_name}[/bold]  "
-        f"Mode: [cyan]{mode_str}[/cyan]  "
-        f"Timestamp: [dim]{result.timestamp}[/dim]"
+        + "  ".join(config_parts) +
+        f"  Timestamp: [dim]{result.timestamp}[/dim]"
     ))
 
-    # Show profiling status if enabled
+    # Show profiling status (always visible)
     if getattr(cfg, 'profile', False):
         # Count flame graphs collected
         fg_count = sum(
@@ -476,8 +575,12 @@ def print_bench_summary(result):
             if qs.flamegraph_svg
         )
         _add(Text.from_markup(
-            f"  Profiling: [bold red]🔥 {fg_count} flame graph(s) "
-            f"captured[/bold red]"
+            f"  Profiling: [bold red]🔥 ON[/bold red]  "
+            f"[dim]{fg_count} flame graph(s) captured[/dim]"
+        ))
+    else:
+        _add(Text.from_markup(
+            f"  Profiling: [dim]OFF[/dim]"
         ))
 
     _add(Text(""))

@@ -88,12 +88,21 @@ class DBConnection:
         self._skip_patterns = [re.compile(p, re.IGNORECASE)
                                for p in config.skip_patterns]
 
-    def connect(self):
+    def connect(self, create_db: bool = True, query_timeout: int = 0):
+        """Connect to the database.
+
+        Args:
+            create_db: If True (default), drop and recreate the database.
+                       If False, just use the existing database (for workers).
+            query_timeout: Query timeout in seconds. If > 0, set max_execution_time.
+        """
         kwargs = dict(
             host=self.config.host,
             port=self.config.port,
             user=self.config.user,
             password=self.config.password,
+            connect_timeout=10,  # Connection timeout in seconds
+            read_timeout=max(60, query_timeout * 2) if query_timeout > 0 else 60,
         )
 
         if self.config.driver == "mysql.connector":
@@ -114,9 +123,24 @@ class DBConnection:
         self.conn.autocommit = True
         self.cursor = self.conn.cursor()
 
-        self.cursor.execute(f"DROP DATABASE IF EXISTS `{self.database}`")
-        self.cursor.execute(f"CREATE DATABASE `{self.database}`")
+        if create_db:
+            self.cursor.execute(f"DROP DATABASE IF EXISTS `{self.database}`")
+            self.cursor.execute(f"CREATE DATABASE `{self.database}`")
+
         self.cursor.execute(f"USE `{self.database}`")
+
+        # Set query timeout at database level
+        if query_timeout > 0:
+            timeout_ms = query_timeout * 1000
+            # Try different timeout settings for various DBMS
+            for sql in [
+                f"SET SESSION max_execution_time = {timeout_ms}",  # MySQL/TiDB
+                f"SET SESSION tidb_max_execution_time = {timeout_ms}",  # TiDB specific
+            ]:
+                try:
+                    self.cursor.execute(sql)
+                except Exception:
+                    pass  # Ignore if not supported
 
         for sql in self.config.init_sql:
             try:
@@ -157,14 +181,18 @@ class DBConnection:
             return True
         return False
 
-    def reconnect(self):
-        """Attempt to reconnect after a lost connection."""
+    def reconnect(self, create_db: bool = False):
+        """Attempt to reconnect after a lost connection.
+        
+        Args:
+            create_db: If True, recreate the database. Default False for workers.
+        """
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 self.close()
                 time.sleep(2 ** attempt)
-                self.connect()
+                self.connect(create_db=create_db)
                 log.info("[%s] Reconnected successfully (attempt %d)",
                          self.config.name, attempt + 1)
                 return True

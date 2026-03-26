@@ -15,7 +15,7 @@ from typing import Callable, Dict, List, Optional
 from .executor import DBConnection, ensure_service
 from .models import (
     BenchmarkConfig, BenchmarkResult, BenchQuery, BenchWorkload,
-    DBMSBenchResult, DBMSConfig, QueryLatencyStats, WorkloadMode,
+    DBMSBenchResult, DBMSConfig, QueryLatencyStats, TestCase, WorkloadMode,
 )
 
 log = logging.getLogger("rosetta")
@@ -104,6 +104,92 @@ class TemplateEngine:
         """Reset the sequential counter (useful between runs)."""
         with self._seq_lock:
             self._seq_counter = 0
+
+
+# ---------------------------------------------------------------------------
+# Test case generator
+# ---------------------------------------------------------------------------
+
+class TestCaseGenerator:
+    """Pre-generate a fixed set of test cases for fair comparison.
+    
+    All DBMS instances will execute the exact same sequence of SQL statements,
+    ensuring fair and reproducible performance comparison.
+    """
+    
+    def __init__(self, seed: int = 42):
+        self.seed = seed
+        self.engine = TemplateEngine(seed=seed)
+    
+    def generate_serial_cases(
+        self, 
+        workload: BenchWorkload, 
+        iterations: int,
+        warmup: int = 0,
+    ) -> List[TestCase]:
+        """Generate test cases for serial benchmark mode.
+        
+        Args:
+            workload: The workload definition
+            iterations: Number of iterations per query
+            warmup: Number of warmup iterations (not included in test cases)
+        
+        Returns:
+            List of TestCase objects, one for each query execution
+        """
+        cases = []
+        
+        for query in workload.queries:
+            for i in range(iterations):
+                # Render the SQL template with concrete values
+                rendered_sql = self.engine.render(query.sql)
+                cases.append(TestCase(
+                    query_name=query.name,
+                    sql=rendered_sql,
+                    original_sql=query.sql,
+                ))
+        
+        return cases
+    
+    def generate_concurrent_cases(
+        self,
+        workload: BenchWorkload,
+        total_queries: int,
+    ) -> List[TestCase]:
+        """Generate test cases for concurrent benchmark mode.
+        
+        Uses weighted random selection to choose queries, ensuring all DBMS
+        execute the same sequence.
+        
+        Args:
+            workload: The workload definition
+            total_queries: Total number of queries to generate
+        
+        Returns:
+            List of TestCase objects
+        """
+        # Build weighted pool for selection
+        weighted_pool = []
+        for query in workload.queries:
+            weighted_pool.extend([query] * query.weight)
+        
+        if not weighted_pool:
+            return []
+        
+        # Use a separate RNG for query selection (deterministic)
+        rng = random.Random(self.seed)
+        
+        cases = []
+        for i in range(total_queries):
+            query = rng.choice(weighted_pool)
+            rendered_sql = self.engine.render(query.sql)
+            cases.append(TestCase(
+                query_name=query.name,
+                sql=rendered_sql,
+                original_sql=query.sql,
+            ))
+        
+        return cases
 
 
 # ---------------------------------------------------------------------------
@@ -230,10 +316,24 @@ class BenchmarkLoader:
         setup = data.get("setup", [])
         if isinstance(setup, str):
             setup = [setup]
+        # Filter out comment lines and empty strings
+        setup = [
+            s for s in setup
+            if s and not s.strip().startswith("--")
+            and not s.strip().startswith("===")
+            and not s.strip().startswith("#")
+        ]
 
         teardown = data.get("teardown", [])
         if isinstance(teardown, str):
             teardown = [teardown]
+        # Filter out comment lines and empty strings
+        teardown = [
+            s for s in teardown
+            if s and not s.strip().startswith("--")
+            and not s.strip().startswith("===")
+            and not s.strip().startswith("#")
+        ]
 
         return BenchWorkload(
             name=data.get("name", filepath.stem),
@@ -532,28 +632,30 @@ def compute_stats(
 
 
 # ---------------------------------------------------------------------------
-# Serial benchmark runner
+# Base benchmark runner
 # ---------------------------------------------------------------------------
 
-class SerialBenchmarkRunner:
-    """Execute each query N times sequentially, one after another."""
+class BaseBenchmarkRunner:
+    """Base class for benchmark runners with common setup/teardown logic."""
 
     def __init__(
         self, config: DBMSConfig, workload: BenchWorkload,
-        bench_cfg: BenchmarkConfig, template_engine: TemplateEngine,
+        bench_cfg: BenchmarkConfig, test_cases: List[TestCase],
         database: str = "rosetta_bench",
         on_progress: Optional[Callable] = None,
         on_profile_start: Optional[Callable] = None,
         on_profile_done: Optional[Callable] = None,
+        on_run_start: Optional[Callable] = None,
     ):
         self.config = config
         self.workload = workload
         self.bench_cfg = bench_cfg
-        self.engine = template_engine
+        self.test_cases = test_cases
         self.database = database
-        self.on_progress = on_progress  # callback(query_name, iteration, total)
+        self.on_progress = on_progress
         self.on_profile_start = on_profile_start
         self.on_profile_done = on_profile_done
+        self.on_run_start = on_run_start
         self._mysqld_pid: Optional[int] = None
 
     def _resolve_mysqld_pid(self) -> Optional[int]:
@@ -571,8 +673,85 @@ class SerialBenchmarkRunner:
                         self.config.name, self.config.port)
         return self._mysqld_pid
 
-    def run(self) -> DBMSBenchResult:
-        """Run the serial benchmark and return results."""
+    def _check_profiling_support(self) -> bool:
+        """Check if profiling is supported for this DBMS."""
+        profiling = self.bench_cfg.profile
+        if profiling and self.config.name.lower() != "tdsql":
+            log.info("[%s] Profiling skipped (only tdsql is profiled)",
+                     self.config.name)
+            return False
+        if profiling:
+            from .flamegraph import check_perf_available
+            ok, msg = check_perf_available()
+            if not ok:
+                log.warning("[%s] Profiling disabled: %s",
+                            self.config.name, msg)
+                return False
+            mysqld_pid = self._resolve_mysqld_pid()
+            if not mysqld_pid:
+                log.warning("[%s] Profiling disabled: mysqld PID not found",
+                            self.config.name)
+                return False
+        return profiling
+
+    def _run_setup(self, db: DBConnection, result: DBMSBenchResult):
+        """Run setup phase: execute setup SQL and count table rows."""
+        for sql in self.workload.setup:
+            try:
+                db.cursor.execute(sql)
+            except Exception as e:
+                log.warning("[%s] Setup failed: %s — %s",
+                            self.config.name, sql[:80], e)
+
+        # Query total rows after setup
+        try:
+            db.cursor.execute(
+                "SELECT TABLE_NAME FROM information_schema.TABLES "
+                f"WHERE TABLE_SCHEMA = '{self.database}' "
+                "AND TABLE_TYPE = 'BASE TABLE'")
+            tables = [r[0] for r in db.cursor.fetchall()]
+            total = 0
+            detail = {}
+            for tbl in tables:
+                try:
+                    db.cursor.execute(f"SELECT COUNT(*) FROM `{tbl}`")
+                    cnt = db.cursor.fetchone()
+                    if cnt and cnt[0]:
+                        row_count = int(cnt[0])
+                        total += row_count
+                        detail[tbl] = row_count
+                except Exception:
+                    pass
+            result.table_rows = total
+            result.table_rows_detail = detail
+        except Exception as e:
+            log.debug("[%s] Could not query table rows: %s",
+                      self.config.name, e)
+
+    def _run_teardown(self, db: DBConnection):
+        """Run teardown phase: execute teardown SQL and cleanup database."""
+        for sql in self.workload.teardown:
+            try:
+                db.cursor.execute(sql)
+            except Exception as e:
+                log.warning("[%s] Teardown failed: %s — %s",
+                            self.config.name, sql[:80], e)
+        db.cleanup_database()
+
+
+# ---------------------------------------------------------------------------
+# Serial benchmark runner
+# ---------------------------------------------------------------------------
+
+class SerialBenchmarkRunner(BaseBenchmarkRunner):
+    """Execute each query N times sequentially, one after another."""
+
+    def run(self, skip_setup: bool = False) -> DBMSBenchResult:
+        """Run the serial benchmark and return results.
+        
+        Args:
+            skip_setup: If True, skip setup phase (already done in separate pass).
+        """
         result = DBMSBenchResult(dbms_name=self.config.name)
 
         if not ensure_service(self.config):
@@ -582,50 +761,37 @@ class SerialBenchmarkRunner:
 
         db = DBConnection(self.config, self.database)
         try:
-            db.connect()
+            db.connect(create_db=not skip_setup)
         except Exception as e:
             log.error("[%s] Connection failed: %s", self.config.name, e)
             return result
 
-        # Resolve mysqld PID if profiling is enabled.
-        # Profiling is only supported for tdsql – skip for other DBMS.
-        profiling = self.bench_cfg.profile
-        if profiling and self.config.name.lower() != "tdsql":
-            log.info("[%s] Profiling skipped (only tdsql is profiled)",
-                     self.config.name)
-            profiling = False
+        profiling = self._check_profiling_support()
         if profiling:
-            from .flamegraph import PerfProfiler, check_perf_available
-            ok, msg = check_perf_available()
-            if not ok:
-                log.warning("[%s] Profiling disabled: %s",
-                            self.config.name, msg)
-                profiling = False
-            else:
-                mysqld_pid = self._resolve_mysqld_pid()
-                if not mysqld_pid:
-                    log.warning("[%s] Profiling disabled: mysqld PID not found",
-                                self.config.name)
-                    profiling = False
+            from .flamegraph import PerfProfiler
 
         try:
-            # Run setup
-            for sql in self.workload.setup:
-                try:
-                    db.cursor.execute(sql)
-                except Exception as e:
-                    log.warning("[%s] Setup failed: %s — %s",
-                                self.config.name, sql[:80], e)
+            # Setup phase (skip if already done)
+            if not skip_setup:
+                self._run_setup(db, result)
 
-            overall_start = None  # set at first query's iteration start
+            overall_start = None  # set at first test case start
+            
+            # Group test cases by query name for statistics
+            from collections import defaultdict
+            query_cases = defaultdict(list)
+            for tc in self.test_cases:
+                query_cases[tc.query_name].append(tc)
 
             for query in self.workload.queries:
                 latencies: List[float] = []
                 errors = 0
 
-                # --- Phase 1: Warmup (no profiling, no latency recording) ---
+                # --- Phase 1: Warmup (use original template for warmup, not test cases) ---
+                # Warmup doesn't affect fairness, so we can render fresh SQL
+                warmup_engine = TemplateEngine(seed=self.bench_cfg.seed)
                 for i in range(self.bench_cfg.warmup):
-                    rendered_sql = self.engine.render(query.sql)
+                    rendered_sql = warmup_engine.render(query.sql)
                     try:
                         db.cursor.execute(rendered_sql)
                         if db.cursor.description:
@@ -645,7 +811,7 @@ class SerialBenchmarkRunner:
                     if self.on_progress:
                         self.on_progress(
                             query.name, i + 1,
-                            self.bench_cfg.iterations,
+                            self.bench_cfg.warmup,
                             is_warmup=True,
                         )
 
@@ -653,7 +819,7 @@ class SerialBenchmarkRunner:
                 explain_text = ""
                 explain_tree_text = ""
                 try:
-                    rendered_sql = self.engine.render(query.sql)
+                    rendered_sql = warmup_engine.render(query.sql)
                     db.cursor.execute("EXPLAIN " + rendered_sql)
                     if db.cursor.description:
                         cols = [desc[0] for desc in db.cursor.description]
@@ -683,7 +849,7 @@ class SerialBenchmarkRunner:
                 # --- Phase 1.6: Capture EXPLAIN FORMAT=TREE (tdsql only) ---
                 if self.config.name.lower() == "tdsql":
                     try:
-                        rendered_sql = self.engine.render(query.sql)
+                        rendered_sql = warmup_engine.render(query.sql)
                         db.cursor.execute(
                             "EXPLAIN FORMAT=TREE " + rendered_sql)
                         tree_rows = db.cursor.fetchall()
@@ -695,7 +861,7 @@ class SerialBenchmarkRunner:
                         log.debug("[%s] EXPLAIN FORMAT=TREE failed for %s: %s",
                                   self.config.name, query.name, e)
 
-                # --- Phase 2: Start perf, then execute all iterations ---
+                # --- Phase 2: Execute pre-generated test cases ---
                 # Begin timing: only actual SQL execution counts
                 q_start = _time.monotonic()
                 if overall_start is None:
@@ -703,20 +869,21 @@ class SerialBenchmarkRunner:
 
                 profiler = None
                 if profiling:
-                    if self.on_profile_start:
-                        self.on_profile_start(query.name)
                     profiler = PerfProfiler(
                         mysqld_pid=self._mysqld_pid,
                         perf_freq=self.bench_cfg.perf_freq,
                     )
                     profiler.start()
 
-                for i in range(self.bench_cfg.iterations):
-                    rendered_sql = self.engine.render(query.sql)
+                # Execute all test cases for this query
+                test_cases_for_query = query_cases.get(query.name, [])
+                for i, tc in enumerate(test_cases_for_query):
+                    # Use pre-rendered SQL from test case
+                    sql = tc.sql
 
                     t0 = _time.monotonic()
                     try:
-                        db.cursor.execute(rendered_sql)
+                        db.cursor.execute(sql)
                         # Consume result set to measure full round-trip
                         if db.cursor.description:
                             db.cursor.fetchall()
@@ -740,16 +907,27 @@ class SerialBenchmarkRunner:
                     if self.on_progress:
                         self.on_progress(
                             query.name, i + 1,
-                            self.bench_cfg.iterations,
+                            len(test_cases_for_query),
                             is_warmup=False,
                         )
 
                 # --- Phase 3: Stop perf immediately after iterations ---
+                q_elapsed = _time.monotonic() - q_start
+
                 fg_svg = ""
                 if profiler is not None:
+                    # Update status to indicate perf processing (can be slow)
+                    if self.on_profile_start:
+                        self.on_profile_start(query.name)
                     fg_data = profiler.stop(query_name=query.name)
+                    # Only show flamegraph if total duration exceeds threshold
                     if fg_data.svg_content:
-                        fg_svg = fg_data.svg_content
+                        min_ms = self.bench_cfg.flamegraph_min_ms
+                        if min_ms > 0 and q_elapsed * 1000 < min_ms:
+                            log.debug("[%s] Skipping flamegraph for %s: total duration %.0fms < %dms threshold",
+                                      self.config.name, query.name, q_elapsed * 1000, min_ms)
+                        else:
+                            fg_svg = fg_data.svg_content
                     elif fg_data.error:
                         log.warning("[%s] Flame graph for %s: %s",
                                     self.config.name, query.name,
@@ -758,8 +936,6 @@ class SerialBenchmarkRunner:
                     if self.on_profile_done:
                         self.on_profile_done(
                             query.name, fg_data.sample_count)
-
-                q_elapsed = _time.monotonic() - q_start
                 stats = compute_stats(
                     latencies, errors, q_elapsed, query.name,
                     sql_template=query.sql)
@@ -780,14 +956,8 @@ class SerialBenchmarkRunner:
                 )
 
         finally:
-            # Run teardown
-            for sql in self.workload.teardown:
-                try:
-                    db.cursor.execute(sql)
-                except Exception as e:
-                    log.warning("[%s] Teardown failed: %s — %s",
-                                self.config.name, sql[:80], e)
-            db.cleanup_database()
+            # Teardown phase
+            self._run_teardown(db)
             db.close()
 
         return result
@@ -797,46 +967,28 @@ class SerialBenchmarkRunner:
 # Concurrent benchmark runner
 # ---------------------------------------------------------------------------
 
-class ConcurrentBenchmarkRunner:
-    """Multi-threaded stress test with weight-based query selection."""
+class ConcurrentBenchmarkRunner(BaseBenchmarkRunner):
+    """Multi-threaded stress test with duration-based execution.
+    
+    Callbacks:
+        on_progress: Called after each query execution.
+        on_run_start: Called when steady-state execution begins (after setup/ramp-up).
+    
+    Outlier Detection:
+        Queries exceeding outlier_threshold_ms are logged but still counted.
+        This helps identify long-running queries without distorting statistics.
+    """
 
-    def __init__(
-        self, config: DBMSConfig, workload: BenchWorkload,
-        bench_cfg: BenchmarkConfig, template_engine: TemplateEngine,
-        database: str = "rosetta_bench",
-        on_progress: Optional[Callable] = None,
-        on_profile_start: Optional[Callable] = None,
-        on_profile_done: Optional[Callable] = None,
-    ):
-        self.config = config
-        self.workload = workload
-        self.bench_cfg = bench_cfg
-        self.engine = template_engine
-        self.database = database
-        self.on_progress = on_progress
-        self.on_profile_start = on_profile_start
-        self.on_profile_done = on_profile_done
-        self._mysqld_pid: Optional[int] = None
-
-    def _resolve_mysqld_pid(self) -> Optional[int]:
-        """Resolve the mysqld PID for perf profiling (cached)."""
-        if self._mysqld_pid is not None:
-            return self._mysqld_pid
-        from .flamegraph import find_mysqld_pid
-        pid = find_mysqld_pid(port=self.config.port)
-        if pid:
-            self._mysqld_pid = pid
-        return self._mysqld_pid
-
-    def _build_weighted_pool(self) -> List[BenchQuery]:
-        """Build a flat list based on query weights for random selection."""
-        pool: List[BenchQuery] = []
-        for q in self.workload.queries:
-            pool.extend([q] * q.weight)
-        return pool
-
-    def run(self) -> DBMSBenchResult:
-        """Run the concurrent benchmark and return results."""
+    def run(self, skip_setup: bool = False) -> DBMSBenchResult:
+        """Run the concurrent benchmark and return results.
+        
+        In concurrent mode, workers execute queries continuously for the
+        specified duration, similar to sysbench. Each worker loops through
+        the pre-generated test cases repeatedly until time expires.
+        
+        Args:
+            skip_setup: If True, skip setup phase (already done in separate pass).
+        """
         result = DBMSBenchResult(dbms_name=self.config.name)
 
         if not ensure_service(self.config):
@@ -844,38 +996,48 @@ class ConcurrentBenchmarkRunner:
                       self.config.name)
             return result
 
-        # Setup phase (single connection)
-        setup_db = DBConnection(self.config, self.database)
-        try:
-            setup_db.connect()
-            for sql in self.workload.setup:
-                try:
-                    setup_db.cursor.execute(sql)
-                except Exception as e:
-                    log.warning("[%s] Setup failed: %s — %s",
-                                self.config.name, sql[:80], e)
-        except Exception as e:
-            log.error("[%s] Connection failed for setup: %s",
-                      self.config.name, e)
-            return result
-        finally:
-            setup_db.close()
+        # Setup phase (single connection) - skip if already done
+        if not skip_setup:
+            setup_db = DBConnection(self.config, self.database)
+            try:
+                setup_db.connect()
+                self._run_setup(setup_db, result)
+            except Exception as e:
+                log.error("[%s] Connection failed for setup: %s",
+                          self.config.name, e)
+                return result
+            finally:
+                setup_db.close()
 
-        weighted_pool = self._build_weighted_pool()
-        if not weighted_pool:
-            log.error("[%s] No queries in workload", self.config.name)
+        if not self.test_cases:
+            log.error("[%s] No test cases generated", self.config.name)
             return result
 
         # Capture EXPLAIN plans before the concurrent run (single connection)
+        # Use pre-generated test cases for EXPLAIN
         explain_plans: Dict[str, str] = {}
         explain_tree_plans: Dict[str, str] = {}
         try:
             explain_db = DBConnection(self.config, self.database)
-            explain_db.connect()
+            explain_db.connect(create_db=False)
+            
+            # Group test cases by query name
+            from collections import defaultdict
+            query_cases_map = defaultdict(list)
+            for tc in self.test_cases:
+                query_cases_map[tc.query_name].append(tc)
+            
             for query in self.workload.queries:
+                # Get first test case for this query
+                cases_for_query = query_cases_map.get(query.name, [])
+                if not cases_for_query:
+                    continue
+                    
+                # Use the first pre-rendered SQL for EXPLAIN
+                sample_sql = cases_for_query[0].sql
+                
                 try:
-                    rendered_sql = self.engine.render(query.sql)
-                    explain_db.cursor.execute("EXPLAIN " + rendered_sql)
+                    explain_db.cursor.execute("EXPLAIN " + sample_sql)
                     if explain_db.cursor.description:
                         cols = [desc[0]
                                 for desc in explain_db.cursor.description]
@@ -904,9 +1066,8 @@ class ConcurrentBenchmarkRunner:
                 # EXPLAIN FORMAT=TREE (tdsql only)
                 if self.config.name.lower() == "tdsql":
                     try:
-                        rendered_sql = self.engine.render(query.sql)
                         explain_db.cursor.execute(
-                            "EXPLAIN FORMAT=TREE " + rendered_sql)
+                            "EXPLAIN FORMAT=TREE " + sample_sql)
                         tree_rows = explain_db.cursor.fetchall()
                         if tree_rows:
                             explain_tree_plans[query.name] = "\n".join(
@@ -924,7 +1085,6 @@ class ConcurrentBenchmarkRunner:
         # Determine run duration
         duration = self.bench_cfg.duration
         if duration <= 0:
-            # Estimate from iterations: run enough to execute ~iterations per query
             duration = 30.0  # default 30s
 
         concurrency = max(1, self.bench_cfg.concurrency)
@@ -940,68 +1100,69 @@ class ConcurrentBenchmarkRunner:
         }
         stop_event = threading.Event()
         total_executed = [0]  # mutable counter
+        active_connections: List[DBConnection] = []  # Track for forced close
+        conn_lock = threading.Lock()
+        
+        # Query timeout configuration
+        query_timeout = self.bench_cfg.query_timeout
+        outlier_threshold_ms = query_timeout * 1000 if query_timeout > 0 else 0
+        outliers_logged = set()  # Avoid spamming logs for same query
 
         # Profiling setup — in concurrent mode, capture a single mixed
         # flame graph for the entire run duration.
-        # Profiling is only supported for tdsql – skip for other DBMS.
-        profiling = self.bench_cfg.profile
+        profiling = self._check_profiling_support()
         profiler = None
-        if profiling and self.config.name.lower() != "tdsql":
-            log.info("[%s] Profiling skipped (only tdsql is profiled)",
-                     self.config.name)
-            profiling = False
         if profiling:
-            from .flamegraph import PerfProfiler, check_perf_available
-            ok, msg = check_perf_available()
-            if not ok:
-                log.warning("[%s] Profiling disabled: %s",
-                            self.config.name, msg)
-                profiling = False
-            else:
-                mysqld_pid = self._resolve_mysqld_pid()
-                if not mysqld_pid:
-                    log.warning(
-                        "[%s] Profiling disabled: mysqld PID not found",
-                        self.config.name)
-                    profiling = False
-                else:
-                    if self.on_profile_start:
-                        self.on_profile_start("concurrent_mix")
-                    profiler = PerfProfiler(
-                        mysqld_pid=mysqld_pid,
-                        perf_freq=self.bench_cfg.perf_freq,
-                    )
+            from .flamegraph import PerfProfiler
+            if self.on_profile_start:
+                self.on_profile_start("concurrent_mix")
+            profiler = PerfProfiler(
+                mysqld_pid=self._mysqld_pid,
+                perf_freq=self.bench_cfg.perf_freq,
+            )
 
         def worker(thread_id: int, start_delay: float):
-            """Worker thread that executes queries until stop_event."""
+            """Worker thread that executes queries continuously until stop_event.
+            
+            Each worker loops through the pre-generated test cases repeatedly,
+            cycling back to the start when reaching the end. This ensures
+            time-based execution similar to sysbench.
+            """
             if start_delay > 0:
                 _time.sleep(start_delay)
 
-            rng = random.Random()
-            eng = TemplateEngine()  # thread-local engine
-
             db = DBConnection(self.config, self.database)
             try:
-                db.connect()
+                db.connect(create_db=False, query_timeout=query_timeout)  # Don't recreate DB, just use existing
                 db.cursor.execute(f"USE `{self.database}`")
             except Exception as e:
                 log.warning("[%s] Worker %d connect failed: %s",
                             self.config.name, thread_id, e)
                 return
 
-            try:
-                while not stop_event.is_set():
-                    query = rng.choice(weighted_pool)
-                    rendered_sql = eng.render(query.sql)
+            # Track connection for forced close
+            with conn_lock:
+                active_connections.append(db)
 
+            try:
+                # Local index for cycling through test cases
+                local_idx = 0
+                n_cases = len(self.test_cases)
+                
+                while not stop_event.is_set():
+                    # Cycle through test cases repeatedly
+                    tc = self.test_cases[local_idx % n_cases]
+                    local_idx += 1
+
+                    # Execute pre-rendered SQL
                     t0 = _time.monotonic()
                     try:
-                        db.cursor.execute(rendered_sql)
+                        db.cursor.execute(tc.sql)
                         if db.cursor.description:
                             db.cursor.fetchall()
                     except Exception as e:
                         with latency_lock:
-                            per_query_errors[query.name] += 1
+                            per_query_errors[tc.query_name] += 1
                         if db._is_connection_lost(e):
                             if not db.reconnect():
                                 break
@@ -1014,16 +1175,33 @@ class ConcurrentBenchmarkRunner:
                     t1 = _time.monotonic()
 
                     lat_ms = (t1 - t0) * 1000.0
+                    
+                    # Log outlier queries (exceeding threshold)
+                    if outlier_threshold_ms > 0 and lat_ms > outlier_threshold_ms:
+                        outlier_key = (tc.query_name, int(lat_ms / 1000))
+                        if outlier_key not in outliers_logged:
+                            outliers_logged.add(outlier_key)
+                            log.warning(
+                                "[%s] Slow query detected: %s took %.0fms (>%ds threshold)",
+                                self.config.name, tc.query_name, lat_ms, query_timeout
+                            )
+                    
                     with latency_lock:
-                        per_query_latencies[query.name].append(lat_ms)
+                        per_query_latencies[tc.query_name].append(lat_ms)
                         total_executed[0] += 1
 
                     if self.on_progress:
                         self.on_progress(
-                            query.name, total_executed[0], 0,
+                            tc.query_name, total_executed[0], 0,
                             is_warmup=False,
                         )
             finally:
+                # Remove from active connections
+                with conn_lock:
+                    try:
+                        active_connections.remove(db)
+                    except ValueError:
+                        pass
                 db.close()
 
         # Launch threads with ramp-up
@@ -1040,6 +1218,10 @@ class ConcurrentBenchmarkRunner:
             if ramp_up > 0:
                 _time.sleep(ramp_up)
 
+            # Notify that steady-state execution is starting
+            if self.on_run_start:
+                self.on_run_start()
+
             # Begin timing: only steady-state execution counts
             exec_start = _time.monotonic()
 
@@ -1047,18 +1229,29 @@ class ConcurrentBenchmarkRunner:
             if profiler is not None:
                 profiler.start()
 
-            # Run for the remaining duration (subtract ramp-up already elapsed)
-            remaining = max(0, duration - ramp_up) if ramp_up > 0 else duration
-            _time.sleep(remaining)
+            # Wait for duration to expire (sysbench-style)
+            _time.sleep(duration)
+            
+            # Signal all workers to stop
             stop_event.set()
+            
+            # Force close any lingering connections to interrupt slow queries
+            # Wait a brief moment for workers to finish gracefully
+            _time.sleep(0.5)
+            with conn_lock:
+                for conn in list(active_connections):
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
 
             # Wait for all threads to finish
             for f in futures:
                 try:
-                    f.result(timeout=10)
+                    f.result(timeout=5)  # Reduced timeout since connections are closed
                 except Exception as e:
-                    log.warning("[%s] Worker error: %s",
-                                self.config.name, e)
+                    log.debug("[%s] Worker cleanup: %s",
+                              self.config.name, e)
 
         overall_elapsed = _time.monotonic() - exec_start
 
@@ -1093,17 +1286,11 @@ class ConcurrentBenchmarkRunner:
         if overall_elapsed > 0:
             result.overall_qps = result.total_queries / overall_elapsed
 
-        # Teardown (single connection)
+        # Teardown phase (single connection)
         teardown_db = DBConnection(self.config, self.database)
         try:
-            teardown_db.connect()
-            for sql in self.workload.teardown:
-                try:
-                    teardown_db.cursor.execute(sql)
-                except Exception as e:
-                    log.warning("[%s] Teardown failed: %s — %s",
-                                self.config.name, sql[:80], e)
-            teardown_db.cleanup_database()
+            teardown_db.connect(create_db=False)
+            self._run_teardown(teardown_db)
         except Exception:
             pass
         finally:
@@ -1126,9 +1313,19 @@ def run_benchmark(
     on_dbms_done: Optional[Callable] = None,
     on_profile_start: Optional[Callable] = None,
     on_profile_done: Optional[Callable] = None,
+    on_run_start: Optional[Callable] = None,
+    on_setup_start: Optional[Callable] = None,
+    on_setup_done: Optional[Callable] = None,
     parallel_dbms: bool = False,
 ) -> BenchmarkResult:
     """Run benchmark on all DBMS targets and return aggregated results.
+
+    The execution is split into two phases for fairness:
+    1. Setup phase: All DBMS targets run setup SQL in parallel
+    2. Query phase: After all setups complete, run queries in parallel
+    
+    This ensures all DBMS start the query phase at the same time with
+    identical data states.
 
     Args:
         configs: List of DBMS connection configs.
@@ -1140,6 +1337,9 @@ def run_benchmark(
         on_dbms_done: Optional callback(dbms_name, dbms_result).
         on_profile_start: Optional callback(dbms_name, query_name).
         on_profile_done: Optional callback(dbms_name, query_name, sample_count).
+        on_run_start: Optional callback() - called when query phase begins.
+        on_setup_start: Optional callback(dbms_name) - called when setup starts.
+        on_setup_done: Optional callback(dbms_name, success) - called when setup finishes.
         parallel_dbms: If True, run benchmarks on all DBMS targets in
             parallel (each DBMS gets its own thread and TemplateEngine).
 
@@ -1151,6 +1351,12 @@ def run_benchmark(
         mode=bench_cfg.mode,
         config=bench_cfg,
         timestamp=_time.strftime("%Y-%m-%d %H:%M:%S"),
+        setup_sql=list(workload.setup),
+        teardown_sql=list(workload.teardown),
+        queries_sql=[
+            {"name": q.name, "sql": q.sql, "weight": q.weight}
+            for q in workload.queries
+        ],
     )
 
     # Apply query filter
@@ -1158,13 +1364,129 @@ def run_benchmark(
         workload = BenchmarkLoader.filter_queries(
             workload, bench_cfg.filter_queries)
 
-    def _run_single(config: DBMSConfig) -> DBMSBenchResult:
-        """Run benchmark on a single DBMS target."""
+    # Pre-generate test cases for fair comparison
+    # All DBMS instances will execute the exact same sequence of SQL statements
+    log.info("Pre-generating test cases with seed=%d", bench_cfg.seed)
+    generator = TestCaseGenerator(seed=bench_cfg.seed)
+    
+    if bench_cfg.mode == WorkloadMode.SERIAL:
+        test_cases = generator.generate_serial_cases(
+            workload, bench_cfg.iterations, bench_cfg.warmup)
+        log.info("Generated %d test cases for serial mode", len(test_cases))
+    else:
+        # For concurrent mode, generate a pool of test cases that workers
+        # will cycle through repeatedly during the duration.
+        # Use a reasonable pool size (~100 per query) for variety.
+        pool_size = max(100, len(workload.queries) * 20)
+        test_cases = generator.generate_concurrent_cases(workload, pool_size)
+        log.info("Generated %d test cases for concurrent mode (will cycle)", len(test_cases))
+
+    # Track setup results per DBMS
+    setup_results: Dict[str, bool] = {}
+    setup_table_rows: Dict[str, int] = {}
+    setup_table_rows_detail: Dict[str, Dict[str, int]] = {}
+    
+    def _run_setup(config: DBMSConfig) -> bool:
+        """Run setup phase on a single DBMS. Returns True on success."""
+        if on_setup_start:
+            on_setup_start(config.name)
+        
+        if not ensure_service(config):
+            log.error("[%s] Service unavailable for setup", config.name)
+            if on_setup_done:
+                on_setup_done(config.name, False)
+            return False
+        
+        db = DBConnection(config, database)
+        try:
+            db.connect()
+            
+            # Run setup SQL
+            for sql in workload.setup:
+                try:
+                    db.cursor.execute(sql)
+                except Exception as e:
+                    log.warning("[%s] Setup failed: %s — %s",
+                                config.name, sql[:80], e)
+            
+            # Query total rows after setup
+            try:
+                db.cursor.execute(
+                    "SELECT TABLE_NAME FROM information_schema.TABLES "
+                    f"WHERE TABLE_SCHEMA = '{database}' "
+                    "AND TABLE_TYPE = 'BASE TABLE'")
+                tables = [r[0] for r in db.cursor.fetchall()]
+                total = 0
+                detail = {}
+                for tbl in tables:
+                    try:
+                        db.cursor.execute(f"SELECT COUNT(*) FROM `{tbl}`")
+                        cnt = db.cursor.fetchone()
+                        if cnt and cnt[0]:
+                            row_count = int(cnt[0])
+                            total += row_count
+                            detail[tbl] = row_count
+                    except Exception:
+                        pass
+                setup_table_rows[config.name] = total
+                setup_table_rows_detail[config.name] = detail
+            except Exception as e:
+                log.debug("[%s] Could not query table rows: %s",
+                          config.name, e)
+            
+            log.info("[%s] Setup completed", config.name)
+            if on_setup_done:
+                on_setup_done(config.name, True)
+            return True
+            
+        except Exception as e:
+            log.error("[%s] Setup connection failed: %s", config.name, e)
+            if on_setup_done:
+                on_setup_done(config.name, False)
+            return False
+        finally:
+            db.close()
+
+    # --- Phase 1: Run setup on all DBMS targets ---
+    log.info("Starting setup phase for %d DBMS targets", len(configs))
+    
+    if parallel_dbms and len(configs) > 1:
+        # Parallel setup
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(configs)) as pool:
+            futures = {pool.submit(_run_setup, c): c for c in configs}
+            for fut in concurrent.futures.as_completed(futures):
+                config = futures[fut]
+                try:
+                    setup_results[config.name] = fut.result()
+                except Exception as e:
+                    log.error("[%s] Setup failed: %s", config.name, e)
+                    setup_results[config.name] = False
+    else:
+        # Sequential setup
+        for config in configs:
+            setup_results[config.name] = _run_setup(config)
+    
+    # Check if any setup succeeded
+    successful_configs = [c for c in configs if setup_results.get(c.name, False)]
+    if not successful_configs:
+        log.error("All DBMS setups failed, aborting benchmark")
+        return result
+    
+    # --- Phase 2: Run query phase on all DBMS targets ---
+    log.info("All setups complete, starting query phase")
+    
+    # Brief pause to ensure "setup完毕" status is visible to user
+    _time.sleep(1.0)
+    
+    # Notify that query phase is starting (for UI timing reset)
+    if on_run_start:
+        on_run_start()
+
+    def _run_query_phase(config: DBMSConfig) -> DBMSBenchResult:
+        """Run query phase on a single DBMS target (setup already done)."""
         if on_dbms_start:
             on_dbms_start(config.name)
-
-        # Each DBMS gets its own TemplateEngine for thread safety
-        engine = TemplateEngine()
 
         def _progress_cb(qname, it, total, is_warmup=False,
                          _dbms=config.name):
@@ -1181,34 +1503,40 @@ def run_benchmark(
 
         if bench_cfg.mode == WorkloadMode.SERIAL:
             runner = SerialBenchmarkRunner(
-                config, workload, bench_cfg, engine, database,
+                config, workload, bench_cfg, test_cases, database,
                 on_progress=_progress_cb,
                 on_profile_start=_profile_start_cb,
                 on_profile_done=_profile_done_cb,
             )
         else:
             runner = ConcurrentBenchmarkRunner(
-                config, workload, bench_cfg, engine, database,
+                config, workload, bench_cfg, test_cases, database,
                 on_progress=_progress_cb,
                 on_profile_start=_profile_start_cb,
                 on_profile_done=_profile_done_cb,
+                on_run_start=None,  # Already called above
             )
 
-        dbms_result = runner.run()
+        # Skip setup since it's already done
+        dbms_result = runner.run(skip_setup=True)
+        
+        # Add table_rows from setup phase
+        if config.name in setup_table_rows:
+            dbms_result.table_rows = setup_table_rows[config.name]
+        if config.name in setup_table_rows_detail:
+            dbms_result.table_rows_detail = setup_table_rows_detail[config.name]
 
         if on_dbms_done:
             on_dbms_done(config.name, dbms_result)
 
         return dbms_result
 
-    if parallel_dbms and len(configs) > 1:
+    if parallel_dbms and len(successful_configs) > 1:
         # Run all DBMS targets in parallel
-        import concurrent.futures
-
         with concurrent.futures.ThreadPoolExecutor(
-                max_workers=len(configs)) as pool:
+                max_workers=len(successful_configs)) as pool:
             futures = {
-                pool.submit(_run_single, c): c for c in configs
+                pool.submit(_run_query_phase, c): c for c in successful_configs
             }
             for fut in concurrent.futures.as_completed(futures):
                 try:
@@ -1218,14 +1546,21 @@ def run_benchmark(
                     config = futures[fut]
                     log.error("[%s] Benchmark failed: %s", config.name, e)
     else:
-        # Sequential execution (original behavior)
-        for config in configs:
-            dbms_result = _run_single(config)
+        # Sequential execution
+        for config in successful_configs:
+            dbms_result = _run_query_phase(config)
             result.dbms_results.append(dbms_result)
 
     # Ensure results are in the same order as configs for consistent reports
     name_order = {c.name: i for i, c in enumerate(configs)}
     result.dbms_results.sort(
         key=lambda r: name_order.get(r.dbms_name, 999))
+
+    # Populate table_rows from first DBMS that reported a value
+    for dr in result.dbms_results:
+        if dr.table_rows > 0:
+            result.table_rows = dr.table_rows
+            result.table_rows_detail = dr.table_rows_detail
+            break
 
     return result

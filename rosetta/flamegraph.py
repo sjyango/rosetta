@@ -177,8 +177,14 @@ class PerfProfiler:
             self._perf_proc.send_signal(2)  # SIGINT
             self._perf_proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
+            log.warning("perf record did not stop after SIGINT, killing")
             self._perf_proc.kill()
-            self._perf_proc.wait(timeout=5)
+            try:
+                self._perf_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                log.warning("perf record could not be killed")
+                result.error = "perf record could not be stopped"
+                return result
         except Exception as e:
             log.warning("Error stopping perf: %s", e)
             result.error = f"Failed to stop perf: {e}"
@@ -195,11 +201,26 @@ class PerfProfiler:
             result.error = f"perf.data not created. stderr: {stderr_out}"
             return result
 
+        # Check perf.data size — skip processing if too large (>200MB)
+        # to avoid perf script hanging for minutes
+        try:
+            data_size = os.path.getsize(self._perf_data_path)
+            if data_size > 200 * 1024 * 1024:
+                result.error = (
+                    f"perf.data too large ({data_size // (1024*1024)}MB), "
+                    f"skipping flamegraph generation")
+                log.warning("[%s] %s", query_name, result.error)
+                return result
+        except OSError:
+            pass
+
         # Run perf script to get human-readable stack traces
+        # Use a generous but bounded timeout to avoid hanging indefinitely
+        perf_script_timeout = max(60, min(300, int(duration * 3)))
         try:
             script_proc = subprocess.run(
                 ["perf", "script", "-i", self._perf_data_path],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, timeout=perf_script_timeout,
             )
             if script_proc.returncode != 0:
                 result.error = (
@@ -208,6 +229,12 @@ class PerfProfiler:
                 return result
 
             raw_script = script_proc.stdout
+        except subprocess.TimeoutExpired:
+            result.error = (
+                f"perf script timed out after {perf_script_timeout}s "
+                f"(perf.data may be too large)")
+            log.warning("[%s] %s", query_name, result.error)
+            return result
         except Exception as e:
             result.error = f"perf script error: {e}"
             return result
