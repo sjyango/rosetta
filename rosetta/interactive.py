@@ -975,6 +975,8 @@ class BenchInteractiveSession:
             perf_freq=self.perf_freq,
             query_timeout=self.query_timeout,
             flamegraph_min_ms=self.flamegraph_min_ms,
+            skip_setup=getattr(self, 'skip_setup', False),
+            skip_teardown=getattr(self, 'skip_teardown', False),
         )
 
         # Apply filter

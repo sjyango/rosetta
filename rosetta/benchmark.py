@@ -143,10 +143,12 @@ class TestCaseGenerator:
             for i in range(iterations):
                 # Render the SQL template with concrete values
                 rendered_sql = self.engine.render(query.sql)
+                cleanup = self.engine.render(query.cleanup_sql) if query.cleanup_sql else ""
                 cases.append(TestCase(
                     query_name=query.name,
                     sql=rendered_sql,
                     original_sql=query.sql,
+                    cleanup_sql=cleanup,
                 ))
         
         return cases
@@ -183,10 +185,12 @@ class TestCaseGenerator:
         for i in range(total_queries):
             query = rng.choice(weighted_pool)
             rendered_sql = self.engine.render(query.sql)
+            cleanup = self.engine.render(query.cleanup_sql) if query.cleanup_sql else ""
             cases.append(TestCase(
                 query_name=query.name,
                 sql=rendered_sql,
                 original_sql=query.sql,
+                cleanup_sql=cleanup,
             ))
         
         return cases
@@ -302,10 +306,13 @@ class BenchmarkLoader:
                     raise ValueError(
                         f"Query at index {i} is missing 'sql' field"
                     )
+                cleanup = q.get("cleanup_sql", "").rstrip(";").strip()
                 queries.append(BenchQuery(
                     name=q.get("name", f"query_{i + 1}"),
                     sql=sql,
                     weight=max(1, int(q.get("weight", 1))),
+                    description=q.get("description", ""),
+                    cleanup_sql=cleanup,
                 ))
             else:
                 raise ValueError(
@@ -730,6 +737,9 @@ class BaseBenchmarkRunner:
 
     def _run_teardown(self, db: DBConnection):
         """Run teardown phase: execute teardown SQL and cleanup database."""
+        if self.bench_cfg.skip_teardown:
+            log.info("[%s] Skipping teardown (--skip-teardown)", self.config.name)
+            return
         for sql in self.workload.teardown:
             try:
                 db.cursor.execute(sql)
@@ -806,7 +816,26 @@ class SerialBenchmarkRunner(BaseBenchmarkRunner):
                                         f"USE `{self.database}`")
                                 except Exception:
                                     pass
+                        # Still run cleanup to restore state
+                        if query.cleanup_sql:
+                            try:
+                                cleanup = warmup_engine.render(query.cleanup_sql)
+                                db.cursor.execute(cleanup)
+                                if db.cursor.description:
+                                    db.cursor.fetchall()
+                            except Exception:
+                                pass
                         continue
+
+                    # Run cleanup SQL after warmup iteration
+                    if query.cleanup_sql:
+                        try:
+                            cleanup = warmup_engine.render(query.cleanup_sql)
+                            db.cursor.execute(cleanup)
+                            if db.cursor.description:
+                                db.cursor.fetchall()
+                        except Exception:
+                            pass
 
                     if self.on_progress:
                         self.on_progress(
@@ -899,10 +928,28 @@ class SerialBenchmarkRunner(BaseBenchmarkRunner):
                                         f"USE `{self.database}`")
                                 except Exception:
                                     pass
+                        # Still run cleanup to restore state for next iteration
+                        if tc.cleanup_sql:
+                            try:
+                                db.cursor.execute(tc.cleanup_sql)
+                                if db.cursor.description:
+                                    db.cursor.fetchall()
+                            except Exception:
+                                pass
                         continue
                     t1 = _time.monotonic()
 
                     latencies.append((t1 - t0) * 1000.0)  # ms
+
+                    # Run cleanup SQL to restore state (not timed)
+                    if tc.cleanup_sql:
+                        try:
+                            db.cursor.execute(tc.cleanup_sql)
+                            if db.cursor.description:
+                                db.cursor.fetchall()
+                        except Exception as ce:
+                            log.debug("[%s] Cleanup error: %s — %s",
+                                      self.config.name, query.name, ce)
 
                     if self.on_progress:
                         self.on_progress(
@@ -1171,10 +1218,27 @@ class ConcurrentBenchmarkRunner(BaseBenchmarkRunner):
                                     f"USE `{self.database}`")
                             except Exception:
                                 pass
+                        # Still run cleanup to restore state for next iteration
+                        if tc.cleanup_sql:
+                            try:
+                                db.cursor.execute(tc.cleanup_sql)
+                                if db.cursor.description:
+                                    db.cursor.fetchall()
+                            except Exception:
+                                pass
                         continue
                     t1 = _time.monotonic()
 
                     lat_ms = (t1 - t0) * 1000.0
+
+                    # Run cleanup SQL to restore state (not timed)
+                    if tc.cleanup_sql:
+                        try:
+                            db.cursor.execute(tc.cleanup_sql)
+                            if db.cursor.description:
+                                db.cursor.fetchall()
+                        except Exception:
+                            pass
                     
                     # Log outlier queries (exceeding threshold)
                     if outlier_threshold_ms > 0 and lat_ms > outlier_threshold_ms:
@@ -1354,7 +1418,8 @@ def run_benchmark(
         setup_sql=list(workload.setup),
         teardown_sql=list(workload.teardown),
         queries_sql=[
-            {"name": q.name, "sql": q.sql, "weight": q.weight}
+            {"name": q.name, "sql": q.sql, "weight": q.weight,
+             "description": q.description, "cleanup_sql": q.cleanup_sql}
             for q in workload.queries
         ],
     )
@@ -1399,15 +1464,19 @@ def run_benchmark(
         
         db = DBConnection(config, database)
         try:
-            db.connect()
-            
-            # Run setup SQL
-            for sql in workload.setup:
-                try:
-                    db.cursor.execute(sql)
-                except Exception as e:
-                    log.warning("[%s] Setup failed: %s — %s",
-                                config.name, sql[:80], e)
+            if bench_cfg.skip_setup:
+                # Skip setup: just connect (don't drop/recreate DB)
+                db.connect(create_db=False)
+                log.info("[%s] Skipping setup (--skip-setup), reusing existing tables", config.name)
+            else:
+                db.connect()
+                # Run setup SQL
+                for sql in workload.setup:
+                    try:
+                        db.cursor.execute(sql)
+                    except Exception as e:
+                        log.warning("[%s] Setup failed: %s — %s",
+                                    config.name, sql[:80], e)
             
             # Query total rows after setup
             try:

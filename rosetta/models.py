@@ -104,6 +104,8 @@ class BenchQuery:
     name: str
     sql: str
     weight: int = 1
+    description: str = ""  # Human-readable description of the query
+    cleanup_sql: str = ""  # SQL to run after each iteration to restore state (not timed)
 
 
 @dataclass
@@ -112,6 +114,7 @@ class TestCase:
     query_name: str
     sql: str  # Already rendered, ready to execute
     original_sql: str  # Original template for reference
+    cleanup_sql: str = ""  # SQL to run after execution to restore state (not timed)
 
 
 @dataclass
@@ -138,6 +141,8 @@ class BenchmarkConfig:
     seed: int = 42          # random seed for reproducibility and fairness
     query_timeout: int = 5  # query timeout in seconds (0 = disabled)
     flamegraph_min_ms: int = 1000  # min total duration (ms) to show flamegraph in serial mode
+    skip_setup: bool = False   # skip setup phase if tables already exist with data
+    skip_teardown: bool = False  # skip teardown (keep tables for next run)
 
 
 @dataclass

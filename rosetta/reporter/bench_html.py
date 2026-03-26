@@ -758,9 +758,14 @@ function renderSchema() {
         '<div style="font-size:12px;color:var(--blue);font-weight:600;margin-bottom:4px">' +
         esc(q.name) +
         '<span style="color:var(--fg2);font-weight:400;margin-left:8px">weight: ' + q.weight + '</span>' +
+        (q.description ? '<span style="color:var(--fg2);font-weight:400;margin-left:8px;font-style:italic">' + esc(q.description) + '</span>' : '') +
         '</div>' +
-        '<div class="schema-sql">' + highlightSQL(q.sql) + '</div>' +
-        '</div>';
+        '<div class="schema-sql">' + highlightSQL(q.sql) + '</div>';
+      if (q.cleanup_sql) {
+        html += '<div style="margin-top:4px;font-size:11px;color:var(--fg2)">cleanup:</div>' +
+          '<div class="schema-sql" style="border-color:var(--yellow);opacity:0.7">' + highlightSQL(q.cleanup_sql) + '</div>';
+      }
+      html += '</div>';
     });
     html += '</div></div>';
   }
@@ -848,11 +853,24 @@ function renderQueryDetail(qn) {
 
   var html = '';
 
-  // --- SQL ---
+  // --- Description & SQL ---
+  // Look up description and cleanup_sql from queries_sql
+  var qMeta = null;
+  (DATA.queries_sql || []).forEach(function(qs) { if (qs.name === qn) qMeta = qs; });
+
+  if (qMeta && qMeta.description) {
+    html += '<div class="q-sub" style="padding-bottom:8px"><div style="font-size:13px;color:var(--fg2);font-style:italic">' +
+      esc(qMeta.description) + '</div></div><hr class="q-separator">';
+  }
+
   if (sql) {
     html += '<div class="q-sub"><div class="q-sub-title"><span class="q-icon">\uD83D\uDCDD</span> SQL</div>' +
-      '<div class="sql-code">' + esc(sql) + '</div></div>';
-    html += '<hr class="q-separator">';
+      '<div class="sql-code">' + esc(sql) + '</div>';
+    if (qMeta && qMeta.cleanup_sql) {
+      html += '<div style="margin-top:8px;font-size:12px;color:var(--yellow);font-weight:600">Cleanup SQL</div>' +
+        '<div class="sql-code" style="margin-top:4px;border-color:var(--yellow);opacity:0.8">' + esc(qMeta.cleanup_sql) + '</div>';
+    }
+    html += '</div><hr class="q-separator">';
   }
 
   // --- Latency Table ---

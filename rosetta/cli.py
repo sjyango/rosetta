@@ -454,6 +454,12 @@ Examples:
         help="Number of benchmark rounds; each round produces "
              "a timestamped report (default: 1)")
     bench.add_argument(
+        "--skip-setup", action="store_true", default=False,
+        help="Skip setup phase (reuse existing tables from previous run)")
+    bench.add_argument(
+        "--skip-teardown", action="store_true", default=False,
+        help="Skip teardown (keep tables for next run with --skip-setup)")
+    bench.add_argument(
         "--no-parallel-dbms", dest="parallel_dbms",
         action="store_false",
         help="Run DBMS targets sequentially instead of in parallel")
@@ -740,6 +746,8 @@ def _run_benchmark(args) -> int:
         perf_freq=getattr(args, 'perf_freq', 99),
         query_timeout=args.query_timeout,
         flamegraph_min_ms=getattr(args, 'flamegraph_min_ms', 1000),
+        skip_setup=getattr(args, 'skip_setup', False),
+        skip_teardown=getattr(args, 'skip_teardown', False),
     )
 
     # Apply filter to workload for display
@@ -783,6 +791,10 @@ def _run_benchmark(args) -> int:
         print_info("Profiling:",
                     f"[bold red]🔥 perf flame graph[/bold red] "
                     f"(freq: {bench_cfg.perf_freq} Hz)")
+    if bench_cfg.skip_setup:
+        print_info("Setup:", "[bold yellow]SKIPPED[/bold yellow] (reusing existing tables)")
+    if bench_cfg.skip_teardown:
+        print_info("Teardown:", "[bold yellow]SKIPPED[/bold yellow] (keeping tables)")
 
     # ------------------------------------------------------------------
     # Inner function: execute a single benchmark round
@@ -1061,6 +1073,8 @@ def _select_bench_params(
     duration: float = 30.0,
     ramp_up: float = 0.0,
     profile: bool = True,
+    skip_setup: bool = False,
+    skip_teardown: bool = False,
 ) -> Optional[dict]:
     """Show an interactive benchmark parameter configuration panel.
 
@@ -1080,9 +1094,9 @@ def _select_bench_params(
 
     # Step 2: Parameter configuration based on mode
     if mode == "serial":
-        return _select_serial_params(iterations, warmup, profile)
+        return _select_serial_params(iterations, warmup, profile, skip_setup, skip_teardown)
     else:
-        return _select_concurrent_params(concurrency, duration, ramp_up, profile)
+        return _select_concurrent_params(concurrency, duration, ramp_up, profile, skip_setup, skip_teardown)
 
 
 def _select_bench_mode() -> Optional[dict]:
@@ -1197,6 +1211,8 @@ def _select_serial_params(
     iterations: int = 100,
     warmup: int = 5,
     profile: bool = True,
+    skip_setup: bool = False,
+    skip_teardown: bool = False,
 ) -> Optional[dict]:
     """Show parameter configuration for SERIAL mode."""
     from prompt_toolkit import Application
@@ -1210,6 +1226,7 @@ def _select_serial_params(
     ITER_PRESETS = [10, 50, 100, 200, 500, 1000]
     WARMUP_PRESETS = [0, 5, 10, 20, 50]
     PROFILE_LABELS = {False: "Off", True: "On"}
+    SKIP_LABELS = {False: "Off", True: "On"}
 
     custom_iter = [None]
     custom_warmup = [None]
@@ -1221,11 +1238,15 @@ def _select_serial_params(
     wa_idx = [WARMUP_PRESETS.index(warmup)
               if warmup in WARMUP_PRESETS else 1]
     prof = [profile]
+    s_setup = [skip_setup]
+    s_teardown = [skip_teardown]
 
     FIELDS = [
         {"label": "Iterations", "type": "choice"},
         {"label": "Warmup", "type": "choice"},
-        {"label": "Profile (flame graph)", "type": "toggle"},
+        {"label": "Profile (flame graph)", "type": "toggle", "var": "prof"},
+        {"label": "Skip Setup (reuse tables)", "type": "toggle", "var": "s_setup"},
+        {"label": "Skip Teardown (keep tables)", "type": "toggle", "var": "s_teardown"},
         {"label": "OK", "type": "action"},
         {"label": "Back", "type": "action"},
         {"label": "Quit", "type": "action"},
@@ -1256,8 +1277,20 @@ def _select_serial_params(
             if custom_warmup[0] is not None:
                 return f"{v} (custom)"
             return str(v)
-        else:
+        elif i == 2:
             return PROFILE_LABELS[prof[0]]
+        elif i == 3:
+            return SKIP_LABELS[s_setup[0]]
+        elif i == 4:
+            return SKIP_LABELS[s_teardown[0]]
+        return ""
+
+    def _get_toggle_var(i):
+        """Get the toggle variable list for field index."""
+        if i == 2: return prof
+        if i == 3: return s_setup
+        if i == 4: return s_teardown
+        return None
 
     def _toggle_right(i):
         if i == 0:
@@ -1277,7 +1310,9 @@ def _select_serial_params(
                 else:
                     wa_idx[0] += 1
         else:
-            prof[0] = not prof[0]
+            var = _get_toggle_var(i)
+            if var is not None:
+                var[0] = not var[0]
 
     def _toggle_left(i):
         if i == 0:
@@ -1299,7 +1334,9 @@ def _select_serial_params(
                 else:
                     wa_idx[0] -= 1
         else:
-            prof[0] = not prof[0]
+            var = _get_toggle_var(i)
+            if var is not None:
+                var[0] = not var[0]
 
     editing = [None]
     edit_buf = [""]
@@ -1381,6 +1418,8 @@ def _select_serial_params(
                 "duration": 0.0,
                 "ramp_up": 0.0,
                 "profile": prof[0],
+                "skip_setup": s_setup[0],
+                "skip_teardown": s_teardown[0],
             }
             event.app.exit()
             return
@@ -1458,7 +1497,9 @@ def _select_serial_params(
                 else:
                     val = ("dim", val_str)
             else:
-                if prof[0]:
+                toggle_var = _get_toggle_var(i)
+                toggle_on = toggle_var[0] if toggle_var else False
+                if toggle_on:
                     val = ("bold green" if is_sel else "green",
                            f"● {val_str}")
                 else:
@@ -1495,6 +1536,8 @@ def _select_concurrent_params(
     duration: float = 30.0,
     ramp_up: float = 0.0,
     profile: bool = True,
+    skip_setup: bool = False,
+    skip_teardown: bool = False,
 ) -> Optional[dict]:
     """Show parameter configuration for CONCURRENT mode."""
     from prompt_toolkit import Application
@@ -1509,6 +1552,7 @@ def _select_concurrent_params(
     DURATION_PRESETS = [10.0, 30.0, 60.0, 120.0, 300.0]
     RAMPUP_PRESETS = [0.0, 1.0, 2.0, 5.0, 10.0]
     PROFILE_LABELS = {False: "Off", True: "On"}
+    SKIP_LABELS = {False: "Off", True: "On"}
 
     custom_concurrency = [None]
     custom_duration = [None]
@@ -1523,12 +1567,16 @@ def _select_concurrent_params(
     ramp_idx = [RAMPUP_PRESETS.index(ramp_up)
                 if ramp_up in RAMPUP_PRESETS else 0]
     prof = [profile]
+    s_setup = [skip_setup]
+    s_teardown = [skip_teardown]
 
     FIELDS = [
         {"label": "Concurrency (threads)", "type": "choice"},
         {"label": "Duration (seconds)", "type": "choice"},
         {"label": "Ramp-up (seconds)", "type": "choice"},
-        {"label": "Profile (flame graph)", "type": "toggle"},
+        {"label": "Profile (flame graph)", "type": "toggle", "var": "prof"},
+        {"label": "Skip Setup (reuse tables)", "type": "toggle", "var": "s_setup"},
+        {"label": "Skip Teardown (keep tables)", "type": "toggle", "var": "s_teardown"},
         {"label": "OK", "type": "action"},
         {"label": "Back", "type": "action"},
         {"label": "Quit", "type": "action"},
@@ -1569,8 +1617,19 @@ def _select_concurrent_params(
             if custom_rampup[0] is not None:
                 return f"{v} (custom)"
             return str(v)
-        else:
+        elif i == 3:
             return PROFILE_LABELS[prof[0]]
+        elif i == 4:
+            return SKIP_LABELS[s_setup[0]]
+        elif i == 5:
+            return SKIP_LABELS[s_teardown[0]]
+        return ""
+
+    def _get_toggle_var(i):
+        if i == 3: return prof
+        if i == 4: return s_setup
+        if i == 5: return s_teardown
+        return None
 
     def _toggle_right(i):
         if i == 0:
@@ -1598,7 +1657,9 @@ def _select_concurrent_params(
                 else:
                     ramp_idx[0] += 1
         else:
-            prof[0] = not prof[0]
+            var = _get_toggle_var(i)
+            if var is not None:
+                var[0] = not var[0]
 
     def _toggle_left(i):
         if i == 0:
@@ -1629,7 +1690,9 @@ def _select_concurrent_params(
                 else:
                     ramp_idx[0] -= 1
         else:
-            prof[0] = not prof[0]
+            var = _get_toggle_var(i)
+            if var is not None:
+                var[0] = not var[0]
 
     editing = [None]
     edit_buf = [""]
@@ -1721,6 +1784,8 @@ def _select_concurrent_params(
                 "duration": _duration_val(),
                 "ramp_up": _rampup_val(),
                 "profile": prof[0],
+                "skip_setup": s_setup[0],
+                "skip_teardown": s_teardown[0],
             }
             event.app.exit()
             return
@@ -1798,7 +1863,9 @@ def _select_concurrent_params(
                 else:
                     val = ("dim", val_str)
             else:
-                if prof[0]:
+                toggle_var = _get_toggle_var(i)
+                toggle_on = toggle_var[0] if toggle_var else False
+                if toggle_on:
                     val = ("bold green" if is_sel else "green",
                            f"● {val_str}")
                 else:
@@ -2159,6 +2226,8 @@ def _enter_interactive(args) -> int:
                         duration=bench_duration,
                         ramp_up=bench_ramp_up,
                         profile=bench_profile,
+                        skip_setup=getattr(args, 'skip_setup', False),
+                        skip_teardown=getattr(args, 'skip_teardown', False),
                     )
                     if params is None:
                         console.print(
@@ -2181,6 +2250,11 @@ def _enter_interactive(args) -> int:
                     bench_duration = params["duration"]
                     bench_ramp_up = params["ramp_up"]
                     bench_profile = params["profile"]
+                    bench_skip_setup = params.get("skip_setup", False)
+                    bench_skip_teardown = params.get("skip_teardown", False)
+                else:
+                    bench_skip_setup = getattr(args, 'skip_setup', False)
+                    bench_skip_teardown = getattr(args, 'skip_teardown', False)
 
                 session = BenchInteractiveSession(
                     configs=configs,
@@ -2201,6 +2275,8 @@ def _enter_interactive(args) -> int:
                     perf_freq=getattr(args, 'perf_freq', 99),
                     flamegraph_min_ms=getattr(args, 'flamegraph_min_ms', 1000),
                 )
+                session.skip_setup = bench_skip_setup
+                session.skip_teardown = bench_skip_teardown
                 reason = session.run()
                 # Stop the report server before leaving this session
                 # so the port is released for the next session.
