@@ -482,18 +482,26 @@ class BenchProgress:
         """Update progress based on elapsed time (for concurrent mode).
         
         Args:
-            status: Optional status text to display.
+            status: Optional status text to display. If empty, keeps current status.
         """
         elapsed = time.monotonic() - self._start_time
         elapsed_int = int(elapsed)
         prog = self.__class__._shared_progress
         if prog is not None:
-            prog.update(
-                self._task_id,
-                completed=elapsed_int,
-                elapsed_s=elapsed_int,
-                status=status,
-            )
+            # Don't overwrite existing status with empty string
+            if status:
+                prog.update(
+                    self._task_id,
+                    completed=elapsed_int,
+                    elapsed_s=elapsed_int,
+                    status=status,
+                )
+            else:
+                prog.update(
+                    self._task_id,
+                    completed=elapsed_int,
+                    elapsed_s=elapsed_int,
+                )
 
     def set_status(self, text: str):
         """Set custom status.
@@ -504,14 +512,25 @@ class BenchProgress:
         prog = self.__class__._shared_progress
         if prog is not None:
             if self.is_concurrent and self.duration > 0:
-                elapsed = time.monotonic() - self._start_time
-                elapsed_int = int(elapsed)
-                prog.update(
-                    self._task_id,
-                    status=text,
-                    elapsed_s=elapsed_int,
-                    completed=elapsed_int,
-                )
+                # During setup phase, keep elapsed at 0
+                # (don't count setup time toward benchmark duration)
+                is_setup = "setup" in text.lower()
+                if is_setup:
+                    prog.update(
+                        self._task_id,
+                        status=text,
+                        elapsed_s=0,
+                        completed=0,
+                    )
+                else:
+                    elapsed = time.monotonic() - self._start_time
+                    elapsed_int = int(elapsed)
+                    prog.update(
+                        self._task_id,
+                        status=text,
+                        elapsed_s=elapsed_int,
+                        completed=elapsed_int,
+                    )
             else:
                 prog.update(self._task_id, status=text)
 

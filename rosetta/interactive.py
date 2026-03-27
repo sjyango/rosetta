@@ -309,8 +309,10 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
                 for sql in stmts:
                     stmt_result = {"sql": sql, "columns": None,
                                    "rows": None, "error": None,
-                                   "affected_rows": 0}
+                                   "affected_rows": 0,
+                                   "elapsed_ms": 0}
                     try:
+                        t0 = _time.monotonic()
                         db.cursor.execute(sql)
                         if db.cursor.description:
                             stmt_result["columns"] = [
@@ -326,12 +328,17 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
                         else:
                             stmt_result["affected_rows"] = (
                                 db.cursor.rowcount or 0)
+                        t1 = _time.monotonic()
+                        stmt_result["elapsed_ms"] = round(
+                            (t1 - t0) * 1000, 3)
                     except Exception as e:
+                        t1 = _time.monotonic()
                         stmt_result["error"] = str(e)
+                        stmt_result["elapsed_ms"] = round(
+                            (t1 - t0) * 1000, 3)
 
                     result["statements"].append(stmt_result)
             finally:
-                db.cleanup_database()
                 db.close()
 
             return result
@@ -812,7 +819,7 @@ class InteractiveSession:
 # ---------------------------------------------------------------------------
 
 class BenchFileCompleter(Completer):
-    """Auto-complete .json / .sql benchmark file paths and directories."""
+    """Auto-complete .json / .sql / .lua benchmark file paths and directories."""
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor.strip()
@@ -833,6 +840,10 @@ class BenchFileCompleter(Completer):
                 yield Completion(path, start_position=-len(text),
                                  display=os.path.basename(path),
                                  display_meta="bench")
+            elif path.endswith(".lua"):
+                yield Completion(path, start_position=-len(text),
+                                 display=os.path.basename(path),
+                                 display_meta="lua")
 
 
 # ---------------------------------------------------------------------------
@@ -873,7 +884,13 @@ class BenchInteractiveSession:
                  profile: bool = False,
                  perf_freq: int = 99,
                  query_timeout: int = 5,
-                 flamegraph_min_ms: int = 1000):
+                 flamegraph_min_ms: int = 1000,
+                 bench_mode: str = "serial",
+                 sysbench_threads: int = 8,
+                 sysbench_time: int = 30,
+                 sysbench_tables: int = 1,
+                 sysbench_table_size: int = 10000,
+                 sysbench_lua_script: str = "oltp_read_write"):
         self.configs = configs
         self.output_dir = os.path.abspath(output_dir)
         self.database = database
@@ -892,6 +909,12 @@ class BenchInteractiveSession:
         self.perf_freq = perf_freq
         self.query_timeout = query_timeout
         self.flamegraph_min_ms = flamegraph_min_ms
+        self.bench_mode = bench_mode
+        self.sysbench_threads = sysbench_threads
+        self.sysbench_time = sysbench_time
+        self.sysbench_tables = sysbench_tables
+        self.sysbench_table_size = sysbench_table_size
+        self.sysbench_lua_script = sysbench_lua_script
         self._run_history: List[Dict] = []
         self._report_server: Optional[ReportServer] = None
 
@@ -928,7 +951,7 @@ class BenchInteractiveSession:
         import threading
         import time as _time
 
-        from .benchmark import BenchmarkLoader, run_benchmark
+        from .benchmark import BenchmarkLoader, run_benchmark, BenchWorkload
         from .models import BenchmarkConfig, WorkloadMode
         from .reporter.bench_text import write_bench_text_report
         from .reporter.bench_html import write_bench_html_report
@@ -937,51 +960,114 @@ class BenchInteractiveSession:
                          print_error, print_info, print_phase,
                          print_report_file)
 
-        if not os.path.isfile(bench_file):
-            print_error(f"Bench file not found: {bench_file}")
-            flush_all()
-            return False
-
-        # Load workload
-        try:
-            workload = BenchmarkLoader.from_file(bench_file)
-        except (FileNotFoundError, ValueError) as e:
-            print_error(str(e))
-            flush_all()
-            return False
-
-        # Build config
-        if self.concurrency > 0:
+        # Determine mode
+        if self.bench_mode == "sysbench":
+            mode = WorkloadMode.SYSBENCH
+        elif self.concurrency > 0:
             mode = WorkloadMode.CONCURRENT
         else:
             mode = WorkloadMode.SERIAL
 
-        filter_queries = []
-        if self.bench_filter:
-            filter_queries = [
-                n.strip() for n in self.bench_filter.split(",")
-                if n.strip()
-            ]
+        json_extra_config = {}  # Extra config from JSON file
 
-        bench_cfg = BenchmarkConfig(
-            mode=mode,
-            iterations=self.iterations,
-            warmup=self.warmup,
-            concurrency=self.concurrency if self.concurrency > 0 else 1,
-            duration=self.duration,
-            ramp_up=self.ramp_up,
-            filter_queries=filter_queries,
-            profile=self.profile,
-            perf_freq=self.perf_freq,
-            query_timeout=self.query_timeout,
-            flamegraph_min_ms=self.flamegraph_min_ms,
-            skip_setup=getattr(self, 'skip_setup', False),
-            skip_teardown=getattr(self, 'skip_teardown', False),
-        )
+        # For SYSBENCH mode, handle lua script directly
+        if mode == WorkloadMode.SYSBENCH:
+            # Use the provided lua script path or the configured one
+            lua_script = bench_file if bench_file.endswith('.lua') else self.sysbench_lua_script
 
-        # Apply filter
+            # Create a minimal workload for result structure
+            workload = BenchWorkload(
+                name=os.path.basename(lua_script).replace('.lua', ''),
+                setup=[],
+                teardown=[],
+                queries=[],
+            )
+
+            filter_queries = []
+            bench_cfg = BenchmarkConfig(
+                mode=mode,
+                iterations=0,
+                warmup=0,
+                concurrency=self.sysbench_threads,
+                duration=float(self.sysbench_time),
+                ramp_up=0.0,
+                filter_queries=filter_queries,
+                profile=False,
+                perf_freq=self.perf_freq,
+                query_timeout=self.query_timeout,
+                flamegraph_min_ms=self.flamegraph_min_ms,
+                skip_setup=getattr(self, 'skip_setup', False),
+                skip_teardown=getattr(self, 'skip_teardown', False),
+                sysbench_threads=self.sysbench_threads,
+                sysbench_time=self.sysbench_time,
+                sysbench_tables=self.sysbench_tables,
+                sysbench_table_size=self.sysbench_table_size,
+                sysbench_lua_script=lua_script,
+            )
+        else:
+            # Original logic for SERIAL/CONCURRENT modes
+            if not os.path.isfile(bench_file):
+                print_error(f"Bench file not found: {bench_file}")
+                flush_all()
+                return False
+
+            # Load workload
+            try:
+                workload = BenchmarkLoader.from_file(bench_file)
+            except (FileNotFoundError, ValueError) as e:
+                print_error(str(e))
+                flush_all()
+                return False
+
+            # Read extra config from JSON file (database, skip_setup, skip_teardown)
+            json_extra_config = {}
+            if bench_file.endswith('.json'):
+                import json as _json
+                try:
+                    with open(bench_file, 'r') as f:
+                        json_data = _json.load(f)
+                        json_extra_config = {
+                            'database': json_data.get('database'),
+                            'skip_setup': json_data.get('skip_setup'),
+                            'skip_teardown': json_data.get('skip_teardown'),
+                        }
+                except Exception:
+                    pass
+
+            # Determine skip_setup/skip_teardown: instance attr overrides JSON
+            json_skip_setup = json_extra_config.get('skip_setup')
+            json_skip_teardown = json_extra_config.get('skip_teardown')
+            inst_skip_setup = getattr(self, 'skip_setup', False)
+            inst_skip_teardown = getattr(self, 'skip_teardown', False)
+            final_skip_setup = inst_skip_setup if inst_skip_setup else (json_skip_setup if json_skip_setup is not None else False)
+            final_skip_teardown = inst_skip_teardown if inst_skip_teardown else (json_skip_teardown if json_skip_teardown is not None else False)
+
+            filter_queries = []
+            if self.bench_filter:
+                filter_queries = [
+                    n.strip() for n in self.bench_filter.split(",")
+                    if n.strip()
+                ]
+
+            bench_cfg = BenchmarkConfig(
+                mode=mode,
+                iterations=self.iterations,
+                warmup=self.warmup,
+                concurrency=self.concurrency if self.concurrency > 0 else 1,
+                duration=self.duration,
+                ramp_up=self.ramp_up,
+                filter_queries=filter_queries,
+                profile=self.profile,
+                perf_freq=self.perf_freq,
+                query_timeout=self.query_timeout,
+                flamegraph_min_ms=self.flamegraph_min_ms,
+                skip_setup=final_skip_setup,
+                skip_teardown=final_skip_teardown,
+            )
+
+        # Apply filter (not applicable for SYSBENCH)
         display_workload = workload
-        if filter_queries:
+        if filter_queries and mode != WorkloadMode.SYSBENCH:
             try:
                 display_workload = BenchmarkLoader.filter_queries(
                     workload, filter_queries)
@@ -1000,17 +1086,27 @@ class BenchInteractiveSession:
                        "[bold green]parallel[/bold green]")
         elif not self.parallel_dbms and len(self.configs) > 1:
             print_info("DBMS execution:", "sequential")
-        print_info("Queries:",
-                   ", ".join(q.name for q in display_workload.queries))
-        if mode == WorkloadMode.SERIAL:
+
+        if mode == WorkloadMode.SYSBENCH:
+            print_info("Lua Script:", bench_cfg.sysbench_lua_script)
+            print_info("Threads:",
+                       f"{bench_cfg.sysbench_threads}  "
+                       f"Time: {bench_cfg.sysbench_time}s  "
+                       f"Tables: {bench_cfg.sysbench_tables}  "
+                       f"Table Size: {bench_cfg.sysbench_table_size}")
+        elif mode == WorkloadMode.SERIAL:
+            print_info("Queries:",
+                       ", ".join(q.name for q in display_workload.queries))
             print_info("Iterations:",
                        f"{bench_cfg.iterations}  "
                        f"Warmup: {bench_cfg.warmup}")
         else:
+            print_info("Queries:",
+                       ", ".join(q.name for q in display_workload.queries))
             print_info("Concurrency:",
                        f"{bench_cfg.concurrency}  "
                        f"Duration: {bench_cfg.duration}s")
-        if filter_queries:
+        if filter_queries and mode != WorkloadMode.SYSBENCH:
             print_info("Filter:", ", ".join(filter_queries))
         if self.repeat > 1:
             print_info("Repeat:", f"{self.repeat} rounds")
@@ -1043,8 +1139,12 @@ class BenchInteractiveSession:
             _progress_lock = threading.Lock()
 
             n_queries = len(display_workload.queries)
-            is_concurrent = (mode == WorkloadMode.CONCURRENT)
-            if is_concurrent:
+            # SYSBENCH and CONCURRENT modes use time-based progress
+            is_time_based = (mode in (WorkloadMode.CONCURRENT, WorkloadMode.SYSBENCH))
+            if mode == WorkloadMode.SYSBENCH:
+                duration = float(bench_cfg.sysbench_time) if bench_cfg.sysbench_time > 0 else 30.0
+                per_query = 100  # placeholder, not used for time-based
+            elif mode == WorkloadMode.CONCURRENT:
                 duration = bench_cfg.duration if bench_cfg.duration > 0 else 30.0
                 per_query = 100  # placeholder, not used for time-based
             else:
@@ -1056,7 +1156,7 @@ class BenchInteractiveSession:
                 for c in configs:
                     bp = BenchProgress(
                         c.name, n_queries, per_query,
-                        is_concurrent=is_concurrent, duration=duration)
+                        is_concurrent=is_time_based, duration=duration)
                     bp.__enter__()
                     bp.set_status("[yellow]正在setup...[/yellow]")
                     progress_bars[c.name] = bp
@@ -1066,7 +1166,7 @@ class BenchInteractiveSession:
                     if dbms_name not in progress_bars:
                         bp = BenchProgress(
                             dbms_name, n_queries, per_query,
-                            is_concurrent=is_concurrent, duration=duration)
+                            is_concurrent=is_time_based, duration=duration)
                         bp.__enter__()
                         bp.set_status("[yellow]正在setup...[/yellow]")
                         progress_bars[dbms_name] = bp
@@ -1084,7 +1184,7 @@ class BenchInteractiveSession:
                     if dbms_name not in progress_bars:
                         bp = BenchProgress(
                             dbms_name, n_queries, per_query,
-                            is_concurrent=is_concurrent, duration=duration)
+                            is_concurrent=is_time_based, duration=duration)
                         bp.__enter__()
                         progress_bars[dbms_name] = bp
 
@@ -1094,6 +1194,8 @@ class BenchInteractiveSession:
                 with _progress_lock:
                     for bp in progress_bars.values():
                         bp.reset_timer()
+                # Record start time for timer thread
+                timer_start_time[0] = _time.monotonic()
                 # Signal timer thread to start updating
                 query_phase_started.set()
 
@@ -1101,8 +1203,8 @@ class BenchInteractiveSession:
                             total, is_warmup=False):
                 bp = progress_bars.get(dbms_name)
                 if bp:
-                    if is_concurrent:
-                        # In concurrent mode, update time-based progress
+                    if is_time_based:
+                        # In time-based mode (SYSBENCH/CONCURRENT), update time progress
                         bp.update_time(status=f"[cyan]{query_name}[/cyan]")
                     else:
                         # In serial mode, show per-query iteration progress
@@ -1133,18 +1235,25 @@ class BenchInteractiveSession:
                         f"[dim]🔥 {query_name}: "
                         f"{sample_count} samples[/dim]")
 
-            # For concurrent mode, timer thread will be started after setup phase
+            # For time-based modes (SYSBENCH/CONCURRENT), timer thread updates progress
             timer_stop_event = None
             timer_thread = None
             query_phase_started = threading.Event()
+            timer_start_time = [None]  # Will be set in on_run_start
 
-            if is_concurrent:
+            if is_time_based:
                 timer_stop_event = threading.Event()
 
                 def _timer_update():
                     # Wait until query phase starts (all setups complete)
                     query_phase_started.wait()
                     while not timer_stop_event.is_set():
+                        # Check if we've exceeded the duration - stop updating progress
+                        # (actual benchmark may take longer due to cleanup)
+                        if timer_start_time[0] is not None:
+                            elapsed = _time.monotonic() - timer_start_time[0]
+                            if elapsed >= duration:
+                                break
                         for bp in list(progress_bars.values()):
                             bp.update_time(status="")
                         _time.sleep(0.5)
@@ -1153,11 +1262,15 @@ class BenchInteractiveSession:
                 timer_thread.start()
 
             try:
+                # Determine database: JSON config overrides instance default
+                json_database = json_extra_config.get('database')
+                final_database = json_database if json_database else self.database
+
                 result = run_benchmark(
                     configs=configs,
                     workload=workload,
                     bench_cfg=bench_cfg,
-                    database=self.database,
+                    database=final_database,
                     on_progress=on_progress,
                     on_dbms_start=on_dbms_start,
                     on_dbms_done=on_dbms_done,
@@ -1365,7 +1478,10 @@ class BenchInteractiveSession:
         # Welcome banner
         border = "═" * 55
         title = "Rosetta Benchmark Interactive Mode"
-        hint = "Enter bench file (.json/.sql) to execute, or 'help'"
+        if self.bench_mode == "sysbench":
+            hint = "Enter Lua script path to execute, or 'help'"
+        else:
+            hint = "Enter bench file (.json/.sql) to execute, or 'help'"
         title_line = f"  {title}  ".center(55)
         hint_line = f"  {hint}  ".center(55)
         console.print(f"  [bold cyan]╔{border}╗[/bold cyan]")
@@ -1378,9 +1494,15 @@ class BenchInteractiveSession:
         console.print(f"  [bold cyan]╚{border}╝[/bold cyan]")
 
         # Show config
-        mode_str = ("CONCURRENT" if self.concurrency > 0
-                    else "SERIAL")
-        if self.concurrency > 0:
+        if self.bench_mode == "sysbench":
+            mode_str = "SYSBENCH"
+            config_parts = [
+                f"[dim]Mode:[/dim] [bold]{mode_str}[/bold]",
+                f"[dim]Threads:[/dim] [bold]{self.sysbench_threads}[/bold]",
+                f"[dim]Time:[/dim] [bold]{self.sysbench_time}s[/bold]",
+            ]
+        elif self.concurrency > 0:
+            mode_str = "CONCURRENT"
             config_parts = [
                 f"[dim]Mode:[/dim] [bold]{mode_str}[/bold]",
                 f"[dim]Concurrency:[/dim] [bold]{self.concurrency}[/bold]",
@@ -1395,6 +1517,7 @@ class BenchInteractiveSession:
                 config_parts.append(
                     f"[dim]Warmup:[/dim] [bold]{self.warmup}[/bold]")
         else:
+            mode_str = "SERIAL"
             config_parts = [
                 f"[dim]Mode:[/dim] [bold]{mode_str}[/bold]",
                 f"[dim]Iterations:[/dim] [bold]{self.iterations}[/bold]",

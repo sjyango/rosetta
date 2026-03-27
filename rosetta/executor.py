@@ -85,24 +85,31 @@ class DBConnection:
         self.database = database
         self.conn = None
         self.cursor = None
+        self._query_timeout = 0
         self._skip_patterns = [re.compile(p, re.IGNORECASE)
                                for p in config.skip_patterns]
 
-    def connect(self, create_db: bool = True, query_timeout: int = 0):
+    def connect(self, query_timeout: int = 0):
         """Connect to the database.
 
+        Only establishes the connection and switches to the target database.
+        Does NOT drop or create the database — all DDL must be explicit
+        in setup/teardown SQL defined by the user.
+
         Args:
-            create_db: If True (default), drop and recreate the database.
-                       If False, just use the existing database (for workers).
             query_timeout: Query timeout in seconds. If > 0, set max_execution_time.
+                           Pass -1 to reuse the previously saved value (for reconnect).
         """
+        if query_timeout >= 0:
+            self._query_timeout = query_timeout
+        qt = self._query_timeout
         kwargs = dict(
             host=self.config.host,
             port=self.config.port,
             user=self.config.user,
             password=self.config.password,
             connect_timeout=10,  # Connection timeout in seconds
-            read_timeout=max(60, query_timeout * 2) if query_timeout > 0 else 60,
+            read_timeout=max(60, qt * 2) if qt > 0 else 60,
         )
 
         if self.config.driver == "mysql.connector":
@@ -111,6 +118,8 @@ class DBConnection:
                     "mysql-connector-python is not installed. "
                     "Install via: pip install mysql-connector-python"
                 )
+            # Enable LOCAL INFILE for LOAD DATA operations
+            kwargs["allow_local_infile"] = True
             self.conn = mysql.connector.connect(**kwargs)
         else:
             if not pymysql_available:
@@ -118,20 +127,21 @@ class DBConnection:
                     "PyMySQL is not installed. "
                     "Install via: pip install pymysql"
                 )
+            # Enable LOCAL INFILE for LOAD DATA operations
+            kwargs["local_infile"] = True
             self.conn = pymysql.connect(**kwargs)
 
         self.conn.autocommit = True
         self.cursor = self.conn.cursor()
 
-        if create_db:
-            self.cursor.execute(f"DROP DATABASE IF EXISTS `{self.database}`")
-            self.cursor.execute(f"CREATE DATABASE `{self.database}`")
-
+        # Ensure the database exists, then switch to it
+        self.cursor.execute(
+            f"CREATE DATABASE IF NOT EXISTS `{self.database}`")
         self.cursor.execute(f"USE `{self.database}`")
 
         # Set query timeout at database level
-        if query_timeout > 0:
-            timeout_ms = query_timeout * 1000
+        if qt > 0:
+            timeout_ms = qt * 1000
             # Try different timeout settings for various DBMS
             for sql in [
                 f"SET SESSION max_execution_time = {timeout_ms}",  # MySQL/TiDB
@@ -179,20 +189,21 @@ class DBConnection:
             return True
         if "Connection refused" in err_str:
             return True
+        # Connection object became None (e.g. after socket timeout)
+        if "NoneType" in err_str and ("settimeout" in err_str or "attribute" in err_str):
+            return True
+        if self.conn is None or self.cursor is None:
+            return True
         return False
 
-    def reconnect(self, create_db: bool = False):
-        """Attempt to reconnect after a lost connection.
-        
-        Args:
-            create_db: If True, recreate the database. Default False for workers.
-        """
+    def reconnect(self):
+        """Attempt to reconnect after a lost connection."""
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 self.close()
                 time.sleep(2 ** attempt)
-                self.connect(create_db=create_db)
+                self.connect(query_timeout=-1)  # reuse saved timeout
                 log.info("[%s] Reconnected successfully (attempt %d)",
                          self.config.name, attempt + 1)
                 return True
@@ -241,15 +252,6 @@ class DBConnection:
                         pass
 
         return result
-
-    def cleanup_database(self):
-        """Drop the test database."""
-        try:
-            self.cursor.execute(
-                f"DROP DATABASE IF EXISTS `{self.database}`"
-            )
-        except Exception as e:
-            log.warning("[%s] cleanup failed: %s", self.config.name, e)
 
 
 def check_port(host: str, port: int, timeout: float = 3.0) -> bool:
@@ -306,6 +308,10 @@ def run_on_dbms(config: DBMSConfig, statements: List[Statement],
                 on_progress=None,
                 on_done=None) -> List[str]:
     """Execute all statements on a single DBMS and return output lines.
+
+    Connects to the database and executes the given statements.
+    Does NOT automatically drop or recreate the database — all DDL must
+    be explicit in the statements themselves.
 
     Args:
         config: DBMS connection config.
@@ -385,7 +391,6 @@ def run_on_dbms(config: DBMSConfig, statements: List[Statement],
         log.error(traceback.format_exc())
         output_lines.append(f"FATAL ERROR: {e}")
     finally:
-        db.cleanup_database()
         db.close()
 
     log.debug("[%s] Done: %d executed, %d errors", name, executed, errors)

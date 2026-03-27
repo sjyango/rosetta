@@ -96,6 +96,7 @@ class WorkloadMode(Enum):
     """Benchmark workload execution mode."""
     SERIAL = auto()
     CONCURRENT = auto()
+    SYSBENCH = auto()
 
 
 @dataclass
@@ -139,10 +140,18 @@ class BenchmarkConfig:
     profile: bool = True    # --profile: enable perf flame graph capture
     perf_freq: int = 99     # perf sampling frequency (Hz)
     seed: int = 42          # random seed for reproducibility and fairness
-    query_timeout: int = 5  # query timeout in seconds (0 = disabled)
+    query_timeout: int = 120  # query timeout in seconds (0 = disabled)
     flamegraph_min_ms: int = 1000  # min total duration (ms) to show flamegraph in serial mode
     skip_setup: bool = False   # skip setup phase if tables already exist with data
     skip_teardown: bool = False  # skip teardown (keep tables for next run)
+
+    # Sysbench-specific parameters (used when mode == SYSBENCH)
+    sysbench_threads: int = 8
+    sysbench_time: int = 30
+    sysbench_tables: int = 1
+    sysbench_table_size: int = 10000
+    sysbench_lua_script: str = "oltp_read_write"
+    sysbench_db_driver: str = "mysql"
 
 
 @dataclass
@@ -163,6 +172,7 @@ class QueryLatencyStats:
     flamegraph_svg: str = ""  # SVG flame graph content (if profiling enabled)
     explain_plan: str = ""    # EXPLAIN output (text format)
     explain_tree: str = ""    # EXPLAIN FORMAT=TREE output (tree format)
+    error_logs: List[Dict] = field(default_factory=list)  # [{sql, error, ts}]
 
 
 @dataclass
@@ -176,6 +186,9 @@ class DBMSBenchResult:
     overall_qps: float = 0.0
     table_rows: int = 0  # total rows after setup
     table_rows_detail: Dict[str, int] = field(default_factory=dict)  # {table_name: row_count}
+    # Sysbench raw output log (for SYSBENCH mode)
+    sysbench_prepare_log: str = ""
+    sysbench_run_log: str = ""
 
 
 @dataclass

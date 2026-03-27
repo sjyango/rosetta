@@ -707,9 +707,20 @@ def _run_benchmark(args) -> int:
         return 1
 
     # Load workload
+    json_extra_config = {}  # Extra config from JSON file
     try:
         if args.bench_file:
             workload = BenchmarkLoader.from_file(args.bench_file)
+            # Read extra config fields from JSON file
+            if args.bench_file.endswith('.json'):
+                import json
+                with open(args.bench_file, 'r') as f:
+                    json_data = json.load(f)
+                    json_extra_config = {
+                        'database': json_data.get('database'),
+                        'skip_setup': json_data.get('skip_setup'),
+                        'skip_teardown': json_data.get('skip_teardown'),
+                    }
         elif args.template:
             workload = BenchmarkLoader.from_builtin(args.template)
         else:
@@ -734,6 +745,19 @@ def _run_benchmark(args) -> int:
             n.strip() for n in args.bench_filter.split(",") if n.strip()
         ]
 
+    # Determine skip_setup and skip_teardown: CLI args override JSON config
+    json_skip_setup = json_extra_config.get('skip_setup')
+    json_skip_teardown = json_extra_config.get('skip_teardown')
+    
+    # Use JSON value as default, CLI arg overrides if explicitly set
+    # (CLI arg defaults to False, so only override if user explicitly passed it)
+    cli_skip_setup = getattr(args, 'skip_setup', False)
+    cli_skip_teardown = getattr(args, 'skip_teardown', False)
+    
+    # If JSON has the value and CLI didn't explicitly set it, use JSON value
+    final_skip_setup = cli_skip_setup if cli_skip_setup else (json_skip_setup if json_skip_setup is not None else False)
+    final_skip_teardown = cli_skip_teardown if cli_skip_teardown else (json_skip_teardown if json_skip_teardown is not None else False)
+    
     bench_cfg = BenchmarkConfig(
         mode=mode,
         iterations=args.iterations,
@@ -746,8 +770,8 @@ def _run_benchmark(args) -> int:
         perf_freq=getattr(args, 'perf_freq', 99),
         query_timeout=args.query_timeout,
         flamegraph_min_ms=getattr(args, 'flamegraph_min_ms', 1000),
-        skip_setup=getattr(args, 'skip_setup', False),
-        skip_teardown=getattr(args, 'skip_teardown', False),
+        skip_setup=final_skip_setup,
+        skip_teardown=final_skip_teardown,
     )
 
     # Apply filter to workload for display
@@ -898,6 +922,7 @@ def _run_benchmark(args) -> int:
         timer_stop_event = None
         timer_thread = None
         query_phase_started = threading.Event()
+        timer_start_time = [None]  # Will be set in on_run_start
 
         if is_concurrent:
             timer_stop_event = threading.Event()
@@ -906,6 +931,12 @@ def _run_benchmark(args) -> int:
                 # Wait until query phase starts (all setups complete)
                 query_phase_started.wait()
                 while not timer_stop_event.is_set():
+                    # Check if we've exceeded the duration - stop updating progress
+                    # (actual benchmark may take longer due to cleanup)
+                    if timer_start_time[0] is not None:
+                        elapsed = _time.monotonic() - timer_start_time[0]
+                        if elapsed >= duration:
+                            break
                     for dbms_name, bp in list(progress_bars.items()):
                         bp.update_time(status="")
                     _time.sleep(0.5)
@@ -919,15 +950,22 @@ def _run_benchmark(args) -> int:
             with _progress_lock:
                 for bp in progress_bars.values():
                     bp.reset_timer()
+            # Record start time for timer thread
+            timer_start_time[0] = _time.monotonic()
             # Signal timer thread to start updating
             query_phase_started.set()
 
+        # Determine database: JSON config takes precedence over default, CLI arg always wins
+        json_database = json_extra_config.get('database')
+        # If JSON specifies a database, use it; otherwise use CLI arg (which has default)
+        final_database = json_database if json_database else args.database
+        
         try:
             result = run_benchmark(
                 configs=configs,
                 workload=workload,
                 bench_cfg=bench_cfg,
-                database=args.database,
+                database=final_database,
                 on_progress=on_progress,
                 on_dbms_start=on_dbms_start,
                 on_dbms_done=on_dbms_done,
@@ -1090,13 +1128,15 @@ def _select_bench_params(
     if mode_result.get("action") == "back":
         return {"action": "back"}
 
-    mode = mode_result["mode"]  # "serial" or "concurrent"
+    mode = mode_result["mode"]  # "serial" or "concurrent" or "sysbench"
 
     # Step 2: Parameter configuration based on mode
     if mode == "serial":
         return _select_serial_params(iterations, warmup, profile, skip_setup, skip_teardown)
-    else:
+    elif mode == "concurrent":
         return _select_concurrent_params(concurrency, duration, ramp_up, profile, skip_setup, skip_teardown)
+    else:
+        return _select_sysbench_params(skip_setup, skip_teardown)
 
 
 def _select_bench_mode() -> Optional[dict]:
@@ -1116,6 +1156,8 @@ def _select_bench_mode() -> Optional[dict]:
          "Sequential execution, fixed iterations per query"),
         ("concurrent", "CONCURRENT",
          "Multi-threaded stress test with duration-based execution"),
+        ("sysbench", "SYSBENCH",
+         "Run sysbench binary with Lua scripts for OLTP benchmarks"),
     ]
 
     selected = [0]
@@ -1186,6 +1228,7 @@ def _select_bench_mode() -> Optional[dict]:
         lines.append(("dim", "  ────────────────────────────────────────\n"))
         lines.append(("dim", "  SERIAL:      Each query runs N times sequentially\n"))
         lines.append(("dim", "  CONCURRENT:  Multiple threads, duration-based test\n"))
+        lines.append(("dim", "  SYSBENCH:    Run sysbench binary with Lua scripts\n"))
 
         return lines
 
@@ -1897,6 +1940,420 @@ def _select_concurrent_params(
     return result[0]
 
 
+def _select_sysbench_params(
+    skip_setup: bool = False,
+    skip_teardown: bool = False,
+) -> Optional[dict]:
+    """Show parameter configuration for SYSBENCH mode."""
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.keys import Keys
+    from prompt_toolkit.filters import Condition
+
+    THREADS_PRESETS = [1, 2, 4, 8, 16, 32, 64]
+    TIME_PRESETS = [10, 30, 60, 120, 300]
+    TABLES_PRESETS = [1, 4, 8, 16, 32]
+    TABLE_SIZE_PRESETS = [1000, 10000, 100000, 1000000]
+    SKIP_LABELS = {False: "Off", True: "On"}
+
+    custom_threads = [None]
+    custom_time = [None]
+    custom_tables = [None]
+    custom_table_size = [None]
+    lua_script = ["oltp_read_write"]  # Default script
+
+    result = [None]
+    sel = [0]
+    th_idx = [THREADS_PRESETS.index(8)]
+    time_idx = [TIME_PRESETS.index(30)]
+    tbl_idx = [TABLES_PRESETS.index(1)]
+    tsize_idx = [TABLE_SIZE_PRESETS.index(10000)]
+    s_setup = [skip_setup]
+    s_teardown = [skip_teardown]
+
+    FIELDS = [
+        {"label": "Threads", "type": "choice"},
+        {"label": "Time (seconds)", "type": "choice"},
+        {"label": "Tables", "type": "choice"},
+        {"label": "Table size (rows)", "type": "choice"},
+        {"label": "Lua Script", "type": "text"},
+        {"label": "Skip Setup (reuse tables)", "type": "toggle", "var": "s_setup"},
+        {"label": "Skip Teardown (keep tables)", "type": "toggle", "var": "s_teardown"},
+        {"label": "OK", "type": "action"},
+        {"label": "Back", "type": "action"},
+        {"label": "Quit", "type": "action"},
+    ]
+
+    LUA_FIELD_IDX = 4
+    ACTION_OK = len(FIELDS) - 3
+    ACTION_BACK = len(FIELDS) - 2
+    ACTION_QUIT = len(FIELDS) - 1
+
+    def _threads_val():
+        if custom_threads[0] is not None:
+            return custom_threads[0]
+        return THREADS_PRESETS[th_idx[0]]
+
+    def _time_val():
+        if custom_time[0] is not None:
+            return custom_time[0]
+        return TIME_PRESETS[time_idx[0]]
+
+    def _tables_val():
+        if custom_tables[0] is not None:
+            return custom_tables[0]
+        return TABLES_PRESETS[tbl_idx[0]]
+
+    def _table_size_val():
+        if custom_table_size[0] is not None:
+            return custom_table_size[0]
+        return TABLE_SIZE_PRESETS[tsize_idx[0]]
+
+    def _field_val(i):
+        if i == 0:
+            v = _threads_val()
+            return f"{v}" if custom_threads[0] is None else f"{v} (custom)"
+        elif i == 1:
+            v = _time_val()
+            return f"{v}" if custom_time[0] is None else f"{v} (custom)"
+        elif i == 2:
+            v = _tables_val()
+            return f"{v}" if custom_tables[0] is None else f"{v} (custom)"
+        elif i == 3:
+            v = _table_size_val()
+            if v >= 1000000:
+                return f"{v // 1000000}M" if custom_table_size[0] is None else f"{v // 1000000}M (custom)"
+            elif v >= 1000:
+                return f"{v // 1000}K" if custom_table_size[0] is None else f"{v // 1000}K (custom)"
+            return f"{v}" if custom_table_size[0] is None else f"{v} (custom)"
+        elif i == LUA_FIELD_IDX:
+            return lua_script[0]
+        elif i == LUA_FIELD_IDX + 1:
+            return SKIP_LABELS[s_setup[0]]
+        elif i == LUA_FIELD_IDX + 2:
+            return SKIP_LABELS[s_teardown[0]]
+        return ""
+
+    def _get_toggle_var(i):
+        if i == LUA_FIELD_IDX + 1: return s_setup
+        if i == LUA_FIELD_IDX + 2: return s_teardown
+        return None
+
+    def _toggle_right(i):
+        if i == 0:
+            if custom_threads[0] is not None:
+                custom_threads[0] = None
+            else:
+                if th_idx[0] == len(THREADS_PRESETS) - 1:
+                    custom_threads[0] = _threads_val()
+                else:
+                    th_idx[0] += 1
+        elif i == 1:
+            if custom_time[0] is not None:
+                custom_time[0] = None
+            else:
+                if time_idx[0] == len(TIME_PRESETS) - 1:
+                    custom_time[0] = _time_val()
+                else:
+                    time_idx[0] += 1
+        elif i == 2:
+            if custom_tables[0] is not None:
+                custom_tables[0] = None
+            else:
+                if tbl_idx[0] == len(TABLES_PRESETS) - 1:
+                    custom_tables[0] = _tables_val()
+                else:
+                    tbl_idx[0] += 1
+        elif i == 3:
+            if custom_table_size[0] is not None:
+                custom_table_size[0] = None
+            else:
+                if tsize_idx[0] == len(TABLE_SIZE_PRESETS) - 1:
+                    custom_table_size[0] = _table_size_val()
+                else:
+                    tsize_idx[0] += 1
+        else:
+            var = _get_toggle_var(i)
+            if var is not None:
+                var[0] = not var[0]
+
+    def _toggle_left(i):
+        if i == 0:
+            if custom_threads[0] is not None:
+                custom_threads[0] = None
+            else:
+                if th_idx[0] == 0:
+                    custom_threads[0] = _threads_val()
+                    th_idx[0] = 0
+                else:
+                    th_idx[0] -= 1
+        elif i == 1:
+            if custom_time[0] is not None:
+                custom_time[0] = None
+            else:
+                if time_idx[0] == 0:
+                    custom_time[0] = _time_val()
+                    time_idx[0] = 0
+                else:
+                    time_idx[0] -= 1
+        elif i == 2:
+            if custom_tables[0] is not None:
+                custom_tables[0] = None
+            else:
+                if tbl_idx[0] == 0:
+                    custom_tables[0] = _tables_val()
+                    tbl_idx[0] = 0
+                else:
+                    tbl_idx[0] -= 1
+        elif i == 3:
+            if custom_table_size[0] is not None:
+                custom_table_size[0] = None
+            else:
+                if tsize_idx[0] == 0:
+                    custom_table_size[0] = _table_size_val()
+                    tsize_idx[0] = 0
+                else:
+                    tsize_idx[0] -= 1
+        else:
+            var = _get_toggle_var(i)
+            if var is not None:
+                var[0] = not var[0]
+
+    editing = [None]
+    edit_buf = [""]
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("k")
+    def _up(event):
+        if editing[0] is not None:
+            return
+        sel[0] = (sel[0] - 1) % len(FIELDS)
+
+    @kb.add("down")
+    @kb.add("j")
+    def _down(event):
+        if editing[0] is not None:
+            return
+        sel[0] = (sel[0] + 1) % len(FIELDS)
+
+    @kb.add("left")
+    @kb.add("h")
+    def _left(event):
+        if editing[0] is not None:
+            return
+        _toggle_left(sel[0])
+
+    @kb.add("right")
+    @kb.add("l")
+    def _right(event):
+        if editing[0] is not None:
+            return
+        _toggle_right(sel[0])
+
+    @kb.add("backspace")
+    def _backspace(event):
+        if editing[0] is not None:
+            edit_buf[0] = edit_buf[0][:-1]
+
+    @kb.add(Keys.Any, filter=Condition(lambda: editing[0] is not None))
+    def _type_char(event):
+        if editing[0] is not None:
+            # Lua script field can accept any character, others only digits
+            if editing[0] == LUA_FIELD_IDX:
+                edit_buf[0] += event.data
+            elif event.data.isdigit():
+                edit_buf[0] += event.data
+
+    @kb.add("enter")
+    def _confirm(event):
+        if editing[0] is not None:
+            idx = editing[0]
+            if idx == LUA_FIELD_IDX:
+                # Save Lua script path
+                if edit_buf[0].strip():
+                    lua_script[0] = edit_buf[0].strip()
+            else:
+                # Numeric fields
+                if edit_buf[0]:
+                    try:
+                        n = int(edit_buf[0])
+                        if n > 0:
+                            if idx == 0:
+                                custom_threads[0] = n
+                            elif idx == 1:
+                                custom_time[0] = n
+                            elif idx == 2:
+                                custom_tables[0] = n
+                            elif idx == 3:
+                                custom_table_size[0] = n
+                    except ValueError:
+                        pass
+            editing[0] = None
+            edit_buf[0] = ""
+            return
+
+        # Start editing for specific fields
+        if sel[0] == 0 and custom_threads[0] is not None:
+            editing[0] = 0
+            edit_buf[0] = str(custom_threads[0])
+            return
+        if sel[0] == 1 and custom_time[0] is not None:
+            editing[0] = 1
+            edit_buf[0] = str(custom_time[0])
+            return
+        if sel[0] == 2 and custom_tables[0] is not None:
+            editing[0] = 2
+            edit_buf[0] = str(custom_tables[0])
+            return
+        if sel[0] == 3 and custom_table_size[0] is not None:
+            editing[0] = 3
+            edit_buf[0] = str(custom_table_size[0])
+            return
+        # Lua script field - always allow editing
+        if sel[0] == LUA_FIELD_IDX:
+            editing[0] = LUA_FIELD_IDX
+            edit_buf[0] = lua_script[0]
+            return
+
+        if sel[0] == ACTION_OK:
+            result[0] = {
+                "mode": "sysbench",
+                "iterations": 0,
+                "warmup": 0,
+                "concurrency": _threads_val(),
+                "duration": float(_time_val()),
+                "ramp_up": 0.0,
+                "profile": False,
+                "skip_setup": s_setup[0],
+                "skip_teardown": s_teardown[0],
+                "sysbench_threads": _threads_val(),
+                "sysbench_time": _time_val(),
+                "sysbench_tables": _tables_val(),
+                "sysbench_table_size": _table_size_val(),
+                "sysbench_lua_script": lua_script[0],
+            }
+            event.app.exit()
+            return
+        if sel[0] == ACTION_BACK:
+            result[0] = {"action": "back"}
+            event.app.exit()
+            return
+        if sel[0] == ACTION_QUIT:
+            result[0] = None
+            event.app.exit()
+            return
+
+    @kb.add("c-c")
+    @kb.add("escape")
+    def _cancel(event):
+        if editing[0] is not None:
+            editing[0] = None
+            edit_buf[0] = ""
+            return
+        result[0] = None
+        event.app.exit()
+
+    def _get_text():
+        lines = []
+        border = "═" * 55
+        title = "SYSBENCH Mode Configuration".center(55)
+        hint = ("←→ change · Enter confirm/custom · ↑↓ move"
+                " · Esc cancel").center(55)
+        lines.append(("bold cyan", f"  ╔{border}╗\n"))
+        lines.append(("bold cyan", "  ║"))
+        lines.append(("bold white", title))
+        lines.append(("bold cyan", "║\n"))
+        lines.append(("bold cyan", "  ║"))
+        lines.append(("", hint))
+        lines.append(("bold cyan", "║\n"))
+        lines.append(("bold cyan", f"  ╚{border}╝\n"))
+        lines.append(("", "\n"))
+
+        if editing[0] is not None:
+            idx = editing[0]
+            label = FIELDS[idx]["label"]
+            lines.append(("bold cyan", "  ❯ "))
+            lines.append(("bold cyan", label))
+            lines.append(("", "  "))
+            lines.append(("bold white", f"[ {edit_buf[0]}▌ ]"))
+            lines.append(("", "\n"))
+            if idx == LUA_FIELD_IDX:
+                lines.append(("dim",
+                             "     Type script name/path, Enter to confirm, "
+                             "Esc to cancel\n"))
+            else:
+                lines.append(("dim",
+                             "     Type a number, Enter to confirm, "
+                             "Esc to cancel\n"))
+            return lines
+
+        for i, field in enumerate(FIELDS):
+            is_sel = (i == sel[0])
+
+            if field["type"] == "action":
+                if is_sel:
+                    prefix = ("bold cyan", "  ❯ ")
+                    label = ("bold cyan", field["label"])
+                else:
+                    prefix = ("", "    ")
+                    label = ("dim", field["label"])
+                lines.append(prefix)
+                lines.append(label)
+                lines.append(("", "\n"))
+                continue
+
+            prefix = ("bold cyan", "  ❯ ") if is_sel else ("", "    ")
+            label = ("bold cyan" if is_sel else "bold",
+                     field["label"])
+
+            val_str = _field_val(i)
+            if field["type"] == "choice":
+                if is_sel:
+                    val = ("bold yellow", f"◄ {val_str} ►")
+                else:
+                    val = ("dim", val_str)
+            elif field["type"] == "text":
+                val = ("bold white" if is_sel else "", val_str)
+            else:
+                toggle_var = _get_toggle_var(i)
+                toggle_on = toggle_var[0] if toggle_var else False
+                if toggle_on:
+                    val = ("bold green" if is_sel else "green",
+                           f"● {val_str}")
+                else:
+                    val = ("dim", f"○ {val_str}")
+
+            lines.append(prefix)
+            lines.append(label)
+            lines.append(("", "  "))
+            lines.append(val)
+            lines.append(("", "\n"))
+
+        return lines
+
+    menu = Window(
+        content=FormattedTextControl(_get_text),
+        dont_extend_height=True,
+    )
+
+    app: Application = Application(
+        layout=Layout(HSplit([menu])),
+        key_bindings=kb,
+        full_screen=False,
+    )
+
+    _tty_write("\033[s")
+    app.run()
+    _tty_write("\033[u\033[J")
+
+    return result[0]
+
+
 def _select_mode(configs, database: str) -> Optional[str]:
     """Show an arrow-key mode selector and return 'mtr' or 'bench'.
 
@@ -2252,9 +2709,20 @@ def _enter_interactive(args) -> int:
                     bench_profile = params["profile"]
                     bench_skip_setup = params.get("skip_setup", False)
                     bench_skip_teardown = params.get("skip_teardown", False)
+                    # Sysbench-specific params
+                    sysbench_threads = params.get("sysbench_threads", 8)
+                    sysbench_time = params.get("sysbench_time", 30)
+                    sysbench_tables = params.get("sysbench_tables", 1)
+                    sysbench_table_size = params.get("sysbench_table_size", 10000)
+                    sysbench_lua_script = params.get("sysbench_lua_script", "oltp_read_write")
                 else:
                     bench_skip_setup = getattr(args, 'skip_setup', False)
                     bench_skip_teardown = getattr(args, 'skip_teardown', False)
+                    sysbench_threads = 8
+                    sysbench_time = 30
+                    sysbench_tables = 1
+                    sysbench_table_size = 10000
+                    sysbench_lua_script = "oltp_read_write"
 
                 session = BenchInteractiveSession(
                     configs=configs,
@@ -2274,6 +2742,12 @@ def _enter_interactive(args) -> int:
                     profile=bench_profile,
                     perf_freq=getattr(args, 'perf_freq', 99),
                     flamegraph_min_ms=getattr(args, 'flamegraph_min_ms', 1000),
+                    bench_mode=bench_mode,
+                    sysbench_threads=sysbench_threads,
+                    sysbench_time=sysbench_time,
+                    sysbench_tables=sysbench_tables,
+                    sysbench_table_size=sysbench_table_size,
+                    sysbench_lua_script=sysbench_lua_script,
                 )
                 session.skip_setup = bench_skip_setup
                 session.skip_teardown = bench_skip_teardown

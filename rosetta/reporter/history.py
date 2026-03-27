@@ -979,6 +979,12 @@ function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+function fmtElapsed(ms) {
+  if (ms < 1) return ms.toFixed(3) + ' ms';
+  if (ms < 1000) return ms.toFixed(1) + ' ms';
+  return (ms / 1000).toFixed(2) + ' s';
+}
+
 function apiCall(method, path, body) {
   const port = location.port || '80';
   const base = location.protocol + '//' + location.hostname + ':' + port;
@@ -1141,7 +1147,11 @@ function renderResults(results, originalSql) {
           : ' <span class="diff-badge diff-badge-match">MATCH</span>';
       }
       header.innerHTML = '<span class="result-panel-name">' + esc(name) + badge + '</span>' +
-        (sr.columns ? '<span class="result-panel-meta">' + (sr.rows ? sr.rows.length : 0) + ' row(s)</span>' : '');
+        '<span class="result-panel-meta">' +
+        (sr.elapsed_ms != null ? '<span style="color:var(--yellow);font-weight:600">' + fmtElapsed(sr.elapsed_ms) + '</span>' : '') +
+        (sr.columns && sr.rows ? ' · ' + sr.rows.length + ' row(s)' :
+         !sr.error && !sr.type ? ' · ' + (sr.affected_rows || 0) + ' affected' : '') +
+        '</span>';
       panel.appendChild(header);
 
       // Body
