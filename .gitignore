@@ -2,9 +2,12 @@ __pycache__/
 *.pyc
 *.egg-info/
 dist/
+dist-skill/
 build/
 .eggs/
 results/
 dbms_config.json
-.codebuddy/
+.codebuddy/*
+!.codebuddy/skills/
+!.codebuddy/skills/**
 benchmark/
