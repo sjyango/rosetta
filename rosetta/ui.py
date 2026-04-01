@@ -166,6 +166,11 @@ class ExecutionProgress:
                     cls._shared_progress.stop()
                     cls._shared_progress = None
                 cls._ref_count = 0
+                # Ensure cursor is visible after progress bar stops
+                try:
+                    console.show_cursor()
+                except Exception:
+                    pass
 
     # -- context manager ----------------------------------------------------
 
@@ -430,6 +435,11 @@ class BenchProgress:
                     cls._shared_progress.stop()
                     cls._shared_progress = None
                 cls._ref_count = 0
+                # Ensure cursor is visible after progress bar stops
+                try:
+                    console.show_cursor()
+                except Exception:
+                    pass
 
     def __enter__(self):
         self._start_time = time.monotonic()

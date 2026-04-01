@@ -1,0 +1,112 @@
+"""
+Handler for the 'interactive' subcommand (and aliases 'repl', 'i').
+"""
+
+import sys
+from typing import TYPE_CHECKING
+
+from .result import CommandResult
+
+if TYPE_CHECKING:
+    from .output import OutputFormatter
+
+
+def handle_interactive(args, output: "OutputFormatter") -> CommandResult:
+    """
+    Handle the 'interactive' subcommand.
+    
+    Args:
+        args: Parsed command-line arguments
+        output: Output formatter
+    
+    Returns:
+        CommandResult with session summary
+    """
+    import os
+    import logging
+    from ..config import load_config, filter_configs
+    from ..interactive import InteractiveSession, BenchInteractiveSession
+    
+    # Load config
+    if not os.path.isfile(args.config):
+        return CommandResult.failure(
+            f"Config file not found: {args.config}",
+        )
+    
+    all_configs = load_config(args.config)
+    if not all_configs:
+        return CommandResult.failure(
+            f"No databases configured in {args.config}",
+        )
+    
+    # Filter configs
+    if args.dbms:
+        try:
+            configs = filter_configs(all_configs, args.dbms)
+        except ValueError as e:
+            return CommandResult.failure(str(e))
+    else:
+        configs = [c for c in all_configs if c.enabled]
+    
+    if not configs:
+        return CommandResult.failure("No databases selected")
+    
+    # Start interactive session
+    # Note: For JSON output mode, we still launch interactive but inform user
+    if output.format == "json":
+        # In JSON mode, inform user that interactive mode is intended for human use
+        return CommandResult.success(
+            "interactive",
+            {
+                "message": "Interactive mode launched",
+                "note": "Interactive mode is designed for human users. Run without -j/--json for best experience.",
+                "dbms_targets": [c.name for c in configs],
+                "database": args.database,
+                "output_dir": os.path.abspath(args.output_dir),
+                "serve": args.serve,
+                "port": args.port,
+            },
+        )
+    
+    # For human mode, actually launch the interactive session
+    try:
+        # Import the existing interactive logic from old CLI
+        from ..cli import _enter_interactive, parse_args
+        
+        # Build args for legacy interactive mode
+        legacy_args = parse_args([
+            "-i",
+            "--config", args.config,
+            "--database", args.database,
+            "--output-dir", args.output_dir,
+        ])
+        
+        if args.dbms:
+            legacy_args.dbms = args.dbms
+        if args.serve:
+            legacy_args.serve = args.serve
+        if args.port:
+            legacy_args.port = args.port
+        
+        # Launch interactive session
+        exit_code = _enter_interactive(legacy_args)
+        
+        return CommandResult.success(
+            "interactive",
+            {
+                "exit_code": exit_code,
+                "message": "Interactive session ended",
+            },
+        )
+    
+    except KeyboardInterrupt:
+        return CommandResult.success(
+            "interactive",
+            {
+                "message": "Interactive session interrupted",
+            },
+        )
+    except Exception as e:
+        return CommandResult.failure(
+            f"Interactive session failed: {str(e)}",
+        )

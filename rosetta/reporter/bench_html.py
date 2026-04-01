@@ -51,9 +51,6 @@ def _build_data(result: BenchmarkResult) -> dict:
             "total_queries": dr.total_queries,
             "total_errors": dr.total_errors,
             "queries": queries,
-            # Sysbench logs (for SYSBENCH mode)
-            "sysbench_prepare_log": dr.sysbench_prepare_log or "",
-            "sysbench_run_log": dr.sysbench_run_log or "",
         })
     return {
         "workload": result.workload_name,
@@ -71,12 +68,6 @@ def _build_data(result: BenchmarkResult) -> dict:
         "setup_sql": list(result.setup_sql) if result.setup_sql else [],
         "teardown_sql": list(result.teardown_sql) if result.teardown_sql else [],
         "queries_sql": list(result.queries_sql) if result.queries_sql else [],
-        # Sysbench-specific fields
-        "sysbench_threads": result.config.sysbench_threads,
-        "sysbench_time": result.config.sysbench_time,
-        "sysbench_tables": result.config.sysbench_tables,
-        "sysbench_table_size": result.config.sysbench_table_size,
-        "sysbench_lua_script": result.config.sysbench_lua_script,
     }
 
 
@@ -131,7 +122,6 @@ h2 { font-size: 18px; margin-bottom: 16px; color: var(--fg); }
   font-size: 12px; font-weight: 600; background: var(--bg3); color: var(--fg2); }
 .config-item .cfg-value .mode-serial { color: var(--green); }
 .config-item .cfg-value .mode-concurrent { color: var(--orange); }
-.config-item .cfg-value .mode-sysbench { color: var(--purple); }
 .table-rows-wrap { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; }
 .table-chip { display: inline-flex; align-items: center; gap: 6px; background: var(--bg);
   border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font-size: 12px;
@@ -289,9 +279,6 @@ tr:hover { background: var(--bg3); }
 #fg-tooltip .tt-name { font-weight: 600; margin-bottom: 2px; white-space: normal; word-break: break-all; }
 #fg-tooltip .tt-info { color: #8b949e; font-size: 11px; }
 
-/* Sysbench logs */
-.sb-log-section { margin-bottom: 16px; }
-
 /* Error logs */
 .err-section { margin-top: 8px; }
 .err-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
@@ -399,12 +386,6 @@ tr:hover { background: var(--bg3); }
     <h2>&#9888;&#65039; Error Logs</h2>
     <div id="error-logs-content"></div>
   </div>
-
-  <!-- Sysbench Logs (for SYSBENCH mode) -->
-  <div class="section" id="sysbench-logs-section" style="display:none">
-    <h2>&#128196; Sysbench Output Logs</h2>
-    <div id="sysbench-logs-content"></div>
-  </div>
 </div>
 
 <script>
@@ -428,7 +409,6 @@ function fmtMs(v) {
   var panel = document.getElementById('config-panel');
   var modeClass = 'mode-serial';
   if (DATA.mode === 'CONCURRENT') modeClass = 'mode-concurrent';
-  else if (DATA.mode === 'SYSBENCH') modeClass = 'mode-sysbench';
   var items = '';
 
   // Workload
@@ -458,26 +438,6 @@ function fmtMs(v) {
     // Ramp-up
     items += '<div class="config-item"><span class="cfg-label">Ramp-up</span>' +
       '<span class="cfg-value">' + (DATA.ramp_up > 0 ? DATA.ramp_up + 's' : '0') + '</span></div>';
-  } else if (DATA.mode === 'SYSBENCH') {
-    // Threads
-    items += '<div class="config-item"><span class="cfg-label">Threads</span>' +
-      '<span class="cfg-value">' + DATA.sysbench_threads + '</span></div>';
-    // Time
-    items += '<div class="config-item"><span class="cfg-label">Time</span>' +
-      '<span class="cfg-value">' + DATA.sysbench_time + 's</span></div>';
-    // Tables
-    items += '<div class="config-item"><span class="cfg-label">Tables</span>' +
-      '<span class="cfg-value">' + DATA.sysbench_tables + '</span></div>';
-    // Table size
-    var tableSizeDisplay = DATA.sysbench_table_size;
-    if (tableSizeDisplay >= 1000000) tableSizeDisplay = (tableSizeDisplay / 1000000) + 'M';
-    else if (tableSizeDisplay >= 1000) tableSizeDisplay = (tableSizeDisplay / 1000) + 'K';
-    items += '<div class="config-item"><span class="cfg-label">Table Size</span>' +
-      '<span class="cfg-value">' + tableSizeDisplay + ' rows</span></div>';
-    // Lua script
-    items += '<div class="config-item" style="grid-column:1/-1"><span class="cfg-label">Lua Script</span>' +
-      '<span class="cfg-value" style="font-size:13px;color:var(--blue)">' +
-      esc(DATA.sysbench_lua_script) + '</span></div>';
   }
 
   // Profiling
@@ -1274,7 +1234,6 @@ renderQpsChart();
 renderSchema();
 renderQuerySelector();
 renderErrorLogs();
-renderSysbenchLogs();
 
 // -- Error Logs Renderer (standalone section) --
 function renderErrorLogs() {
@@ -1390,103 +1349,6 @@ function switchErrTab(el, panelId) {
   el.style.color = '#fff';
   // Show panel
   document.getElementById(panelId).style.display = '';
-}
-
-// -- Sysbench Logs Renderer --
-function renderSysbenchLogs() {
-  // Only show for SYSBENCH mode
-  if (DATA.mode !== 'SYSBENCH') return;
-
-  var section = document.getElementById('sysbench-logs-section');
-  var content = document.getElementById('sysbench-logs-content');
-  var hasAnyLog = false;
-
-  DATA.dbms.forEach(function(d, i) {
-    if (d.sysbench_prepare_log || d.sysbench_run_log) {
-      hasAnyLog = true;
-    }
-  });
-
-  if (!hasAnyLog) return;
-
-  section.style.display = 'block';
-
-  // Build tabs and content panels
-  var tabsHtml = '<div class="sb-log-tabs">';
-  var contentHtml = '';
-  var firstActive = true;
-
-  DATA.dbms.forEach(function(d, i) {
-    if (!d.sysbench_prepare_log && !d.sysbench_run_log) return;
-
-    var colorBg = DBMS_COLORS_BG[i % DBMS_COLORS_BG.length];
-    var isActive = firstActive;
-    firstActive = false;
-
-    // Tab button
-    tabsHtml += '<div class="sb-log-tab' + (isActive ? ' active' : '') + '" ' +
-      'style="' + (isActive ? 'background:' + colorBg : '') + '" ' +
-      'onclick="switchSysbenchLogTab(this, \'sb-log-' + i + '\', \'' + colorBg + '\')">' +
-      esc(d.name) + '</div>';
-
-    // Content panel
-    contentHtml += '<div class="sb-log-content' + (isActive ? ' active' : '') + '" id="sb-log-' + i + '">';
-
-    // Prepare log
-    if (d.sysbench_prepare_log) {
-      contentHtml += '<div class="sb-log-phase">';
-      contentHtml += '<div class="sb-log-phase-label">Prepare phase</div>';
-      contentHtml += '<pre class="sb-log-pre">' + highlightSysbenchLog(esc(d.sysbench_prepare_log)) + '</pre>';
-      contentHtml += '</div>';
-    }
-
-    // Run log
-    if (d.sysbench_run_log) {
-      contentHtml += '<div class="sb-log-phase">';
-      contentHtml += '<div class="sb-log-phase-label">Run phase</div>';
-      contentHtml += '<pre class="sb-log-pre">' + highlightSysbenchLog(esc(d.sysbench_run_log)) + '</pre>';
-      contentHtml += '</div>';
-    }
-
-    contentHtml += '</div>';
-  });
-
-  tabsHtml += '</div>';
-  content.innerHTML = tabsHtml + contentHtml;
-}
-
-function switchSysbenchLogTab(el, contentId, colorBg) {
-  // Deactivate all tabs and contents
-  var tabs = el.parentElement.querySelectorAll('.sb-log-tab');
-  var contents = el.parentElement.parentElement.querySelectorAll('.sb-log-content');
-  tabs.forEach(function(t) {
-    t.classList.remove('active');
-    t.style.background = '';
-  });
-  contents.forEach(function(c) { c.classList.remove('active'); });
-
-  // Activate clicked tab and content
-  el.classList.add('active');
-  el.style.background = colorBg;
-  document.getElementById(contentId).classList.add('active');
-}
-
-function highlightSysbenchLog(log) {
-  // Restore HTML entities for readability (safe inside <pre>)
-  log = log.replace(/&#39;/g, "'").replace(/&quot;/g, '"');
-  // Highlight command line (starts with $)
-  log = log.replace(/^\$ (.+)$/gm, '<span class="cmd">$ $1</span>');
-  // Highlight errors
-  log = log.replace(/^(FATAL:.+)$/gm, '<span class="err">$1</span>');
-  log = log.replace(/^(ERROR:.+)$/gm, '<span class="err">$1</span>');
-  log = log.replace(/(error|failed|Error|Failed|FATAL)/g, '<span class="err">$1</span>');
-  // Highlight success indicators
-  log = log.replace(/(done|success|complete|Starting|threads)/g, '<span class="ok">$1</span>');
-  // Highlight numbers and key values
-  log = log.replace(/(\d+(?:\.\d+)?(?:\s*(?:ms|s|sec|queries|transactions|events|MB|KB|bytes|threads))?)/g,
-    '<span class="num">$1</span>');
-  log = log.replace(/(transactions:.+)\((\d+\.\d+ per sec)/gi, '$1<span class="val">($2</span>');
-  return log;
 }
 </script>
 </body>

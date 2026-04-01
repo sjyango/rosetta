@@ -2,6 +2,7 @@
 
 import sys
 
-from .cli import main
+# Use new CLI module
+from .cli.main import main
 
 sys.exit(main())

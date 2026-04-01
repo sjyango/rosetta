@@ -96,7 +96,6 @@ class WorkloadMode(Enum):
     """Benchmark workload execution mode."""
     SERIAL = auto()
     CONCURRENT = auto()
-    SYSBENCH = auto()
 
 
 @dataclass
@@ -145,14 +144,6 @@ class BenchmarkConfig:
     skip_setup: bool = False   # skip setup phase if tables already exist with data
     skip_teardown: bool = False  # skip teardown (keep tables for next run)
 
-    # Sysbench-specific parameters (used when mode == SYSBENCH)
-    sysbench_threads: int = 8
-    sysbench_time: int = 30
-    sysbench_tables: int = 1
-    sysbench_table_size: int = 10000
-    sysbench_lua_script: str = "oltp_read_write"
-    sysbench_db_driver: str = "mysql"
-
 
 @dataclass
 class QueryLatencyStats:
@@ -186,9 +177,6 @@ class DBMSBenchResult:
     overall_qps: float = 0.0
     table_rows: int = 0  # total rows after setup
     table_rows_detail: Dict[str, int] = field(default_factory=dict)  # {table_name: row_count}
-    # Sysbench raw output log (for SYSBENCH mode)
-    sysbench_prepare_log: str = ""
-    sysbench_run_log: str = ""
 
 
 @dataclass

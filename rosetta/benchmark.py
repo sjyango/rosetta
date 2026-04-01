@@ -1038,7 +1038,7 @@ class ConcurrentBenchmarkRunner(BaseBenchmarkRunner):
         """Run the concurrent benchmark and return results.
         
         In concurrent mode, workers execute queries continuously for the
-        specified duration, similar to sysbench. Each worker loops through
+        specified duration. Each worker loops through
         the pre-generated test cases repeatedly until time expires.
         
         Args:
@@ -1184,7 +1184,7 @@ class ConcurrentBenchmarkRunner(BaseBenchmarkRunner):
             
             Each worker loops through the pre-generated test cases repeatedly,
             cycling back to the start when reaching the end. This ensures
-            time-based execution similar to sysbench.
+            time-based execution similar to the duration-based mode.
             """
             if start_delay > 0:
                 _time.sleep(start_delay)
@@ -1310,7 +1310,7 @@ class ConcurrentBenchmarkRunner(BaseBenchmarkRunner):
             if profiler is not None:
                 profiler.start()
 
-            # Wait for duration to expire (sysbench-style)
+            # Wait for duration to expire
             _time.sleep(duration)
             
             # Signal all workers to stop
@@ -1377,407 +1377,6 @@ class ConcurrentBenchmarkRunner(BaseBenchmarkRunner):
             pass
         finally:
             teardown_db.close()
-
-        return result
-
-
-# ---------------------------------------------------------------------------
-# Sysbench benchmark runner
-# ---------------------------------------------------------------------------
-
-class SysbenchBenchmarkRunner:
-    """Run sysbench binary and parse results.
-
-    This runner invokes the sysbench command-line tool directly,
-    passing DBMS connection parameters and Lua script configuration.
-    Results are parsed from sysbench's text output.
-    """
-
-    # Sysbench built-in OLTP scripts
-    BUILTIN_SCRIPTS = {
-        "oltp_read_write",
-        "oltp_read_only",
-        "oltp_write_only",
-        "oltp_point_select",
-        "oltp_insert",
-        "oltp_delete",
-        "oltp_update_index",
-        "oltp_update_non_index",
-    }
-
-    def __init__(
-        self,
-        config: DBMSConfig,
-        bench_cfg: BenchmarkConfig,
-        database: str = "rosetta_bench",
-        on_progress: Optional[Callable] = None,
-        on_run_start: Optional[Callable] = None,
-    ):
-        self.config = config
-        self.bench_cfg = bench_cfg
-        self.database = database
-        self.on_progress = on_progress
-        self.on_run_start = on_run_start
-
-    def _build_command(self, phase: str = "run") -> List[str]:
-        """Build sysbench command with DBMS connection parameters.
-
-        Args:
-            phase: "prepare", "run", or "cleanup"
-        """
-        lua_script = self.bench_cfg.sysbench_lua_script
-
-        # Check if it's a built-in script or a path
-        if lua_script in self.BUILTIN_SCRIPTS:
-            script_arg = lua_script
-        else:
-            # It's a path to a custom Lua script
-            script_arg = lua_script
-
-        cmd = [
-            "sysbench",
-            script_arg,
-            f"--db-driver=mysql",
-            f"--mysql-host={self.config.host}",
-            f"--mysql-port={self.config.port}",
-            f"--mysql-user={self.config.user}",
-            f"--mysql-password={self.config.password}",
-            f"--mysql-db={self.database}",
-            f"--threads={self.bench_cfg.sysbench_threads}",
-            f"--tables={self.bench_cfg.sysbench_tables}",
-            f"--table-size={self.bench_cfg.sysbench_table_size}",
-        ]
-
-        if phase == "run":
-            cmd.append(f"--time={self.bench_cfg.sysbench_time}")
-
-        cmd.append(phase)
-        return cmd
-
-    def _create_database(self) -> bool:
-        """Create the benchmark database if it doesn't exist.
-
-        Returns True on success, False on failure.
-        """
-        import pymysql
-
-        try:
-            conn = pymysql.connect(
-                host=self.config.host,
-                port=self.config.port,
-                user=self.config.user,
-                password=self.config.password,
-                connect_timeout=10,
-            )
-            cursor = conn.cursor()
-            cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{self.database}`")
-            conn.close()
-            log.info("[%s] Created database '%s'", self.config.name, self.database)
-            return True
-        except Exception as e:
-            log.error("[%s] Failed to create database: %s", self.config.name, e)
-            return False
-
-    def _drop_database(self) -> bool:
-        """Drop the benchmark database after test.
-
-        Returns True on success, False on failure.
-        """
-        import pymysql
-
-        try:
-            conn = pymysql.connect(
-                host=self.config.host,
-                port=self.config.port,
-                user=self.config.user,
-                password=self.config.password,
-                connect_timeout=10,
-            )
-            cursor = conn.cursor()
-            cursor.execute(f"DROP DATABASE IF EXISTS `{self.database}`")
-            conn.close()
-            log.info("[%s] Dropped database '%s'", self.config.name, self.database)
-            return True
-        except Exception as e:
-            log.warning("[%s] Failed to drop database: %s", self.config.name, e)
-            return False
-
-    def _run_sysbench(self, phase: str) -> tuple:
-        """Execute sysbench command and return (stdout, stderr, returncode)."""
-        import subprocess
-        import threading
-
-        cmd = self._build_command(phase)
-        log.info("[%s] Running: %s", self.config.name, " ".join(cmd))
-
-        # For run phase, use strict timeout (time + 60s buffer for cleanup)
-        # For prepare/cleanup, use longer timeout
-        if phase == "run":
-            timeout = self.bench_cfg.sysbench_time + 60
-        else:
-            timeout = 3600  # 1 hour for prepare/cleanup
-
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-
-            stdout_result = ""
-            stderr_result = ""
-            return_code = 0
-            exception = None
-
-            def run_process():
-                nonlocal stdout_result, stderr_result, return_code, exception
-                try:
-                    stdout_result, stderr_result = proc.communicate(timeout=timeout)
-                    return_code = proc.returncode
-                except subprocess.TimeoutExpired as e:
-                    exception = e
-                except Exception as e:
-                    exception = e
-
-            # Run in thread so we can update progress
-            thread = threading.Thread(target=run_process, daemon=True)
-            thread.start()
-
-            # While running, periodically update progress
-            if phase == "run" and self.on_progress:
-                import time as _time
-                start = _time.monotonic()
-                while thread.is_alive():
-                    elapsed = _time.monotonic() - start
-                    self.on_progress("run", int(elapsed), timeout, is_warmup=False)
-                    _time.sleep(0.5)  # Update every 0.5 seconds
-            else:
-                thread.join()
-
-            # Handle timeout
-            if exception:
-                if isinstance(exception, subprocess.TimeoutExpired):
-                    log.warning("[%s] Sysbench timed out after %ds, terminating", self.config.name, timeout)
-                    proc.terminate()
-                    try:
-                        stdout_result, stderr_result = proc.communicate(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        log.warning("[%s] Sysbench didn't terminate, killing", self.config.name)
-                        proc.kill()
-                        stdout_result, stderr_result = proc.communicate()
-                    return_code = 1
-                else:
-                    raise exception
-
-            return stdout_result, stderr_result, return_code
-
-        except FileNotFoundError:
-            log.error("[%s] sysbench binary not found", self.config.name)
-            return "", "sysbench not found", 1
-
-    def _parse_output(self, stdout: str) -> Dict:
-        """Parse sysbench output text to extract statistics.
-
-        Returns dict with:
-            - transactions: total count and per-sec rate
-            - latency_min, latency_avg, latency_max
-            - latency_p95, latency_p99
-            - errors: total error count
-            - reconnects: reconnect count
-        """
-        import re
-
-        result = {
-            "transactions": 0,
-            "tps": 0.0,
-            "latency_min": 0.0,
-            "latency_avg": 0.0,
-            "latency_max": 0.0,
-            "latency_p95": 0.0,
-            "latency_p99": 0.0,
-            "errors": 0,
-            "reconnects": 0,
-            "read_queries": 0,
-            "write_queries": 0,
-            "other_queries": 0,
-        }
-
-        # Parse transactions: "transactions:                        10000  (333.33 per sec.)"
-        m = re.search(r"transactions:\s+(\d+)\s+\(([\d.]+)\s+per", stdout)
-        if m:
-            result["transactions"] = int(m.group(1))
-            result["tps"] = float(m.group(2))
-
-        # Parse queries
-        m = re.search(r"read queries:\s+(\d+)", stdout)
-        if m:
-            result["read_queries"] = int(m.group(1))
-        m = re.search(r"write queries:\s+(\d+)", stdout)
-        if m:
-            result["write_queries"] = int(m.group(1))
-        m = re.search(r"other queries:\s+(\d+)", stdout)
-        if m:
-            result["other_queries"] = int(m.group(1))
-
-        # Parse latency percentiles: "95th percentile:          12.34 ms"
-        m = re.search(r"(\d+)(?:st|nd|rd|th)\s+percentile:\s+([\d.]+)\s+ms", stdout)
-        if m:
-            pct = int(m.group(1))
-            val = float(m.group(2))
-            if pct == 95:
-                result["latency_p95"] = val
-            elif pct == 99:
-                result["latency_p99"] = val
-
-        # Also check for "avg:" line format: "min: 1.23 avg: 4.56 max: 78.90"
-        m = re.search(r"min:\s+([\d.]+)\s+avg:\s+([\d.]+)\s+max:\s+([\d.]+)", stdout)
-        if m:
-            result["latency_min"] = float(m.group(1))
-            result["latency_avg"] = float(m.group(2))
-            result["latency_max"] = float(m.group(3))
-
-        # Alternative format: "latency (ms): min 1.23 avg 4.56 max 78.90"
-        if result["latency_min"] == 0:
-            m = re.search(r"latency[^:]*:\s*min\s+([\d.]+)\s+avg\s+([\d.]+)\s+max\s+([\d.]+)", stdout)
-            if m:
-                result["latency_min"] = float(m.group(1))
-                result["latency_avg"] = float(m.group(2))
-                result["latency_max"] = float(m.group(3))
-
-        # Parse errors
-        m = re.search(r"errors:\s+(\d+)", stdout)
-        if m:
-            result["errors"] = int(m.group(1))
-
-        # Parse reconnects
-        m = re.search(r"reconnects:\s+(\d+)", stdout)
-        if m:
-            result["reconnects"] = int(m.group(1))
-
-        return result
-
-    def run(self, skip_setup: bool = False) -> DBMSBenchResult:
-        """Run sysbench benchmark and return results.
-
-        Args:
-            skip_setup: If True, skip prepare phase.
-        """
-        result = DBMSBenchResult(dbms_name=self.config.name)
-
-        # Phase 0: Create database if needed
-        if not skip_setup:
-            if not self._create_database():
-                log.error("[%s] Failed to create database, skipping", self.config.name)
-                return result
-
-        # Phase 1: Prepare (create tables and load data)
-        if not skip_setup:
-            log.info("[%s] Running sysbench prepare...", self.config.name)
-            if self.on_progress:
-                self.on_progress("prepare", 0, 0, is_warmup=True)
-            stdout, stderr, rc = self._run_sysbench("prepare")
-            # Store prepare log
-            result.sysbench_prepare_log = f"$ sysbench {' '.join(self._build_command('prepare'))}\n{stdout}\n{stderr}".strip()
-            if rc != 0:
-                log.warning("[%s] Prepare failed: %s", self.config.name, stderr)
-
-        # Notify run start
-        if self.on_run_start:
-            self.on_run_start()
-
-        # Phase 2: Run benchmark
-        log.info("[%s] Running sysbench benchmark...", self.config.name)
-        if self.on_progress:
-            self.on_progress("run", 0, 0, is_warmup=False)
-
-        start_time = _time.monotonic()
-        stdout, stderr, rc = self._run_sysbench("run")
-        elapsed = _time.monotonic() - start_time
-
-        # Store run log (always store, even on error)
-        result.sysbench_run_log = f"$ sysbench {' '.join(self._build_command('run'))}\n{stdout}\n{stderr}".strip()
-
-        if rc != 0:
-            log.error("[%s] Sysbench run failed: %s", self.config.name, stderr)
-            return result
-
-        # Parse results
-        stats_dict = self._parse_output(stdout)
-        log.info("[%s] Sysbench results: %s", self.config.name, stats_dict)
-
-        # Create QueryLatencyStats from parsed results
-        # Sysbench produces aggregate stats, not per-query breakdown,
-        # so we create a single "aggregate" query stat
-        query_stats = QueryLatencyStats(
-            query_name="sysbench_aggregate",
-            sql_template=f"-- sysbench script: {self.bench_cfg.sysbench_lua_script}",
-        )
-        query_stats.total_executions = stats_dict["transactions"]
-        query_stats.total_errors = stats_dict["errors"]
-        query_stats.min_ms = stats_dict["latency_min"]
-        query_stats.avg_ms = stats_dict["latency_avg"]
-        query_stats.max_ms = stats_dict["latency_max"]
-        query_stats.p95_ms = stats_dict["latency_p95"]
-        query_stats.p99_ms = stats_dict["latency_p99"]
-        query_stats.qps = stats_dict["tps"]
-
-        # Store detailed breakdown if available
-        if stats_dict["read_queries"] or stats_dict["write_queries"]:
-            # Create additional stats for read/write breakdown
-            result.query_stats.append(query_stats)
-
-            if stats_dict["read_queries"] > 0:
-                read_stats = QueryLatencyStats(
-                    query_name="read_queries",
-                    sql_template="-- read operations (SELECT)",
-                )
-                read_stats.total_executions = stats_dict["read_queries"]
-                result.query_stats.append(read_stats)
-
-            if stats_dict["write_queries"] > 0:
-                write_stats = QueryLatencyStats(
-                    query_name="write_queries",
-                    sql_template="-- write operations (INSERT/UPDATE/DELETE)",
-                )
-                write_stats.total_executions = stats_dict["write_queries"]
-                result.query_stats.append(write_stats)
-        else:
-            result.query_stats.append(query_stats)
-
-        result.total_duration_s = elapsed
-        result.total_queries = stats_dict["transactions"]
-        result.total_errors = stats_dict["errors"]
-        result.overall_qps = stats_dict["tps"]
-
-        # Collect table row counts after sysbench run
-        try:
-            db = self._get_db_connection()
-            db.cursor.execute("SHOW TABLES")
-            tables = [r[0] for r in db.cursor.fetchall()]
-            total = 0
-            detail = {}
-            for tbl in tables:
-                try:
-                    db.cursor.execute(f"SELECT COUNT(*) FROM `{tbl}`")
-                    cnt = db.cursor.fetchone()
-                    if cnt and cnt[0]:
-                        row_count = int(cnt[0])
-                        total += row_count
-                        detail[tbl] = row_count
-                except Exception:
-                    pass
-            result.table_rows = total
-            result.table_rows_detail = detail
-            db.close()
-            log.debug("[%s] Collected table rows: %s", self.config.name, detail)
-        except Exception as e:
-            log.debug("[%s] Could not collect table rows: %s", self.config.name, e)
-
-        # Phase 3: Cleanup (optional)
-        if not self.bench_cfg.skip_teardown:
-            log.info("[%s] Running sysbench cleanup...", self.config.name)
-            self._run_sysbench("cleanup")
 
         return result
 
@@ -1850,23 +1449,20 @@ def run_benchmark(
 
     # Pre-generate test cases for fair comparison
     # All DBMS instances will execute the exact same sequence of SQL statements
-    test_cases = []  # Empty for SYSBENCH mode
+    log.info("Pre-generating test cases with seed=%d", bench_cfg.seed)
+    generator = TestCaseGenerator(seed=bench_cfg.seed)
 
-    if bench_cfg.mode != WorkloadMode.SYSBENCH:
-        log.info("Pre-generating test cases with seed=%d", bench_cfg.seed)
-        generator = TestCaseGenerator(seed=bench_cfg.seed)
-
-        if bench_cfg.mode == WorkloadMode.SERIAL:
-            test_cases = generator.generate_serial_cases(
-                workload, bench_cfg.iterations, bench_cfg.warmup)
-            log.info("Generated %d test cases for serial mode", len(test_cases))
-        else:
-            # For concurrent mode, generate a pool of test cases that workers
-            # will cycle through repeatedly during the duration.
-            # Use a reasonable pool size (~100 per query) for variety.
-            pool_size = max(100, len(workload.queries) * 20)
-            test_cases = generator.generate_concurrent_cases(workload, pool_size)
-            log.info("Generated %d test cases for concurrent mode (will cycle)", len(test_cases))
+    if bench_cfg.mode == WorkloadMode.SERIAL:
+        test_cases = generator.generate_serial_cases(
+            workload, bench_cfg.iterations, bench_cfg.warmup)
+        log.info("Generated %d test cases for serial mode", len(test_cases))
+    else:
+        # For concurrent mode, generate a pool of test cases that workers
+        # will cycle through repeatedly during the duration.
+        # Use a reasonable pool size (~100 per query) for variety.
+        pool_size = max(100, len(workload.queries) * 20)
+        test_cases = generator.generate_concurrent_cases(workload, pool_size)
+        log.info("Generated %d test cases for concurrent mode (will cycle)", len(test_cases))
 
     # Track setup results per DBMS
     setup_results: Dict[str, bool] = {}
@@ -1937,35 +1533,30 @@ def run_benchmark(
             db.close()
 
     # --- Phase 1: Run setup on all DBMS targets ---
-    # For SYSBENCH mode, skip the setup phase (sysbench prepare handles it)
-    if bench_cfg.mode == WorkloadMode.SYSBENCH:
-        log.info("SYSBENCH mode: skipping regular setup phase")
-        successful_configs = configs
+    log.info("Starting setup phase for %d DBMS targets", len(configs))
+
+    if parallel_dbms and len(configs) > 1:
+        # Parallel setup
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(configs)) as pool:
+            futures = {pool.submit(_run_setup, c): c for c in configs}
+            for fut in concurrent.futures.as_completed(futures):
+                config = futures[fut]
+                try:
+                    setup_results[config.name] = fut.result()
+                except Exception as e:
+                    log.error("[%s] Setup failed: %s", config.name, e)
+                    setup_results[config.name] = False
     else:
-        log.info("Starting setup phase for %d DBMS targets", len(configs))
+        # Sequential setup
+        for config in configs:
+            setup_results[config.name] = _run_setup(config)
 
-        if parallel_dbms and len(configs) > 1:
-            # Parallel setup
-            with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=len(configs)) as pool:
-                futures = {pool.submit(_run_setup, c): c for c in configs}
-                for fut in concurrent.futures.as_completed(futures):
-                    config = futures[fut]
-                    try:
-                        setup_results[config.name] = fut.result()
-                    except Exception as e:
-                        log.error("[%s] Setup failed: %s", config.name, e)
-                        setup_results[config.name] = False
-        else:
-            # Sequential setup
-            for config in configs:
-                setup_results[config.name] = _run_setup(config)
-
-        # Check if any setup succeeded
-        successful_configs = [c for c in configs if setup_results.get(c.name, False)]
-        if not successful_configs:
-            log.error("All DBMS setups failed, aborting benchmark")
-            return result
+    # Check if any setup succeeded
+    successful_configs = [c for c in configs if setup_results.get(c.name, False)]
+    if not successful_configs:
+        log.error("All DBMS setups failed, aborting benchmark")
+        return result
     
     # --- Phase 2: Run query phase on all DBMS targets ---
     log.info("All setups complete, starting query phase")
@@ -2002,7 +1593,7 @@ def run_benchmark(
                 on_profile_start=_profile_start_cb,
                 on_profile_done=_profile_done_cb,
             )
-        elif bench_cfg.mode == WorkloadMode.CONCURRENT:
+        else:
             runner = ConcurrentBenchmarkRunner(
                 config, workload, bench_cfg, test_cases, database,
                 on_progress=_progress_cb,
@@ -2010,17 +1601,9 @@ def run_benchmark(
                 on_profile_done=_profile_done_cb,
                 on_run_start=None,  # Already called above
             )
-        else:  # SYSBENCH mode
-            runner = SysbenchBenchmarkRunner(
-                config, bench_cfg, database,
-                on_progress=_progress_cb,
-                on_run_start=None,  # Already called above
-            )
 
-        # Skip setup for SERIAL/CONCURRENT since it's already done
-        # For SYSBENCH, let sysbench handle prepare phase
-        skip_setup_for_run = (bench_cfg.mode != WorkloadMode.SYSBENCH) or bench_cfg.skip_setup
-        dbms_result = runner.run(skip_setup=skip_setup_for_run)
+        # Skip setup since it's already done
+        dbms_result = runner.run(skip_setup=True)
         
         # Add table_rows from setup phase
         if config.name in setup_table_rows:

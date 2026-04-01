@@ -1,151 +1,291 @@
 # Rosetta
+Cross-DBMS SQL testing & benchmarking toolkit.
 
-Cross-DBMS SQL behavioral consistency verification tool.
-
-Rosetta parses MySQL MTR-style `.test` files, executes the SQL statements against multiple database systems (TDSQL, MySQL, TiDB, OceanBase, etc.), compares execution results, and generates visual diff reports.
+Rosetta executes SQL against multiple databases (TDSQL, MySQL, TiDB, OceanBase, etc.), compares behavioral consistency via MTR-style `.test` files, benchmarks query performance, and provides an interactive SQL playground — all with visual reports.
 
 ## Requirements
-
 - Python >= 3.8
 - PyMySQL >= 1.0
 - Rich >= 13.0
 - prompt_toolkit >= 3.0
 
 ## Installation
-
-### 方式一：pip 安装（推荐）
-
+### Pip Install (Recommended)
 ```bash
 git clone https://github.com/sjyango/rosetta.git
 cd rosetta
 pip install -e .
 ```
+`rosetta` command is available globally after installation.
 
-安装后 `rosetta` 命令全局可用。
-
-### 方式二：.pyz 单文件
-
-使用打包脚本构建一个可直接运行的单文件：
-
+### Single File (.pyz)
 ```bash
-./build.sh
-# 产出: dist/rosetta.pyz
-```
-
-运行时只需：
-
-```bash
+./build.sh  # Output: dist/rosetta.pyz
 pip install pymysql "rich>=13.0" "prompt_toolkit>=3.0"
 python3 rosetta.pyz --help
 ```
 
 ## Quick Start
-
 ```bash
-# 1. Generate a sample config file
-rosetta --gen-config dbms_config.json
+# 1. Generate config file
+rosetta config init
 
-# 2. Edit dbms_config.json with your DBMS connection info
+# 2. Edit DB connection info
 vim dbms_config.json
 
-# 3. Run a test
-rosetta --test path/to/test.test --dbms tdsql,mysql
+# 3. Check DB connectivity
+rosetta status
 
-# 4. Run with HTTP server to view HTML reports
-rosetta --test path/to/test.test --dbms tdsql,mysql --serve
+# 4. Execute SQL across databases
+rosetta exec --dbms tdsql,mysql --sql "SELECT VERSION()"
 
-# 5. Interactive mode (REPL, run multiple tests without restarting)
-rosetta --interactive --dbms tdsql,mysql --serve
+# 5. Run MTR consistency test
+rosetta mtr --dbms tdsql,mysql -t test.test
+
+# 6. Run performance benchmark
+rosetta bench --dbms tdsql,mysql --file bench.json
+
+# 7. Browse historical results
+rosetta result list
+
+# 8. Interactive mode (REPL)
+rosetta i
 ```
 
 ## Usage
-
+```bash
+rosetta <command> [options]
 ```
-rosetta --test <test_file> [options]
-```
 
-### Required Arguments
-
-| Argument | Description |
-|----------|-------------|
-| `--test, -t` | Path to MTR `.test` file |
-
-### Optional Arguments
+### Global Options
+All commands support these flags (can appear before or after the subcommand):
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--config, -c` | `dbms_config.json` | Path to DBMS config JSON file |
-| `--dbms` | *(all enabled)* | DBMS to compare, comma-separated (e.g. `tdsql,mysql,tidb`) |
-| `--baseline, -b` | `tdsql` | Baseline DBMS name for comparison |
-| `--output-dir, -o` | `results` | Output directory for reports |
-| `--format, -f` | `all` | Output format: `text`, `html`, or `all` |
-| `--database, -d` | `cross_dbms_test_db` | Test database name |
-| `--skip-explain` | `True` | Skip EXPLAIN statements |
-| `--skip-analyze` | `False` | Skip ANALYZE TABLE statements |
-| `--skip-show-create` | `False` | Skip SHOW CREATE TABLE statements |
-| `--parse-only` | `False` | Only parse `.test` file and print statements (debug) |
-| `--diff-only` | `False` | Re-generate reports from existing `.result` files without executing |
-| `--gen-config` | — | Generate a sample config file at the given path and exit |
-| `--serve, -s` | `False` | Start HTTP server after test run |
-| `--port, -p` | `19527` | HTTP server port |
-| `--interactive` | `False` | Enter interactive mode (REPL session) |
-| `--verbose, -v` | `False` | Enable verbose logging |
+| `-j / --json` | `False` | JSON output (AI Agent friendly) |
+| `-c / --config` | `dbms_config.json` | DBMS config file path |
+| `-v / --verbose` | `False` | Enable verbose/debug logging |
 
-## Examples
+### Commands
 
-### Compare TDSQL and MySQL
+---
+
+#### `status` — Check DB Connection Status
+Check connectivity and version for all enabled databases in config.
 
 ```bash
-rosetta --test suite/tdsql/json/t/test.test --dbms tdsql,mysql --baseline tdsql
+rosetta status
+rosetta status -j
+rosetta status --timeout 10
 ```
 
-### Compare all enabled DBMS (controlled by config file)
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--timeout` | `5` | Connection timeout in seconds |
+
+---
+
+#### `exec` — Execute SQL (Playground)
+Execute SQL statements across databases and compare results side-by-side.
 
 ```bash
-rosetta --test suite/tdsql/json/t/test.test
+# Execute single SQL
+rosetta exec --dbms tdsql,mysql --sql "SELECT VERSION()"
+
+# Execute SQL from file
+rosetta exec --dbms tdsql,mysql --file queries.sql
+
+# Execute on a specific database
+rosetta exec --dbms mysql -d mydb --sql "SHOW TABLES"
 ```
 
-### Generate only HTML report
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `--sql` | one of `--sql` / `--file` | — | SQL statement to execute |
+| `--file` | one of `--sql` / `--file` | — | File containing SQL statements |
+| `--dbms` | ❌ | all enabled | DBMS targets (comma-separated) |
+| `-d / --database` | ❌ | none | Database name (omit to connect without `USE`) |
+
+---
+
+#### `mtr` — MTR Consistency Test
+Execute `.test` files and compare SQL execution results across databases. Generates HTML diff reports.
 
 ```bash
-rosetta --test suite/tdsql/json/t/test.test --dbms tdsql,mysql --format html
+# Basic MTR test
+rosetta mtr --dbms tdsql,mysql -t test.test
+
+# With baseline comparison
+rosetta mtr --dbms tdsql,mysql --baseline tdsql -t test.test
+
+# Parse only (no execution)
+rosetta mtr --dbms tdsql,mysql --parse-only -t test.test
+
+# Serve HTML report after test
+rosetta mtr --dbms tdsql,mysql --serve -t test.test
 ```
 
-### Re-generate reports from existing results (no DB connection needed)
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `-t / --test` | ✅ | — | Path to `.test` file |
+| `--dbms` | ✅ | — | DBMS targets (comma-separated) |
+| `-b / --baseline` | ❌ | `tdsql` | Baseline DBMS for diff comparison |
+| `-d / --database` | ❌ | `rosetta_mtr_test` | Test database name |
+| `-o / --output-dir` | ❌ | `results` | Report output directory |
+| `-f / --output-format` | ❌ | `all` | Report format: `text`, `html`, `all` |
+| `--parse-only` | ❌ | `False` | Only parse `.test` file, no execution |
+| `--diff-only` | ❌ | `False` | Re-generate reports from existing `.result` files |
+| `-s / --serve` | ❌ | `False` | Start HTTP server to view reports |
+| `-p / --port` | ❌ | `19527` | HTTP server port |
+
+---
+
+#### `bench` — Performance Benchmark
+Compare query performance across databases with custom workloads. Supports serial and concurrent modes.
 
 ```bash
-rosetta --test suite/tdsql/json/t/test.test --diff-only --format html
+# Serial benchmark
+rosetta bench --dbms tdsql,mysql --mode SERIAL --iterations 10 --file bench.json
+
+# Concurrent benchmark (8 threads, 60s)
+rosetta bench --dbms tdsql,mysql \
+  --mode CONCURRENT --concurrency 8 --duration 60 --file bench.json
+
+# Skip setup (reuse tables from previous run)
+rosetta bench --dbms tdsql,mysql --skip-setup --file bench.json
+
+# Disable flame graph capture
+rosetta bench --dbms tdsql,mysql --no-profile --file bench.json
 ```
 
-### Start HTTP server to view reports
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `--dbms` | ✅ | — | DBMS targets (comma-separated) |
+| `--file` | ✅ | — | Benchmark definition file (`.json` / `.sql`) |
+| `--mode` | ❌ | `SERIAL` | Execution mode: `SERIAL` or `CONCURRENT` |
+| `-d / --database` | ❌ | `rosetta_bench_test` | Benchmark database name |
+| `-o / --output-dir` | ❌ | `results` | Report output directory |
+| `-f / --output-format` | ❌ | `all` | Report format: `text`, `html`, `all` |
+
+**Serial mode** (`--mode SERIAL`):
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--iterations` | `1` | Iterations per query |
+| `--warmup` | `0` | Warmup iterations |
+
+**Concurrent mode** (`--mode CONCURRENT`):
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--concurrency` | `10` | Number of concurrent threads |
+| `--duration` | `30` | Duration in seconds |
+| `--warmup` | `0` | Warmup duration in seconds |
+| `--ramp-up` | `0` | Ramp-up seconds for threads |
+
+**Common options**:
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--query-timeout` | `5` | Query timeout in seconds (0 = disabled) |
+| `--bench-filter` | — | Run only queries matching these names (comma-separated) |
+| `--repeat` | `1` | Number of benchmark rounds |
+| `--skip-setup` | `False` | Skip setup phase (reuse existing tables) |
+| `--skip-teardown` | `False` | Skip teardown (keep tables for next run) |
+| `--no-parallel-dbms` | `False` | Run DBMS targets sequentially |
+| `--no-profile` | `False` | Disable flame-graph capture |
+| `--perf-freq` | `99` | perf sampling frequency in Hz |
+
+---
+
+#### `config` — Manage Configuration
+View, validate, or generate DBMS configuration files.
 
 ```bash
-rosetta --test suite/tdsql/json/t/test.test --dbms tdsql,mysql --serve --port 8080
+# Generate sample config
+rosetta config init
+
+# Generate to custom path
+rosetta config init --output my_config.json
+
+# Show current config
+rosetta config show
+
+# Validate config (check JSON + connectivity)
+rosetta config validate
 ```
 
-### Interactive mode (REPL session)
+| Action | Description |
+|--------|-------------|
+| `init` | Generate a sample `dbms_config.sample.json` |
+| `show` | Display current config details |
+| `validate` | Validate JSON structure and test connectivity |
+
+---
+
+#### `result` — Browse Historical Results
+List, inspect, and navigate past MTR and benchmark runs.
 
 ```bash
-rosetta --interactive --config dbms_config.json --dbms tdsql,mysql --serve
+# List runs (default: 20 per page)
+rosetta result list
+
+# Pagination
+rosetta result list -n 10 -p 2
+
+# Filter by type
+rosetta result list --type bench
+rosetta result list --type mtr
+
+# Show details of latest run
+rosetta result show
+
+# Show a specific run (prefix match supported)
+rosetta result show bench_json_mv_select_20260331
+
+# JSON output
+rosetta result show -j
 ```
 
-In interactive mode, you get a REPL prompt where you can repeatedly submit `.test` file paths without restarting. Features include:
+**`result list` options**:
 
-- **Tab completion** for `.test` file paths
-- **Built-in HTTP server** with `--serve` for live report viewing
-- **History page** (`index.html`) automatically updated after each run
-- **Whitelist / Buglist management** via Web UI and REST API
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `-n / --limit` | `20` | Rows per page |
+| `-p / --page` | `1` | Page number |
+| `--type` | `all` | Filter: `all`, `mtr`, `bench` |
+| `-o / --output-dir` | `results` | Results directory |
 
-### Parse-only mode (debug, no DB connection needed)
+**`result show` options**:
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `run_id` | latest | Run ID or prefix (optional) |
+| `-o / --output-dir` | `results` | Results directory |
+
+---
+
+#### `i` / `repl` / `interactive` — Interactive REPL
+Launch an interactive session for ad-hoc SQL execution, MTR tests, and benchmarks.
 
 ```bash
-rosetta --test suite/tdsql/json/t/test.test --parse-only
+rosetta i
+rosetta i --dbms tdsql,mysql
+rosetta i --serve
 ```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--dbms` | all enabled | DBMS targets (comma-separated) |
+| `-d / --database` | `cross_dbms_test_db` | Test database name |
+| `-o / --output-dir` | `results` | Report output directory |
+| `-s / --serve` | `False` | Start HTTP server for reports |
+| `-p / --port` | `19527` | HTTP server port |
+
+---
 
 ## Configuration
-
-The config file is a JSON file with the following structure:
-
+Sample `dbms_config.json`:
 ```json
 {
   "databases": [
@@ -156,145 +296,29 @@ The config file is a JSON file with the following structure:
       "user": "root",
       "password": "",
       "driver": "pymysql",
-      "skip_patterns": [],
-      "init_sql": [],
-      "skip_explain": false,
-      "skip_analyze": false,
-      "skip_show_create": false,
-      "enabled": true,
-      "restart_cmd": ""
+      "enabled": true
     }
   ]
 }
 ```
 
-### Config Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | string | DBMS identifier (used in `--dbms` and `--baseline`) |
-| `host` | string | Database host |
-| `port` | int | Database port |
-| `user` | string | Database user |
-| `password` | string | Database password |
-| `driver` | string | Python DB driver (`pymysql`) |
-| `skip_patterns` | list | SQL patterns to skip for this DBMS |
-| `init_sql` | list | SQL statements to run on connection init |
-| `skip_explain` | bool | Skip EXPLAIN statements for this DBMS |
-| `skip_analyze` | bool | Skip ANALYZE TABLE statements for this DBMS |
-| `skip_show_create` | bool | Skip SHOW CREATE TABLE statements for this DBMS |
-| `enabled` | bool | Whether this DBMS is included when `--dbms` is not specified |
-| `restart_cmd` | string | Command to restart the DBMS (used on connection failure) |
-
-## Adding a New DBMS
-
-1. Add a new entry in your `dbms_config.json`:
-
-```json
-{
-  "name": "new_dbms",
-  "host": "127.0.0.1",
-  "port": 3307,
-  "user": "root",
-  "password": "",
-  "driver": "pymysql",
-  "skip_patterns": [],
-  "init_sql": ["SET ..."],
-  "enabled": true
-}
-```
-
-2. Run with `--dbms` to include it:
-
-```bash
-rosetta --test test.test --dbms tdsql,mysql,new_dbms
-```
-
-No code changes required — any MySQL-protocol-compatible DBMS can be added via configuration alone.
-
-## Output
-
-Rosetta generates the following files in the output directory:
-
+## Output Files
 | File | Description |
 |------|-------------|
-| `<test_name>.<dbms>.result` | Raw execution output per DBMS |
+| `<test_name>.html` | Interactive HTML report with side-by-side diff |
 | `<test_name>.report.txt` | Text summary report |
-| `<test_name>.diff` | Unified diff output |
-| `<test_name>.html` | Interactive HTML report with dashboard and side-by-side diff |
-| `index.html` | History page listing all test runs |
-| `whitelist.json` | Persisted whitelist entries (auto-created) |
-| `buglist.json` | Persisted buglist entries (auto-created) |
-| `whitelist.html` | Whitelist management page |
-| `buglist.html` | Buglist management page |
+| `bench_result.json` | Benchmark raw data (JSON) |
+| `index.html` | History page of all test runs |
+| `whitelist.json` | Persisted whitelist for acceptable diffs |
+| `buglist.json` | Tracked known bugs from diff results |
 
-## Whitelist & Buglist
-
-Rosetta supports **whitelisting** and **bug-marking** individual diff blocks. This helps manage known differences across test runs.
-
-### Whitelist
-
-Whitelisted diffs are **excluded from the failure count** — they no longer cause a test to be reported as FAIL. Use this for known acceptable differences (e.g., DBMS-specific behavior that is correct but different).
-
-- Each diff is identified by an **MD5 fingerprint** computed from the normalised SQL statement and the outputs of both DBMS.
-- Whitelist entries are persisted in `whitelist.json` in the output directory.
-- Whitelisted diffs appear with reduced opacity and a yellow "Whitelisted" badge in the HTML report.
-
-### Buglist
-
-Bug-marked diffs are **informational only** — they still count toward the failure rate, but are visually distinguished so you can track known bugs across runs.
-
-- Bug entries are persisted in `buglist.json` in the output directory.
-- Bug-marked diffs appear with a red left border and a "Bug" badge in the HTML report.
-
-### Managing via HTML Report
-
-In the interactive HTML report for each test run, every diff block has action buttons:
-
-- **加白 (Whitelist)** — add the diff to the whitelist; click again to remove
-- **标记Bug (Mark Bug)** — mark the diff as a known bug; click again to remove
-
-Changes take effect immediately and are persisted to the JSON files. When reopening a report from the history page, the whitelist/buglist state is synced from the server via API.
-
-### Managing via REST API
-
-When running with `--serve`, the following API endpoints are available:
-
-| Endpoint | Method | Action | Body |
-|----------|--------|--------|------|
-| `/api/whitelist/list` | POST | List all whitelist entries | `{}` |
-| `/api/whitelist/add` | POST | Add a whitelist entry | `{"fingerprint": "...", "stmt": "...", "dbms_a": "...", "dbms_b": "...", "block": 0, "reason": ""}` |
-| `/api/whitelist/remove` | POST | Remove a whitelist entry | `{"fingerprint": "..."}` |
-| `/api/whitelist/clear` | POST | Clear all whitelist entries | `{}` |
-| `/api/buglist/list` | POST | List all buglist entries | `{}` |
-| `/api/buglist/add` | POST | Add a buglist entry | `{"fingerprint": "...", "stmt": "...", "dbms_a": "...", "dbms_b": "...", "block": 0, "reason": ""}` |
-| `/api/buglist/remove` | POST | Remove a buglist entry | `{"fingerprint": "..."}` |
-| `/api/buglist/clear` | POST | Clear all buglist entries | `{}` |
-
-## Project Structure
-
+## Testing
+```bash
+python -m pytest tests/test_cli.py -v
 ```
-rosetta/
-├── pyproject.toml         # Package metadata and console_scripts entry
-├── setup.py               # Fallback install entry
-├── build.sh               # Build script for .pyz packaging
-├── dbms_config.sample.json # Sample DBMS config file
-└── rosetta/               # Python package
-    ├── __init__.py        # Package definition
-    ├── __main__.py        # python -m rosetta entry point
-    ├── models.py          # Data models (Statement, StmtResult, DBMSConfig, CompareResult)
-    ├── config.py          # Config loading, validation, sample generation
-    ├── parser.py          # MTR .test file parser
-    ├── executor.py        # DB connection management and SQL execution
-    ├── comparator.py      # Result normalization and diff comparison
-    ├── whitelist.py       # Whitelist management (MD5 fingerprint, JSON persistence)
-    ├── buglist.py         # Buglist management (known bug tracking)
-    ├── interactive.py     # Interactive REPL session with HTTP server
-    ├── reporter/
-    │   ├── __init__.py
-    │   ├── text.py        # Text report generator
-    │   ├── html.py        # HTML visual report generator (with whitelist/buglist UI)
-    │   └── history.py     # History index page and whitelist/buglist management pages
-    ├── ui.py              # Terminal UI helpers (summary table, progress)
-    └── cli.py             # CLI entry point and orchestration
+
+## Getting Help
+```bash
+rosetta --help
+rosetta <command> --help
 ```
