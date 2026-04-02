@@ -7,7 +7,5 @@ build/
 .eggs/
 results/
 dbms_config.json
-.codebuddy/*
-!.codebuddy/skills/
-!.codebuddy/skills/**
 benchmark/
+rosetta-skill.zip

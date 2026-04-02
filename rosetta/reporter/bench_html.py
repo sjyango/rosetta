@@ -39,6 +39,7 @@ def _build_data(result: BenchmarkResult) -> dict:
                 "min": round(qs.min_ms, 3),
                 "max": round(qs.max_ms, 3),
                 "qps": round(qs.qps, 1),
+                "latencies_ms": [round(l, 3) for l in qs.latencies_ms] if qs.latencies_ms else [],
                 "has_flamegraph": bool(qs.flamegraph_svg),
                 "explain": qs.explain_plan or "",
                 "explain_tree": qs.explain_tree or "",
@@ -50,6 +51,9 @@ def _build_data(result: BenchmarkResult) -> dict:
             "total_duration": round(dr.total_duration_s, 2),
             "total_queries": dr.total_queries,
             "total_errors": dr.total_errors,
+            "table_rows": dr.table_rows,
+            "table_rows_detail": dr.table_rows_detail or {},
+            "table_schema": dr.table_schema or {},
             "queries": queries,
         })
     return {
@@ -61,8 +65,10 @@ def _build_data(result: BenchmarkResult) -> dict:
         "duration": result.config.duration,
         "ramp_up": result.config.ramp_up,
         "timestamp": result.timestamp or time.strftime("%Y-%m-%d %H:%M:%S"),
+        "run_id": result.run_id or "",
         "table_rows": result.table_rows,
         "table_rows_detail": result.table_rows_detail or {},
+        "table_schema": result.table_schema or {},
         "dbms": dbms_list,
         "has_profile": result.config.profile,
         "setup_sql": list(result.setup_sql) if result.setup_sql else [],
@@ -131,6 +137,12 @@ h2 { font-size: 18px; margin-bottom: 16px; color: var(--fg); }
   font-size: 11px; font-weight: 500; }
 .table-chip .tc-count { color: var(--fg); font-weight: 600; font-size: 12px; }
 .table-chip .tc-sep { color: var(--border); }
+
+/* Run ID */
+.run-id-wrap { display: inline-flex; align-items: center; gap: 6px; font-family: 'SF Mono', Consolas, monospace; font-size: 12px; color: var(--purple); max-width: 200px; }
+.run-id-text { cursor: default; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-id-copy { flex-shrink: 0; background: transparent; border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; font-size: 11px; cursor: pointer; color: var(--fg2); transition: all 0.15s; line-height: 1; }
+.run-id-copy:hover { background: var(--bg3); border-color: var(--fg2); color: var(--fg); }
 
 /* Cards */
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -403,6 +415,14 @@ function fmtMs(v) {
   if (v < 100) return v.toFixed(2);
   return v.toFixed(1);
 }
+function copyToClipboard(text, btn) {
+  navigator.clipboard.writeText(text).then(function() {
+    var orig = btn.innerHTML;
+    btn.innerHTML = '✓';
+    btn.disabled = true;
+    setTimeout(function() { btn.innerHTML = orig; btn.disabled = false; }, 1500);
+  });
+}
 
 // -- Config Panel --
 (function() {
@@ -410,6 +430,15 @@ function fmtMs(v) {
   var modeClass = 'mode-serial';
   if (DATA.mode === 'CONCURRENT') modeClass = 'mode-concurrent';
   var items = '';
+
+  // Run ID (first item with copy button)
+  if (DATA.run_id) {
+    items += '<div class="config-item"><span class="cfg-label">Run ID</span>' +
+      '<span class="cfg-value run-id-wrap">' +
+      '<span class="run-id-text" title="' + esc(DATA.run_id) + '">' + esc(DATA.run_id) + '</span>' +
+      '<button class="run-id-copy" onclick="copyToClipboard(\'' + esc(DATA.run_id).replace(/'/g, "\\'") + '\',this)">📋</button>' +
+      '</span></div>';
+  }
 
   // Workload
   items += '<div class="config-item"><span class="cfg-label">Workload</span>' +

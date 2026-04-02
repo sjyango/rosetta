@@ -177,6 +177,7 @@ class DBMSBenchResult:
     overall_qps: float = 0.0
     table_rows: int = 0  # total rows after setup
     table_rows_detail: Dict[str, int] = field(default_factory=dict)  # {table_name: row_count}
+    table_schema: Dict[str, str] = field(default_factory=dict)  # {table_name: CREATE TABLE stmt}
 
 
 @dataclass
@@ -187,8 +188,10 @@ class BenchmarkResult:
     config: BenchmarkConfig
     dbms_results: List[DBMSBenchResult] = field(default_factory=list)
     timestamp: str = ""
+    run_id: str = ""  # unique identifier for this run (e.g. bench_xxx_20260101_120000)
     table_rows: int = 0  # total rows in the test table after setup
     table_rows_detail: Dict[str, int] = field(default_factory=dict)  # {table_name: row_count}
+    table_schema: Dict[str, str] = field(default_factory=dict)  # {table_name: CREATE TABLE stmt}
     setup_sql: List[str] = field(default_factory=list)  # setup DDL/DML stmts
     teardown_sql: List[str] = field(default_factory=list)  # teardown stmts
     queries_sql: List[Dict] = field(default_factory=list)  # [{name, sql, weight}]

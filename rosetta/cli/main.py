@@ -466,7 +466,7 @@ def _add_interactive_subparser(subparsers):
         _add_global_options(interp_parser)
         interp_parser.add_argument(
             "--dbms",
-            help="DBMS targets, comma-separated",
+            help="DBMS targets, comma-separated (default: auto-detect reachable DBMS)",
         )
         interp_parser.add_argument(
             "--database", "-d",
@@ -481,7 +481,14 @@ def _add_interactive_subparser(subparsers):
         interp_parser.add_argument(
             "--serve", "-s",
             action="store_true",
-            help="Start a local HTTP server to view HTML reports",
+            default=True,
+            help="Start a local HTTP server to view HTML reports (default: on)",
+        )
+        interp_parser.add_argument(
+            "--no-serve",
+            action="store_false",
+            dest="serve",
+            help="Do not start HTTP server",
         )
         interp_parser.add_argument(
             "--port", "-p",
@@ -547,10 +554,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     
-    # No command provided
+    # No command provided — default to interactive mode
     if not args.command:
-        parser.print_help()
-        return 0
+        from .interactive_cmd import handle_interactive
+        # Set default values for interactive mode
+        args.dbms = getattr(args, 'dbms', None)
+        args.database = getattr(args, 'database', 'cross_dbms_test_db')
+        args.output_dir = getattr(args, 'output_dir', 'results')
+        args.serve = getattr(args, 'serve', True)
+        args.port = getattr(args, 'port', 19527)
+        result = handle_interactive(args, output)
+        output.print(result)
+        return result.exit_code()
     
     # Dispatch to command handlers
     try:

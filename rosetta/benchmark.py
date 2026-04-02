@@ -710,7 +710,7 @@ class BaseBenchmarkRunner:
                 log.warning("[%s] Setup failed: %s — %s",
                             self.config.name, sql[:80], e)
 
-        # Query total rows after setup
+        # Query total rows and schema after setup
         try:
             db.cursor.execute(
                 "SELECT TABLE_NAME FROM information_schema.TABLES "
@@ -719,7 +719,9 @@ class BaseBenchmarkRunner:
             tables = [r[0] for r in db.cursor.fetchall()]
             total = 0
             detail = {}
+            schema = {}
             for tbl in tables:
+                # Get row count
                 try:
                     db.cursor.execute(f"SELECT COUNT(*) FROM `{tbl}`")
                     cnt = db.cursor.fetchone()
@@ -729,8 +731,18 @@ class BaseBenchmarkRunner:
                         detail[tbl] = row_count
                 except Exception:
                     pass
+                # Get CREATE TABLE statement
+                try:
+                    db.cursor.execute(f"SHOW CREATE TABLE `{tbl}`")
+                    row = db.cursor.fetchone()
+                    if row and len(row) >= 2:
+                        schema[tbl] = row[1]  # Second column is the CREATE TABLE stmt
+                except Exception as e:
+                    log.debug("[%s] Could not get schema for %s: %s",
+                              self.config.name, tbl, e)
             result.table_rows = total
             result.table_rows_detail = detail
+            result.table_schema = schema
         except Exception as e:
             log.debug("[%s] Could not query table rows: %s",
                       self.config.name, e)
@@ -1468,6 +1480,7 @@ def run_benchmark(
     setup_results: Dict[str, bool] = {}
     setup_table_rows: Dict[str, int] = {}
     setup_table_rows_detail: Dict[str, Dict[str, int]] = {}
+    setup_table_schema: Dict[str, Dict[str, str]] = {}  # {dbms_name: {table_name: CREATE TABLE stmt}}
     
     def _run_setup(config: DBMSConfig) -> bool:
         """Run setup phase on a single DBMS. Returns True on success."""
@@ -1494,7 +1507,7 @@ def run_benchmark(
                         log.warning("[%s] Setup failed: %s — %s",
                                     config.name, sql[:80], e)
             
-            # Query total rows after setup
+            # Query total rows and schema after setup
             try:
                 db.cursor.execute(
                     "SELECT TABLE_NAME FROM information_schema.TABLES "
@@ -1503,7 +1516,9 @@ def run_benchmark(
                 tables = [r[0] for r in db.cursor.fetchall()]
                 total = 0
                 detail = {}
+                schema = {}
                 for tbl in tables:
+                    # Get row count
                     try:
                         db.cursor.execute(f"SELECT COUNT(*) FROM `{tbl}`")
                         cnt = db.cursor.fetchone()
@@ -1513,8 +1528,17 @@ def run_benchmark(
                             detail[tbl] = row_count
                     except Exception:
                         pass
+                    # Get CREATE TABLE statement
+                    try:
+                        db.cursor.execute(f"SHOW CREATE TABLE `{tbl}`")
+                        row = db.cursor.fetchone()
+                        if row and len(row) >= 2:
+                            schema[tbl] = row[1]  # Second column is the CREATE TABLE stmt
+                    except Exception:
+                        pass
                 setup_table_rows[config.name] = total
                 setup_table_rows_detail[config.name] = detail
+                setup_table_schema[config.name] = schema
             except Exception as e:
                 log.debug("[%s] Could not query table rows: %s",
                           config.name, e)
@@ -1605,11 +1629,13 @@ def run_benchmark(
         # Skip setup since it's already done
         dbms_result = runner.run(skip_setup=True)
         
-        # Add table_rows from setup phase
+        # Add table_rows and schema from setup phase
         if config.name in setup_table_rows:
             dbms_result.table_rows = setup_table_rows[config.name]
         if config.name in setup_table_rows_detail:
             dbms_result.table_rows_detail = setup_table_rows_detail[config.name]
+        if config.name in setup_table_schema:
+            dbms_result.table_schema = setup_table_schema[config.name]
 
         if on_dbms_done:
             on_dbms_done(config.name, dbms_result)
@@ -1641,11 +1667,12 @@ def run_benchmark(
     result.dbms_results.sort(
         key=lambda r: name_order.get(r.dbms_name, 999))
 
-    # Populate table_rows from first DBMS that reported a value
+    # Populate table_rows and schema from first DBMS that reported a value
     for dr in result.dbms_results:
         if dr.table_rows > 0:
             result.table_rows = dr.table_rows
             result.table_rows_detail = dr.table_rows_detail
+            result.table_schema = dr.table_schema
             break
 
     return result

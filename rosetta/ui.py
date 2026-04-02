@@ -423,6 +423,24 @@ class BenchProgress:
                         transient=True,
                     )
                 cls._shared_progress.start()
+                # Disable stdin echo and line buffering to prevent user input
+                # from interfering with progress display
+                try:
+                    import sys
+                    import termios
+                    import tty
+                    if sys.stdin.isatty():
+                        fd = sys.stdin.fileno()
+                        old_settings = termios.tcgetattr(fd)
+                        new_settings = termios.tcgetattr(fd)
+                        # Disable echo and canonical mode
+                        new_settings[3] = new_settings[3] & ~termios.ECHO & ~termios.ICANON
+                        termios.tcsetattr(fd, termios.TCSANOW, new_settings)
+                        # Store old settings for restoration
+                        cls._stdin_old_settings = old_settings
+                except Exception:
+                    # Ignore if termios is not available (e.g., Windows)
+                    pass
             cls._ref_count += 1
             return cls._shared_progress
 
@@ -435,6 +453,17 @@ class BenchProgress:
                     cls._shared_progress.stop()
                     cls._shared_progress = None
                 cls._ref_count = 0
+                # Restore stdin settings
+                if hasattr(cls, '_stdin_old_settings'):
+                    try:
+                        import sys
+                        import termios
+                        if sys.stdin.isatty():
+                            fd = sys.stdin.fileno()
+                            termios.tcsetattr(fd, termios.TCSANOW, cls._stdin_old_settings)
+                            delattr(cls, '_stdin_old_settings')
+                    except Exception:
+                        pass
                 # Ensure cursor is visible after progress bar stops
                 try:
                     console.show_cursor()

@@ -31,6 +31,14 @@ from .ui import (ExecutionProgress, RichLogHandler, console, flush_all,
 log = logging.getLogger("rosetta")
 
 
+class _SilentHTTPServer(http.server.HTTPServer):
+    """HTTPServer that silently handles connection errors."""
+
+    def handle_error(self, request, client_address):
+        """Silently ignore connection reset/broken pipe errors."""
+        pass
+
+
 def _tty_write(data: str):
     """Write escape codes directly to /dev/tty.
 
@@ -881,7 +889,10 @@ def _run_benchmark(args) -> int:
                 if success:
                     bp.set_status("[green]setup完毕[/green]")
                 else:
-                    bp.set_status("[red]setup失败[/red]")
+                    bp.set_status("[red]setup失败 — 跳过该DBMS[/red]")
+                    # Close progress bar for failed DBMS
+                    bp.__exit__(None, None, None)
+                    bp.write_summary_to_buffer()
 
         def on_dbms_start(dbms_name):
             with _progress_lock:
@@ -1062,8 +1073,10 @@ def _save_bench_json(path: str, result):
         "workload": result.workload_name,
         "mode": result.mode.name,
         "timestamp": result.timestamp,
+        "run_id": result.run_id or "",
         "table_rows": result.table_rows,
         "table_rows_detail": result.table_rows_detail or {},
+        "table_schema": result.table_schema or {},  # {table_name: CREATE TABLE stmt}
         "setup_sql": list(result.setup_sql) if result.setup_sql else [],
         "teardown_sql": list(result.teardown_sql) if result.teardown_sql else [],
         "queries_sql": list(result.queries_sql) if result.queries_sql else [],
@@ -1083,11 +1096,15 @@ def _save_bench_json(path: str, result):
             "total_queries": dr.total_queries,
             "total_errors": dr.total_errors,
             "overall_qps": round(dr.overall_qps, 2),
+            "table_rows": dr.table_rows,
+            "table_rows_detail": dr.table_rows_detail or {},
+            "table_schema": dr.table_schema or {},  # {table_name: CREATE TABLE stmt}
             "query_stats": [],
         }
         for qs in dr.query_stats:
             dbms_data["query_stats"].append({
                 "query_name": qs.query_name,
+                "sql_template": qs.sql_template or "",
                 "total_executions": qs.total_executions,
                 "total_errors": qs.total_errors,
                 "min_ms": round(qs.min_ms, 3),
@@ -1097,6 +1114,10 @@ def _save_bench_json(path: str, result):
                 "p95_ms": round(qs.p95_ms, 3),
                 "p99_ms": round(qs.p99_ms, 3),
                 "qps": round(qs.qps, 2),
+                "latencies_ms": [round(l, 3) for l in qs.latencies_ms] if qs.latencies_ms else [],
+                "explain_plan": qs.explain_plan or "",
+                "explain_tree": qs.explain_tree or "",
+                "error_logs": qs.error_logs[:50] if qs.error_logs else [],
             })
         data["dbms_results"].append(dbms_data)
 
@@ -1175,6 +1196,8 @@ def run_benchmark_with_progress(
         on_setup_done=callbacks.get('on_setup_done'),
         parallel_dbms=parallel_dbms,
     )
+    # Set run_id for the result
+    result.run_id = os.path.basename(run_dir)
 
     # Generate reports
     report_files = []
@@ -2475,7 +2498,7 @@ def _serve_report(directory: str, html_file: str, port: int = 0,
             *a, directory=abs_dir, **kw)
 
     try:
-        server = http.server.HTTPServer(("0.0.0.0", port), handler)
+        server = _SilentHTTPServer(("0.0.0.0", port), handler)
     except OSError as e:
         print_error(f"Failed to start HTTP server on port {port}: {e}")
         return

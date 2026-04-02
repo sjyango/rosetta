@@ -434,7 +434,10 @@ def _handle_run_bench(args, output: "OutputFormatter") -> CommandResult:
                 if success:
                     bp.set_status("[green]setup完毕[/green]")
                 else:
-                    bp.set_status("[red]setup失败[/red]")
+                    bp.set_status("[red]setup失败 — 跳过该DBMS[/red]")
+                    # Close progress bar for failed DBMS
+                    bp.__exit__(None, None, None)
+                    bp.write_summary_to_buffer()
 
         def on_dbms_start(dbms_name):
             with _progress_lock:
@@ -517,6 +520,8 @@ def _handle_run_bench(args, output: "OutputFormatter") -> CommandResult:
                 on_setup_done=on_setup_done,
                 parallel_dbms=parallel_dbms,
             )
+            # Set run_id for the result
+            result.run_id = os.path.basename(run_dir)
         finally:
             if timer_stop_event is not None:
                 timer_stop_event.set()

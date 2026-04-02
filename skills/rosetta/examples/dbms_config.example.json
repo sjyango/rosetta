@@ -1,0 +1,63 @@
+{
+  "databases": [
+    {
+      "name": "mysql",
+      "host": "127.0.0.1",
+      "port": 3306,
+      "user": "root",
+      "password": "",
+      "driver": "pymysql",
+      "enabled": true,
+      "skip_patterns": [],
+      "init_sql": [
+        "SET sql_mode='STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'",
+        "SET NAMES utf8mb4"
+      ],
+      "skip_explain": false,
+      "skip_analyze": false,
+      "skip_show_create": false
+    },
+    {
+      "name": "tdsql",
+      "host": "127.0.0.1",
+      "port": 4000,
+      "user": "root",
+      "password": "",
+      "driver": "pymysql",
+      "enabled": true,
+      "skip_patterns": [],
+      "init_sql": [],
+      "skip_explain": false,
+      "skip_analyze": false,
+      "skip_show_create": false
+    },
+    {
+      "name": "tidb",
+      "host": "127.0.0.1",
+      "port": 4000,
+      "user": "root",
+      "password": "",
+      "driver": "pymysql",
+      "enabled": true,
+      "skip_patterns": [],
+      "init_sql": [],
+      "skip_explain": true,
+      "skip_analyze": true,
+      "skip_show_create": true
+    },
+    {
+      "name": "oceanbase",
+      "host": "127.0.0.1",
+      "port": 2881,
+      "user": "root@mysql",
+      "password": "",
+      "driver": "pymysql",
+      "enabled": true,
+      "skip_patterns": [],
+      "init_sql": [],
+      "skip_explain": true,
+      "skip_analyze": true,
+      "skip_show_create": true
+    }
+  ]
+}

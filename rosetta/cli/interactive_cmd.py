@@ -26,6 +26,7 @@ def handle_interactive(args, output: "OutputFormatter") -> CommandResult:
     import logging
     from ..config import load_config, filter_configs
     from ..interactive import InteractiveSession, BenchInteractiveSession
+    from ..executor import ensure_service
     
     # Load config
     if not os.path.isfile(args.config):
@@ -46,7 +47,18 @@ def handle_interactive(args, output: "OutputFormatter") -> CommandResult:
         except ValueError as e:
             return CommandResult.failure(str(e))
     else:
-        configs = [c for c in all_configs if c.enabled]
+        # Auto-detect reachable DBMS
+        reachable_configs = []
+        for config in all_configs:
+            if ensure_service(config):
+                reachable_configs.append(config)
+        
+        if not reachable_configs:
+            return CommandResult.failure(
+                "No reachable DBMS found. Check your dbms_config.json"
+            )
+        
+        configs = reachable_configs
     
     if not configs:
         return CommandResult.failure("No databases selected")
@@ -81,8 +93,8 @@ def handle_interactive(args, output: "OutputFormatter") -> CommandResult:
             "--output-dir", args.output_dir,
         ])
         
-        if args.dbms:
-            legacy_args.dbms = args.dbms
+        # Use filtered configs (either user-specified or auto-detected reachable)
+        legacy_args.dbms = ",".join(c.name for c in configs)
         if args.serve:
             legacy_args.serve = args.serve
         if args.port:

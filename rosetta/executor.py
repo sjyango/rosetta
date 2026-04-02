@@ -131,7 +131,11 @@ class DBConnection:
             kwargs["local_infile"] = True
             self.conn = pymysql.connect(**kwargs)
 
-        self.conn.autocommit = True
+        # Enable autocommit - use method for pymysql, attribute for mysql.connector
+        if hasattr(self.conn, 'autocommit') and callable(self.conn.autocommit):
+            self.conn.autocommit(True)  # pymysql style
+        else:
+            self.conn.autocommit = True  # mysql.connector style
         self.cursor = self.conn.cursor()
 
         # Ensure the database exists, then switch to it

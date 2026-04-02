@@ -20,7 +20,7 @@ from typing import Dict, List, Optional
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.formatted_text import HTML
-from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.history import InMemoryHistory, FileHistory
 from prompt_toolkit.styles import Style
 
 from .config import DEFAULT_TEST_DB
@@ -74,6 +74,15 @@ _PROMPT_STYLE = Style.from_dict({
 # ---------------------------------------------------------------------------
 # HTTP server management
 # ---------------------------------------------------------------------------
+
+class _SilentHTTPServer(http.server.HTTPServer):
+    """HTTPServer that silently handles connection errors."""
+
+    def handle_error(self, request, client_address):
+        """Silently ignore connection reset/broken pipe errors."""
+        # These are normal when clients disconnect abruptly
+        pass
+
 
 class _APIHandler(http.server.SimpleHTTPRequestHandler):
     """HTTP handler with whitelist/buglist API endpoints and suppressed logging."""
@@ -420,7 +429,7 @@ class ReportServer:
         _APIHandler._database = self.database
         handler = lambda *a, **kw: _APIHandler(
             *a, directory=directory, **kw)
-        self._server = http.server.HTTPServer(
+        self._server = _SilentHTTPServer(
             ("0.0.0.0", self.port), handler)
         self._thread = threading.Thread(target=self._server.serve_forever,
                                         daemon=True)
@@ -690,8 +699,9 @@ class InteractiveSession:
         Returns ``"back"`` if the user typed ``back``/``b``,
         ``"quit"`` otherwise (including EOF / KeyboardInterrupt).
         """
+        os.makedirs(self.output_dir, exist_ok=True)
         session: PromptSession = PromptSession(
-            history=InMemoryHistory(),
+            history=FileHistory(os.path.join(self.output_dir, ".rosetta_history")),
             completer=TestFileCompleter(),
             style=_PROMPT_STYLE,
             complete_while_typing=True,
@@ -1115,7 +1125,10 @@ class BenchInteractiveSession:
                     if success:
                         bp.set_status("[green]setup完毕[/green]")
                     else:
-                        bp.set_status("[red]setup失败[/red]")
+                        bp.set_status("[red]setup失败 — 跳过该DBMS[/red]")
+                        # Close progress bar for failed DBMS
+                        bp.__exit__(None, None, None)
+                        bp.write_summary_to_buffer()
 
             def on_dbms_start(dbms_name):
                 with _progress_lock:
@@ -1395,8 +1408,9 @@ class BenchInteractiveSession:
         Returns ``"back"`` if the user typed ``back``/``b``,
         ``"quit"`` otherwise (including EOF / KeyboardInterrupt).
         """
+        os.makedirs(self.output_dir, exist_ok=True)
         session: PromptSession = PromptSession(
-            history=InMemoryHistory(),
+            history=FileHistory(os.path.join(self.output_dir, ".rosetta_bench_history")),
             completer=BenchFileCompleter(),
             style=_PROMPT_STYLE,
             complete_while_typing=True,

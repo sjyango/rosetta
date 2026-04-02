@@ -7,22 +7,47 @@ Rosetta executes SQL against multiple databases (TDSQL, MySQL, TiDB, OceanBase, 
 - Python >= 3.8
 - PyMySQL >= 1.0
 - Rich >= 13.0
-- prompt_toolkit >= 3.0
+- prompt_toolkit >= 3.0.52
 
 ## Installation
-### Pip Install (Recommended)
+
+### One-line Install (Recommended)
+```bash
+curl -fsSL https://raw.githubusercontent.com/sjyango/rosetta/main/install.sh | bash
+```
+
+This script will:
+- Clone the repository to `~/.rosetta`
+- Create a Python virtual environment
+- Install all dependencies
+- Add `rosetta` to your PATH
+
+**Options**:
+```bash
+# Install to custom directory
+curl -fsSL https://raw.githubusercontent.com/sjyango/rosetta/main/install.sh | bash -s -- -d /opt/rosetta
+
+# Install specific branch
+curl -fsSL https://raw.githubusercontent.com/sjyango/rosetta/main/install.sh | bash -s -- -b release-1.0.0
+```
+
+### Manual Install
 ```bash
 git clone https://github.com/sjyango/rosetta.git
 cd rosetta
 pip install -e .
 ```
-`rosetta` command is available globally after installation.
 
 ### Single File (.pyz)
 ```bash
 ./build.sh  # Output: dist/rosetta.pyz
-pip install pymysql "rich>=13.0" "prompt_toolkit>=3.0"
+pip install pymysql "rich>=13.0" "prompt_toolkit>=3.0.52"
 python3 rosetta.pyz --help
+```
+
+## Uninstall
+```bash
+curl -fsSL https://raw.githubusercontent.com/sjyango/rosetta/main/uninstall.sh | bash
 ```
 
 ## Quick Start

@@ -10,7 +10,7 @@ requires-python = ">=3.8"
 dependencies = [
     "pymysql>=1.0",
     "rich>=13.0",
-    "prompt_toolkit>=3.0",
+    "prompt_toolkit>=3.0.52",
 ]
 
 [project.optional-dependencies]
