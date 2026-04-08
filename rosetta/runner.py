@@ -39,6 +39,19 @@ class _SilentHTTPServer(http.server.HTTPServer):
         pass
 
 
+class _NoCacheHandler(http.server.SimpleHTTPRequestHandler):
+    """HTTP handler that disables caching for all responses."""
+
+    def log_message(self, format, *args):  # noqa: A002
+        pass  # Suppress request logs
+
+    def end_headers(self):  # noqa: N802
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        super().end_headers()
+
+
 def _tty_write(data: str):
     """Write escape codes directly to /dev/tty.
 
@@ -1011,7 +1024,7 @@ def _run_benchmark(args) -> int:
 
         # Save raw JSON data
         json_path = os.path.join(run_dir, "bench_result.json")
-        _save_bench_json(json_path, result)
+        _save_bench_json(json_path, result, bench_file=args.bench_file or "", database=final_database)
         print_report_file(json_path, label="json")
 
         # Update 'latest' symlink
@@ -1066,14 +1079,23 @@ def _run_benchmark(args) -> int:
     return 0
 
 
-def _save_bench_json(path: str, result):
-    """Save benchmark result as JSON for later analysis."""
+def _save_bench_json(path: str, result, bench_file: str = "", database: str = ""):
+    """Save benchmark result as JSON for later analysis.
+    
+    Args:
+        path: Output file path
+        result: BenchmarkResult object
+        bench_file: Path to benchmark file (.json or .sql)
+        database: Database name used for this run
+    """
     import json
     data = {
         "workload": result.workload_name,
         "mode": result.mode.name,
         "timestamp": result.timestamp,
         "run_id": result.run_id or "",
+        "bench_file": bench_file,  # Store benchmark file path for rerun
+        "database": database,       # Store database name for rerun
         "table_rows": result.table_rows,
         "table_rows_detail": result.table_rows_detail or {},
         "table_schema": result.table_schema or {},  # {table_name: CREATE TABLE stmt}
@@ -1135,6 +1157,7 @@ def run_benchmark_with_progress(
     parallel_dbms: bool = True,
     json_extra_config: Optional[dict] = None,
     callbacks: Optional[dict] = None,
+    bench_file: str = "",
 ) -> Tuple[str, object]:
     """Core benchmark execution logic shared by CLI and Interactive modes.
 
@@ -1156,6 +1179,7 @@ def run_benchmark_with_progress(
             - on_run_start()
             - on_setup_start(dbms_name)
             - on_setup_done(dbms_name, success)
+        bench_file: Path to benchmark file (.json or .sql) for rerun support
 
     Returns:
         Tuple of (run_dir, result)
@@ -1214,7 +1238,7 @@ def run_benchmark_with_progress(
 
     # Save JSON result
     json_path = os.path.join(run_dir, "bench_result.json")
-    _save_bench_json(json_path, result)
+    _save_bench_json(json_path, result, bench_file=bench_file, database=final_database)
     report_files.append(json_path)
 
     # Update latest symlink
@@ -1241,13 +1265,15 @@ def _select_bench_params(
     profile: bool = True,
     skip_setup: bool = False,
     skip_teardown: bool = False,
+    output_dir: str = "",
 ) -> Optional[dict]:
     """Show an interactive benchmark parameter configuration panel.
 
-    First, select mode (SERIAL or CONCURRENT), then configure parameters
+    First, select mode (SERIAL, CONCURRENT, or RERUN), then configure parameters
     based on the selected mode.
 
     Returns a dict with mode-specific parameters, or ``None`` if cancelled.
+    For RERUN mode, returns {"mode": "rerun", "run_data": {...}}.
     """
     # Step 1: Mode selection
     mode_result = _select_bench_mode()
@@ -1256,13 +1282,20 @@ def _select_bench_params(
     if mode_result.get("action") == "back":
         return {"action": "back"}
 
-    mode = mode_result["mode"]  # "serial" or "concurrent"
+    mode = mode_result["mode"]  # "serial", "concurrent", or "rerun"
 
     # Step 2: Parameter configuration based on mode
     if mode == "serial":
         return _select_serial_params(iterations, warmup, profile, skip_setup, skip_teardown)
-    else:
+    elif mode == "concurrent":
         return _select_concurrent_params(concurrency, duration, ramp_up, profile, skip_setup, skip_teardown)
+    else:  # mode == "rerun"
+        # Load historical run parameters
+        run_selection = _select_rerun_run_id(output_dir)
+        if run_selection is None:
+            # User cancelled rerun selection, return special marker to re-show Benchmark Mode
+            return {"action": "cancel"}
+        return {"mode": "rerun", "run_data": run_selection}
 
 
 def _select_bench_mode() -> Optional[dict]:
@@ -1282,6 +1315,8 @@ def _select_bench_mode() -> Optional[dict]:
          "Sequential execution, fixed iterations per query"),
         ("concurrent", "CONCURRENT",
          "Multi-threaded stress test with duration-based execution"),
+        ("rerun", "RERUN",
+         "Replay a historical benchmark run"),
     ]
 
     selected = [0]
@@ -1352,6 +1387,7 @@ def _select_bench_mode() -> Optional[dict]:
         lines.append(("dim", "  ────────────────────────────────────────\n"))
         lines.append(("dim", "  SERIAL:      Each query runs N times sequentially\n"))
         lines.append(("dim", "  CONCURRENT:  Multiple threads, duration-based test\n"))
+        lines.append(("dim", "  RERUN:       Replay a historical benchmark run\n"))
 
         return lines
 
@@ -2079,7 +2115,8 @@ def _select_mode(configs, database: str) -> Optional[str]:
     MODES = [
         ("mtr",        "MTR mode",        "run .test compatibility tests"),
         ("playground", "Playground mode",  "run SQL Playground in browser"),
-        ("bench",      "Benchmark mode",   "run .json/.sql performance benchmarks"),
+        ("bench",      "Benchmark mode",   "run JSON performance benchmarks"),
+        ("history",    "History mode",     "view historical test runs"),
         (None,         "Quit",             "exit"),
     ]
 
@@ -2170,6 +2207,255 @@ def _select_mode(configs, database: str) -> Optional[str]:
     )
 
     # Save cursor, run, then restore and clear via /dev/tty
+    _tty_write("\033[s")
+    app.run()
+    _tty_write("\033[u\033[J")
+
+    return result[0]
+
+
+def _select_rerun_run_id(output_dir: str) -> Optional[dict]:
+    """Show an interactive RUN ID selector for rerun mode.
+
+    Args:
+        output_dir: Results directory to scan for historical runs
+
+    Returns:
+        dict with run metadata if selected, None if cancelled,
+        or {"manual": True} if user wants to manually input RUN ID
+    """
+    import sys
+
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    # Import _scan_runs from result_cmd
+    from .cli.result_cmd import _scan_runs
+
+    # Scan historical runs
+    runs = _scan_runs(output_dir)
+    
+    # Filter only benchmark runs (type == "bench")
+    bench_runs = [r for r in runs if r.get("type") == "bench"]
+    
+    if not bench_runs:
+        console.print("\n  [yellow]No benchmark runs found in history.[/yellow]")
+        console.print("  [dim]Run some benchmarks first before using RERUN mode.[/dim]\n")
+        return None
+
+    # Limit to last 20 runs for display
+    display_runs = bench_runs[:20]
+
+    # Build all run items
+    ALL_RUNS = []
+    for run in bench_runs:
+        ALL_RUNS.append({
+            "type": "run",
+            "id": run.get("id", ""),
+            "ts": run.get("timestamp", "")[:16],
+            "workload": run.get("workload", ""),
+            "mode": run.get("mode", ""),
+            "data": run,
+        })
+
+    # Pagination
+    PAGE_SIZE = 15
+    total_pages = max(1, (len(ALL_RUNS) + PAGE_SIZE - 1) // PAGE_SIZE)
+
+    # Column widths
+    COL_ID = 42
+    COL_WK = 22
+    COL_TS = 18
+    COL_MODE = 10
+
+    selected = [0]        # index within current page items (runs + back)
+    page = [0]            # current page (0-based)
+    result = [None]
+    editing = [False]
+    edit_buf = [""]
+
+    def _page_runs():
+        """Get run items for current page."""
+        start = page[0] * PAGE_SIZE
+        return ALL_RUNS[start:start + PAGE_SIZE]
+
+    def _page_items():
+        """Get all menu items for current page (runs + back)."""
+        items = list(_page_runs())
+        items.append({"type": "back"})
+        return items
+
+    # Key bindings
+    from prompt_toolkit.keys import Keys
+    from prompt_toolkit.filters import Condition
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("k")
+    def _up(event):
+        if editing[0]:
+            return
+        items = _page_items()
+        selected[0] = (selected[0] - 1) % len(items)
+
+    @kb.add("down")
+    @kb.add("j")
+    def _down(event):
+        if editing[0]:
+            return
+        items = _page_items()
+        selected[0] = (selected[0] + 1) % len(items)
+
+    @kb.add("left")
+    @kb.add("h")
+    def _prev_page(event):
+        if editing[0]:
+            return
+        if page[0] > 0:
+            page[0] -= 1
+            selected[0] = 0
+
+    @kb.add("right")
+    @kb.add("l")
+    def _next_page(event):
+        if editing[0]:
+            return
+        if page[0] < total_pages - 1:
+            page[0] += 1
+            selected[0] = 0
+
+    @kb.add("/")
+    def _start_search(event):
+        if not editing[0]:
+            editing[0] = True
+            edit_buf[0] = ""
+
+    @kb.add("backspace")
+    def _backspace(event):
+        if editing[0]:
+            edit_buf[0] = edit_buf[0][:-1]
+
+    @kb.add(Keys.Any, filter=Condition(lambda: editing[0]))
+    def _type_char(event):
+        ch = event.data
+        if ch.isalnum() or ch in ('_', '-', '.', '/'):
+            edit_buf[0] += ch
+
+    @kb.add("enter")
+    def _confirm(event):
+        if editing[0]:
+            run_id = edit_buf[0].strip()
+            if run_id:
+                from .cli.result_cmd import _resolve_run
+                resolved = _resolve_run(run_id, output_dir)
+                if resolved:
+                    result[0] = resolved
+                    event.app.exit()
+                else:
+                    edit_buf[0] = ""
+            else:
+                editing[0] = False
+                edit_buf[0] = ""
+            return
+
+        items = _page_items()
+        item = items[selected[0]]
+        if item["type"] == "run":
+            result[0] = item["data"]
+            event.app.exit()
+        else:  # back
+            result[0] = None
+            event.app.exit()
+
+    @kb.add("c-c")
+    @kb.add("escape")
+    def _cancel(event):
+        if editing[0]:
+            editing[0] = False
+            edit_buf[0] = ""
+            return
+        result[0] = None
+        event.app.exit()
+
+    # Layout
+    def _get_menu_text():
+        lines = []
+        border_len = COL_ID + COL_WK + COL_TS + COL_MODE + 10
+        border = "═" * border_len
+        title = "Select Historical Run".center(border_len)
+        hint = "↑↓ move · ←→ page · / search · Enter select · Esc back".center(border_len)
+        
+        lines.append(("bold cyan", f"  ╔{border}╗\n"))
+        lines.append(("bold cyan", "  ║"))
+        lines.append(("bold white", title))
+        lines.append(("bold cyan", "║\n"))
+        lines.append(("bold cyan", "  ║"))
+        lines.append(("", hint))
+        lines.append(("bold cyan", "║\n"))
+        lines.append(("bold cyan", f"  ╚{border}╝\n"))
+        lines.append(("", "\n"))
+
+        # If in editing mode, show inline input
+        if editing[0]:
+            lines.append(("bold cyan", "  ❯ "))
+            lines.append(("bold cyan", "RUN ID"))
+            lines.append(("", "  "))
+            lines.append(("bold white", f"[ {edit_buf[0]}▌ ]"))
+            lines.append(("", "\n"))
+            lines.append(("dim",
+                         "     Type RUN ID, Enter to confirm, "
+                         "Esc to cancel\n"))
+            return lines
+
+        # Table header
+        hdr = f"    {'RUN ID':<{COL_ID}} {'Workload':<{COL_WK}} {'Timestamp':<{COL_TS}} {'Mode':<{COL_MODE}}"
+        lines.append(("dim bold", f"  {hdr}\n"))
+        lines.append(("dim", "  " + "─" * border_len + "\n"))
+
+        items = _page_items()
+        for i, item in enumerate(items):
+            is_sel = (i == selected[0])
+            prefix_style = "bold cyan" if is_sel else ""
+            prefix_text = "  ❯ " if is_sel else "    "
+
+            if item["type"] == "run":
+                rid = item["id"][:COL_ID]
+                wk = item["workload"][:COL_WK]
+                ts = item["ts"]
+                mode = item["mode"]
+                row = f"{rid:<{COL_ID}} {wk:<{COL_WK}} {ts:<{COL_TS}} {mode:<{COL_MODE}}"
+                style = "bold cyan" if is_sel else ""
+                lines.append((prefix_style, prefix_text))
+                lines.append((style, row))
+            else:  # back
+                style = "bold cyan" if is_sel else "dim"
+                lines.append((prefix_style, prefix_text))
+                lines.append((style, "← Back"))
+
+            lines.append(("", "\n"))
+
+        # Page indicator
+        lines.append(("", "\n"))
+        page_info = f"Page {page[0]+1}/{total_pages}  ({len(ALL_RUNS)} runs)"
+        lines.append(("dim", f"  {page_info}\n"))
+
+        return lines
+
+    menu = Window(
+        content=FormattedTextControl(_get_menu_text),
+        dont_extend_height=True,
+    )
+
+    app: Application = Application(
+        layout=Layout(HSplit([menu])),
+        key_bindings=kb,
+        full_screen=False,
+    )
+
     _tty_write("\033[s")
     app.run()
     _tty_write("\033[u\033[J")
@@ -2348,6 +2634,121 @@ def _enter_interactive(args) -> int:
                 return 0
             continue
 
+        elif mode == "history":
+            # Start server and show History URL
+            from .interactive import ReportServer, _APIHandler
+            from .whitelist import Whitelist
+            from .buglist import Buglist
+
+            whitelist = Whitelist(output_dir)
+            buglist = Buglist(output_dir)
+
+            srv = ReportServer(
+                output_dir, port=args.port,
+                whitelist=whitelist,
+                buglist=buglist,
+                configs=configs,
+                all_configs=all_configs,
+                database=args.database,
+            )
+            try:
+                srv.start()
+            except OSError as e:
+                print_error(f"Failed to start server: {e}")
+                flush_all()
+                return 1
+
+            history_url = f"{srv.base_url}/index.html"
+            console.print(
+                f"\n  [green]●[/green] History: "
+                f"[bold link={history_url}]{history_url}[/bold link]")
+            # Open in IDE browser
+            try:
+                import subprocess as _sp
+                _sp.Popen(["code", "--open-url", history_url],
+                          stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+            except FileNotFoundError:
+                pass
+
+            from prompt_toolkit import HTML as _HTML
+            from prompt_toolkit.history import InMemoryHistory as _IMH
+            from prompt_toolkit import PromptSession as _PS
+            from .interactive import _PROMPT_STYLE
+
+            _hist_placeholder = _HTML(
+                "<placeholder>Type 'help', 'back', or 'quit'"
+                "</placeholder>")
+            _hist_prompt = _HTML(
+                '<prompt>rosetta</prompt> <path>▶</path> ')
+            _hist_session = _PS(
+                history=_IMH(),
+                style=_PROMPT_STYLE,
+                multiline=False,
+            )
+
+            console.print()
+            # Wait for user command
+            while True:
+                try:
+                    user_input = _hist_session.prompt(
+                        _hist_prompt,
+                        placeholder=_hist_placeholder,
+                    ).strip()
+                except (EOFError, KeyboardInterrupt):
+                    srv.stop()
+                    console.print(
+                        "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                    return 0
+
+                if not user_input:
+                    continue
+
+                cmd = user_input.lower()
+
+                if cmd in ("back", "b"):
+                    break
+                elif cmd in ("quit", "exit", "q"):
+                    srv.stop()
+                    console.print(
+                        "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                    return 0
+                elif cmd == "help":
+                    console.print(
+                        "\n  [bold]History commands:[/bold]")
+                    console.print(
+                        f"  [green]open[/green]    "
+                        f"re-open history in browser")
+                    console.print(
+                        f"  [green]back[/green]    "
+                        f"return to mode selection")
+                    console.print(
+                        f"  [green]quit[/green]    "
+                        f"exit rosetta\n")
+                elif cmd == "open":
+                    try:
+                        _sp.Popen(["code", "--open-url", history_url],
+                                  stdout=_sp.DEVNULL,
+                                  stderr=_sp.DEVNULL)
+                        console.print(
+                            f"  [green]Opened:[/green] {history_url}")
+                    except FileNotFoundError:
+                        console.print(
+                            f"  [dim]URL:[/dim] {history_url}")
+                elif cmd:
+                    console.print(
+                        f"  [yellow]Unknown command:[/yellow] {cmd}")
+                    console.print(
+                        f"  [dim]Type 'help', 'back', "
+                        f"or 'quit'.[/dim]")
+
+            srv.stop()
+            console.clear()
+            mode = _select_mode(configs, args.database)
+            if mode is None:
+                console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                return 0
+            continue
+
         elif mode == "mtr":
             session = InteractiveSession(
                 configs=configs,
@@ -2394,6 +2795,7 @@ def _enter_interactive(args) -> int:
                         profile=bench_profile,
                         skip_setup=getattr(args, 'skip_setup', False),
                         skip_teardown=getattr(args, 'skip_teardown', False),
+                        output_dir=output_dir,
                     )
                     if params is None:
                         console.print(
@@ -2409,6 +2811,157 @@ def _enter_interactive(args) -> int:
                             return 0
                         back_to_mode = True
                         break  # exit inner loop
+                    
+                    # Handle RERUN mode cancellation (user pressed Esc in rerun selection)
+                    if params.get("action") == "cancel":
+                        console.clear()
+                        continue  # Re-show Benchmark Mode selection
+                    
+                    # Handle RERUN mode
+                    if params.get("mode") == "rerun":
+                        run_selection = params.get("run_data")
+                        
+                        if not run_selection:
+                            console.clear()
+                            continue  # Back to Benchmark Mode selection
+                        
+                        # Load bench_result.json
+                        run_path = run_selection.get("path", "")
+                        bench_json_path = os.path.join(run_path, "bench_result.json")
+                        
+                        if not os.path.isfile(bench_json_path):
+                            console.print(f"\n  [red]✗ bench_result.json not found in:[/red] {run_path}")
+                            console.clear()
+                            continue  # Back to Benchmark Mode selection
+                        
+                        # Load parameters
+                        import json as _json
+                        try:
+                            with open(bench_json_path, 'r', encoding='utf-8') as f:
+                                run_data = _json.load(f)
+                        except Exception as e:
+                            console.print(f"\n  [red]✗ Failed to load bench_result.json:[/red] {e}")
+                            console.clear()
+                            continue  # Back to Benchmark Mode selection
+                        
+                        # Extract parameters
+                        rerun_bench_file = run_data.get("bench_file") or ""
+                        rerun_database = run_data.get("database") or args.database
+                        mode_str = run_data.get("mode", "SERIAL")
+                        config_data = run_data.get("config", {})
+                        workload_name = run_data.get("workload", "rerun")
+                        
+                        # Determine effective bench file:
+                        # 1) Use saved bench_file if it still exists
+                        # 2) Otherwise reconstruct from saved SQL data
+                        temp_bench_file = None
+                        if rerun_bench_file and os.path.isfile(rerun_bench_file):
+                            effective_bench_file = rerun_bench_file
+                        else:
+                            queries_sql = run_data.get("queries_sql", [])
+                            setup_sql = run_data.get("setup_sql", [])
+                            teardown_sql = run_data.get("teardown_sql", [])
+                            if not queries_sql:
+                                console.print("\n  [red]✗ No query data in bench_result.json[/red]")
+                                console.clear()
+                                continue
+                            import tempfile
+                            reconstructed = {
+                                "name": workload_name,
+                                "database": rerun_database,
+                                "setup": setup_sql,
+                                "teardown": teardown_sql,
+                                "queries": [],
+                            }
+                            for q in queries_sql:
+                                if isinstance(q, dict):
+                                    reconstructed["queries"].append({
+                                        "name": q.get("name", ""),
+                                        "sql": q.get("sql", ""),
+                                        "weight": q.get("weight", 1),
+                                        "description": q.get("description", ""),
+                                        "cleanup_sql": q.get("cleanup_sql", ""),
+                                    })
+                                elif isinstance(q, str):
+                                    reconstructed["queries"].append({
+                                        "name": f"q{len(reconstructed['queries'])+1}",
+                                        "sql": q,
+                                    })
+                            fd, temp_bench_file = tempfile.mkstemp(
+                                suffix=".json", prefix=f"rerun_{workload_name}_")
+                            with os.fdopen(fd, 'w', encoding='utf-8') as tf:
+                                _json.dump(reconstructed, tf, ensure_ascii=False, indent=2)
+                            effective_bench_file = temp_bench_file
+                        
+                        # Build session and execute
+                        bench_mode_val = "concurrent" if mode_str == "CONCURRENT" else "serial"
+                        rr_iter = config_data.get("iterations", 100)
+                        rr_warmup = config_data.get("warmup", 5)
+                        rr_conc = config_data.get("concurrency", 8) if bench_mode_val == "concurrent" else 0
+                        rr_dur = config_data.get("duration", 30.0)
+                        rr_fq = config_data.get("filter_queries", [])
+                        rr_filter = ",".join(rr_fq) if rr_fq else None
+                        
+                        # Display rerun configuration
+                        console.print(f"\n  [bold cyan]Rerun Configuration:[/bold cyan]")
+                        console.print(f"  [dim]RUN ID:[/dim]     [bold]{run_selection.get('id', '')}[/bold]")
+                        console.print(f"  [dim]Workload:[/dim]   [bold]{workload_name}[/bold]")
+                        console.print(f"  [dim]Mode:[/dim]       [bold]{mode_str}[/bold]")
+                        console.print(f"  [dim]Database:[/dim]   [bold]{rerun_database}[/bold]")
+                        if bench_mode_val == "serial":
+                            console.print(f"  [dim]Iterations:[/dim] [bold]{rr_iter}[/bold]")
+                            console.print(f"  [dim]Warmup:[/dim]     [bold]{rr_warmup}[/bold]")
+                        else:
+                            console.print(f"  [dim]Concurrency:[/dim][bold]{rr_conc}[/bold]")
+                            console.print(f"  [dim]Duration:[/dim]   [bold]{rr_dur}s[/bold]")
+                        if rr_fq:
+                            console.print(f"  [dim]Filter:[/dim]     [bold]{', '.join(rr_fq)}[/bold]")
+                        if temp_bench_file:
+                            console.print(f"  [dim]Source:[/dim]     [bold]reconstructed from bench_result.json[/bold]")
+                        else:
+                            console.print(f"  [dim]File:[/dim]       [bold]{rerun_bench_file}[/bold]")
+                        
+                        rr_session = BenchInteractiveSession(
+                            configs=configs,
+                            output_dir=output_dir,
+                            database=rerun_database,
+                            iterations=rr_iter,
+                            warmup=rr_warmup,
+                            concurrency=rr_conc,
+                            duration=rr_dur,
+                            ramp_up=0.0,
+                            bench_filter=rr_filter,
+                            repeat=1,
+                            parallel_dbms=True,
+                            output_format=args.format,
+                            serve=args.serve,
+                            port=args.port,
+                            profile=False,
+                            perf_freq=getattr(args, 'perf_freq', 99),
+                            flamegraph_min_ms=getattr(args, 'flamegraph_min_ms', 1000),
+                            bench_mode=bench_mode_val,
+                        )
+                        
+                        console.print()
+                        rr_session._run_bench(effective_bench_file)
+                        
+                        # Cleanup temp file
+                        if temp_bench_file and os.path.isfile(temp_bench_file):
+                            try:
+                                os.unlink(temp_bench_file)
+                            except OSError:
+                                pass
+                        
+                        console.print("\n  [dim]Press Enter to continue...[/dim]")
+                        try:
+                            input()
+                        except (EOFError, KeyboardInterrupt):
+                            pass
+                        
+                        console.clear()
+                        continue
+                    
+                    # Normal benchmark mode
                     bench_mode = params["mode"]
                     bench_iterations = params["iterations"]
                     bench_warmup = params["warmup"]
@@ -2494,7 +3047,7 @@ def _serve_report(directory: str, html_file: str, port: int = 0,
         handler = lambda *a, **kw: _APIHandler(
             *a, directory=abs_dir, **kw)
     else:
-        handler = lambda *a, **kw: http.server.SimpleHTTPRequestHandler(
+        handler = lambda *a, **kw: _NoCacheHandler(
             *a, directory=abs_dir, **kw)
 
     try:

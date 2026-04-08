@@ -97,10 +97,12 @@ def _scan_runs(output_dir: str) -> List[dict]:
                     pass
 
         run_type = "benchmark" if is_bench else "test"
+        workload = bm.group(1) if is_bench else test_name
 
         runs.append({
             "dir_name": entry,
             "test_name": test_name,
+            "workload": workload,
             "stamp": stamp,
             "display_time": display_time,
             "has_html": has_html,
@@ -125,7 +127,8 @@ _INDEX_TEMPLATE = r"""<!DOCTYPE html>
 :root {
   --bg: #0d1117; --bg2: #161b22; --bg3: #21262d;
   --fg: #c9d1d9; --fg2: #8b949e;
-  --green: #3fb950; --red: #f85149;
+  --green: #3fb950; --green-bg: #12261e;
+  --red: #f85149; --red-bg: #2d1315;
   --blue: #58a6ff; --yellow: #d29922;
   --border: #30363d; --accent: #1f6feb;
 }
@@ -150,9 +153,12 @@ h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; }
   border-radius: 8px; padding: 16px 20px; margin-bottom: 12px;
   display: flex; align-items: center; gap: 20px; transition: border-color 0.15s; }
 .run-card:hover { border-color: var(--accent); }
-.run-time { color: var(--fg2); font-size: 13px; min-width: 160px; font-family: 'SF Mono', Consolas, monospace; }
-.run-test { font-weight: 600; font-size: 15px; min-width: 280px; }
-.run-dbms { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; }
+.run-time { color: var(--fg2); font-size: 13px; width: 155px; flex-shrink: 0; font-family: 'SF Mono', Consolas, monospace; }
+.run-id { font-size: 12px; width: 210px; flex-shrink: 0; font-family: 'SF Mono', Consolas, monospace;
+  color: var(--fg2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-workload { font-weight: 600; font-size: 14px; width: 150px; flex-shrink: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-dbms { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; align-items: center; }
 .dbms-tag { background: var(--bg3); border: 1px solid var(--border);
   border-radius: 4px; padding: 2px 8px; font-size: 12px; color: var(--fg2); }
 .run-actions { display: flex; gap: 8px; }
@@ -162,7 +168,16 @@ h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; }
 .btn-primary:hover { opacity: 0.9; }
 .btn-secondary { background: var(--bg3); color: var(--fg2); border: 1px solid var(--border); }
 .btn-secondary:hover { color: var(--fg); border-color: var(--fg2); }
+.btn-danger { background: var(--red-bg); color: var(--red); border: 1px solid var(--red); }
+.btn-danger:hover { opacity: 0.85; }
 .empty-state { text-align: center; padding: 60px 20px; color: var(--fg2); font-size: 16px; }
+.modal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6);
+  display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.modal-content { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 24px; max-width: 400px; }
+.modal-content h3 { margin-bottom: 12px; }
+.modal-content p { margin-bottom: 20px; color: var(--fg2); }
+.modal-actions { display: flex; gap: 12px; justify-content: flex-end; }
 </style>
 </head>
 <body>
@@ -182,6 +197,18 @@ h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; }
   </div>
 
   <div id="run-list"></div>
+</div>
+
+<!-- Delete confirmation modal -->
+<div id="delete-modal" class="modal" style="display:none">
+  <div class="modal-content">
+    <h3>Delete Run</h3>
+    <p>Are you sure you want to delete <strong id="delete-target-name"></strong>?</p>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-danger" onclick="deleteRun()">Delete</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -227,10 +254,12 @@ function render() {
     if (r.report_link) {
       actions += `<a class="btn btn-secondary" href="${esc(r.report_link)}">Text Report</a>`;
     }
+    actions += `<button class="btn btn-danger" onclick="confirmDelete('${esc(r.dir_name)}')">Delete</button>`;
 
     card.innerHTML = `
       <div class="run-time">${esc(r.display_time)}</div>
-      <div class="run-test">${esc(r.test_name)}</div>
+      <div class="run-id" title="${esc(r.dir_name)}">${esc(r.dir_name)}</div>
+      <div class="run-workload" title="${esc(r.workload)}">${esc(r.workload)}</div>
       <div class="run-dbms">${typeBadge}${dbmsTags}</div>
       <div class="run-actions">${actions}</div>
     `;
@@ -243,6 +272,44 @@ function render() {
     listEl.innerHTML = '<div class="empty-state">No matching runs found.</div>';
   }
 }
+
+let deleteTarget = null;
+
+function confirmDelete(dirName) {
+  deleteTarget = dirName;
+  document.getElementById('delete-modal').style.display = 'flex';
+  document.getElementById('delete-target-name').textContent = dirName;
+}
+
+function closeModal() {
+  document.getElementById('delete-modal').style.display = 'none';
+  deleteTarget = null;
+}
+
+async function deleteRun() {
+  if (!deleteTarget) return;
+  const btn = document.querySelector('#delete-modal .btn-danger');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch('/api/runs/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dir_name: deleteTarget })
+    });
+    if (res.ok) {
+      closeModal();
+      location.reload();
+    } else {
+      const err = await res.text();
+      alert('Delete failed: ' + err);
+      if (btn) btn.disabled = false;
+    }
+  } catch (e) {
+    alert('Delete error: ' + e.message);
+    if (btn) btn.disabled = false;
+  }
+}
+
 
 document.getElementById('filter-input').addEventListener('input', render);
 document.getElementById('filter-dbms').addEventListener('change', render);

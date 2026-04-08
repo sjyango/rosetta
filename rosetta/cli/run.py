@@ -542,7 +542,7 @@ def _handle_run_bench(args, output: "OutputFormatter") -> CommandResult:
             print_report_file(html_path, label="html")
 
         json_path = os.path.join(run_dir, "bench_result.json")
-        _save_bench_json(json_path, result)
+        _save_bench_json(json_path, result, bench_file=args.bench_file or "", database=final_database)
         print_report_file(json_path, label="json")
 
         # Update latest symlink

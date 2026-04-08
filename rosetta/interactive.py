@@ -97,6 +97,13 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args):  # noqa: A002
         pass  # Suppress all request logs
 
+    def end_headers(self):                      # noqa: N802
+        # Disable caching for all responses
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        super().end_headers()
+
     # -- GET routing (redirect / → /index.html, serve API) -----------------
 
     def do_GET(self):                           # noqa: N802
@@ -132,6 +139,8 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
             self._handle_buglist_api()
         elif self.path == "/api/execute":
             self._handle_execute_api()
+        elif self.path == "/api/runs/delete":
+            self._handle_runs_delete_api()
         else:
             self.send_error(404)
 
@@ -234,6 +243,51 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
 
         else:
             self._respond_json({"ok": False, "error": "unknown action"}, 404)
+
+    # -- Runs delete API ----------------------------------------------------
+
+    def _handle_runs_delete_api(self):
+        """POST /api/runs/delete — delete a run directory.
+
+        Request body: {"dir_name": "test_name_20250101_120000"}
+        Response: {"ok": true} or {"ok": false, "error": "..."}
+        """
+        import shutil
+
+        try:
+            body = self._read_json()
+        except Exception:
+            self._respond_json({"ok": False, "error": "invalid JSON"}, 400)
+            return
+
+        dir_name = body.get("dir_name", "")
+        if not dir_name:
+            self._respond_json({"ok": False, "error": "dir_name required"}, 400)
+            return
+
+        # Security: prevent path traversal
+        if ".." in dir_name or "/" in dir_name or "\\" in dir_name:
+            self._respond_json({"ok": False, "error": "invalid dir_name"}, 400)
+            return
+
+        # Get the serving directory (output_dir)
+        # The handler is created with directory= output_dir
+        target_dir = os.path.join(self.directory, dir_name)
+
+        if not os.path.isdir(target_dir):
+            self._respond_json({"ok": False, "error": "directory not found"}, 404)
+            return
+
+        try:
+            shutil.rmtree(target_dir)
+            log.info("Deleted run directory: %s", target_dir)
+            # Regenerate index.html after deletion
+            from .reporter.history import generate_index_html
+            generate_index_html(self.directory)
+            self._respond_json({"ok": True})
+        except Exception as e:
+            log.error("Failed to delete directory %s: %s", target_dir, e)
+            self._respond_json({"ok": False, "error": str(e)}, 500)
 
     # -- Playground API -----------------------------------------------------
 
@@ -1241,6 +1295,7 @@ class BenchInteractiveSession:
                     parallel_dbms=self.parallel_dbms,
                     json_extra_config=json_extra_config,
                     callbacks=callbacks,
+                    bench_file=bench_file,
                 )
             finally:
                 # Stop timer thread
