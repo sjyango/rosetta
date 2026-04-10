@@ -139,6 +139,8 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
             self._handle_buglist_api()
         elif self.path == "/api/execute":
             self._handle_execute_api()
+        elif self.path == "/api/execute/stream":
+            self._handle_execute_stream_api()
         elif self.path == "/api/runs/delete":
             self._handle_runs_delete_api()
         else:
@@ -397,6 +399,14 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
                     except Exception as e:
                         t1 = _time.monotonic()
                         stmt_result["error"] = str(e)
+                        # Extract error code if available (e.g., MySQL error code)
+                        # Most DB-API exceptions have error code in args[0]
+                        error_code = None
+                        if hasattr(e, 'args') and e.args and isinstance(e.args[0], int):
+                            error_code = e.args[0]
+                        elif hasattr(e, 'errno'):
+                            error_code = getattr(e, 'errno')
+                        stmt_result["error_code"] = error_code
                         stmt_result["elapsed_ms"] = round(
                             (t1 - t0) * 1000, 3)
 
@@ -416,6 +426,170 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
                 results[r["name"]] = r
 
         self._respond_json({"ok": True, "results": results})
+
+    def _handle_execute_stream_api(self):
+        """POST /api/execute/stream — execute SQL on selected DBMS targets
+        with Server-Sent Events progress updates.
+
+        Request body: {"sql": "...", "dbms": ["tdsql", "mysql"]}
+        SSE events:
+          - event: progress  data: {"name": "...", "index": N, "total": N, "result": {...}}
+          - event: done      data: {"ok": true}
+          - event: error     data: {"error": "..."}
+        """
+        import concurrent.futures
+
+        from .executor import DBConnection, check_port
+
+        try:
+            body = self._read_json()
+        except Exception:
+            self._respond_json({"ok": False, "error": "invalid JSON"}, 400)
+            return
+
+        sql_text = body.get("sql", "").strip()
+        if not sql_text:
+            self._respond_json({"ok": False, "error": "sql is required"}, 400)
+            return
+
+        requested_dbms = body.get("dbms", [])
+        configs_map = {c.name: c for c in self._all_configs}
+
+        if not requested_dbms:
+            requested_dbms = list(configs_map.keys())
+
+        targets = []
+        for name in requested_dbms:
+            if name in configs_map:
+                targets.append(configs_map[name])
+
+        if not targets:
+            self._respond_json(
+                {"ok": False, "error": "no valid DBMS targets"}, 400)
+            return
+
+        database = self._database
+
+        from .parser import TestFileParser
+        parsed = TestFileParser.parse_text(sql_text)
+        stmts = [s.text for s in parsed]
+        total = len(targets)
+
+        # Set up SSE response headers
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self._send_cors_headers()
+        self.end_headers()
+
+        sse_lock = threading.Lock()
+
+        def _send_sse(event: str, data: dict):
+            """Send a single SSE event to the client (thread-safe)."""
+            with sse_lock:
+                try:
+                    payload = json.dumps(data, ensure_ascii=False)
+                    self.wfile.write(
+                        f"event: {event}\ndata: {payload}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                except Exception:
+                    pass
+
+        def _exec_on_dbms(config, index):
+            """Execute all statements on one DBMS, return result dict."""
+            result = {
+                "name": config.name,
+                "statements": [],
+                "error": None,
+            }
+
+            if not check_port(config.host, config.port):
+                result["error"] = (f"Cannot reach {config.host}:"
+                                   f"{config.port}")
+                _send_sse("progress", {
+                    "name": config.name,
+                    "index": index,
+                    "total": total,
+                    "result": result,
+                })
+                return result
+
+            db = DBConnection(config, database)
+            try:
+                db.connect()
+            except Exception as e:
+                result["error"] = f"Connection failed: {e}"
+                _send_sse("progress", {
+                    "name": config.name,
+                    "index": index,
+                    "total": total,
+                    "result": result,
+                })
+                return result
+
+            try:
+                for sql in stmts:
+                    stmt_result = {"sql": sql, "columns": None,
+                                   "rows": None, "error": None,
+                                   "affected_rows": 0,
+                                   "elapsed_ms": 0}
+                    try:
+                        t0 = _time.monotonic()
+                        db.cursor.execute(sql)
+                        if db.cursor.description:
+                            stmt_result["columns"] = [
+                                desc[0]
+                                for desc in db.cursor.description
+                            ]
+                            rows = db.cursor.fetchall()
+                            stmt_result["rows"] = [
+                                [_format_val(c) for c in row]
+                                for row in rows
+                            ]
+                        else:
+                            stmt_result["affected_rows"] = (
+                                db.cursor.rowcount or 0)
+                        t1 = _time.monotonic()
+                        stmt_result["elapsed_ms"] = round(
+                            (t1 - t0) * 1000, 3)
+                    except Exception as e:
+                        t1 = _time.monotonic()
+                        stmt_result["error"] = str(e)
+                        error_code = None
+                        if hasattr(e, 'args') and e.args and isinstance(e.args[0], int):
+                            error_code = e.args[0]
+                        elif hasattr(e, 'errno'):
+                            error_code = getattr(e, 'errno')
+                        stmt_result["error_code"] = error_code
+                        stmt_result["elapsed_ms"] = round(
+                            (t1 - t0) * 1000, 3)
+
+                    result["statements"].append(stmt_result)
+            finally:
+                db.close()
+
+            _send_sse("progress", {
+                "name": config.name,
+                "index": index,
+                "total": total,
+                "result": result,
+            })
+            return result
+
+        # Execute in parallel across all DBMS targets
+        try:
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=len(targets)) as pool:
+                futures = {}
+                for i, c in enumerate(targets):
+                    futures[pool.submit(_exec_on_dbms, c, i + 1)] = c
+                for fut in concurrent.futures.as_completed(futures):
+                    fut.result()  # propagate exceptions if any
+
+            _send_sse("done", {"ok": True})
+        except Exception as e:
+            _send_sse("error", {"error": str(e)})
 
 
 def _format_val(value) -> str:
