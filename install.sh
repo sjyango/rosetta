@@ -4,7 +4,7 @@
 # Cross-DBMS SQL behavioral consistency verification tool
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/your-org/rosetta/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/sjyango/rosetta/main/install.sh | bash
 #
 
 set -e
@@ -19,7 +19,7 @@ NC='\033[0m' # No Color
 # Default settings
 REPO_URL="https://github.com/sjyango/rosetta.git"
 INSTALL_DIR="${HOME}/.rosetta"
-BRANCH="main"
+BRANCH="release-1.0.1"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -37,7 +37,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  -d, --dir DIR      Installation directory (default: ~/.rosetta)"
-            echo "  -b, --branch BRANCH Git branch to install (default: main)"
+            echo "  -b, --branch BRANCH Git branch to install (default: release-1.0.0)"
             echo "  -h, --help         Show this help message"
             exit 0
             ;;
@@ -93,6 +93,15 @@ fi
 
 echo -e "${GREEN}✓ git is available${NC}"
 
+# Check python3-venv
+echo -e "${YELLOW}Checking python3 venv module...${NC}"
+if ! python3 -c "import venv" &> /dev/null; then
+    echo -e "${RED}Error: python3-venv module is not available.${NC}"
+    echo "Please install it (e.g., sudo apt install python3-venv) and try again."
+    exit 1
+fi
+echo -e "${GREEN}✓ venv module is available${NC}"
+
 # Create installation directory
 echo -e "${YELLOW}Installing to $INSTALL_DIR...${NC}"
 if [[ -d "$INSTALL_DIR" ]]; then
@@ -100,7 +109,15 @@ if [[ -d "$INSTALL_DIR" ]]; then
     cd "$INSTALL_DIR"
     git fetch origin
     git checkout "$BRANCH"
-    git reset --hard "origin/$BRANCH"
+    LOCAL_CHANGES=$(git status --porcelain)
+    if [[ -n "$LOCAL_CHANGES" ]]; then
+        echo -e "${YELLOW}Local changes detected, stashing before update...${NC}"
+        git stash
+        git reset --hard "origin/$BRANCH"
+        git stash pop 2>/dev/null || true
+    else
+        git reset --hard "origin/$BRANCH"
+    fi
 else
     git clone -b "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
     cd "$INSTALL_DIR"
@@ -171,7 +188,7 @@ echo -e "${GREEN}║              ✓ Rosetta installed successfully!           
 echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "Installation directory: ${BLUE}$INSTALL_DIR${NC}"
-echo -e "Version: ${BLUE}$(python3 -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); from rosetta import __version__; print(__version__)")${NC}"
+echo -e "Version: ${BLUE}$(python3 -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); from rosetta import __version__; print(__version__)" 2>/dev/null || echo "unknown")${NC}"
 echo ""
 echo -e "${YELLOW}Next steps:${NC}"
 echo -e "  1. ${BLUE}source $SHELL_RC${NC}  (or restart your terminal)"
