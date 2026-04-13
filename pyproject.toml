@@ -3,10 +3,29 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rosetta"
+name = "rosetta-sql"
 version = "1.0.0"
 description = "Cross-DBMS SQL behavioral consistency verification tool"
+readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.8"
+authors = [
+    {name = "yangshijie"},
+]
+keywords = ["sql", "database", "consistency", "testing", "benchmark", "mysql", "tdsql", "tidb", "oceanbase"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Software Development :: Testing",
+]
 dependencies = [
     "pymysql>=1.0",
     "rich>=13.0",
@@ -18,6 +37,11 @@ mysql-connector = ["mysql-connector-python>=8.0"]
 
 [project.scripts]
 rosetta = "rosetta.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/sjyango/rosetta"
+Repository = "https://github.com/sjyango/rosetta"
+Issues = "https://github.com/sjyango/rosetta/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]

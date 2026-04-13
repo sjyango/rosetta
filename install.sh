@@ -3,15 +3,14 @@
 # Rosetta Installer
 # Cross-DBMS SQL behavioral consistency verification tool
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/sjyango/rosetta/main/install.sh | bash
-#     && source ~/.zshrc
+# Recommended install (via pipx):
+#   pipx install rosetta-sql
 #
-# Or use eval to auto source:
+# Alternative install (via curl script):
 #   eval "$(curl -fsSL https://raw.githubusercontent.com/sjyango/rosetta/main/install.sh)"
 #
-# Note: piping to bash runs in a subshell, so PATH changes cannot affect the
-# parent shell. Use the "eval" form or manually `source ~/.zshrc` after install.
+# Note: pipx is the recommended method — it handles PATH automatically.
+# The curl script is provided as a fallback for environments without pipx.
 #
 
 set -e
@@ -227,6 +226,10 @@ else
 fi
 
 echo ""
+echo -e "${YELLOW}Tip: For a cleaner install/uninstall experience, use pipx:${NC}"
+echo -e "  ${BLUE}pipx install rosetta-sql${NC}         # install"
+echo -e "  ${BLUE}pipx uninstall rosetta-sql${NC}       # uninstall"
+echo ""
 echo -e "${YELLOW}Next steps:${NC}"
 echo -e "  1. ${BLUE}rosetta config init${NC}  (generate sample dbms_config.json)"
 echo -e "  2. ${BLUE}rosetta --help${NC}  (show available commands)"
@@ -239,6 +242,6 @@ echo ""
 echo -e "${YELLOW}Documentation:${NC}"
 echo -e "  ${BLUE}https://github.com/sjyango/rosetta#readme${NC}"
 echo ""
-echo -e "${YELLOW}To uninstall:${NC}"
+echo -e "${YELLOW}To uninstall (curl script):${NC}"
 echo -e "  ${BLUE}eval \"\$(curl -fsSL https://raw.githubusercontent.com/sjyango/rosetta/main/uninstall.sh)\"${NC}"
 echo ""
