@@ -1,3 +1,3 @@
 """Rosetta — Cross-DBMS SQL behavioral consistency verification tool."""
 
-__version__ = "1.0.0"
+__version__ = "1.0.2"
