@@ -5,6 +5,13 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/sjyango/rosetta/main/install.sh | bash
+#     && source ~/.zshrc
+#
+# Or use eval to auto source:
+#   eval "$(curl -fsSL https://raw.githubusercontent.com/sjyango/rosetta/main/install.sh)"
+#
+# Note: piping to bash runs in a subshell, so PATH changes cannot affect the
+# parent shell. Use the "eval" form or manually `source ~/.zshrc` after install.
 #
 
 set -e
@@ -37,7 +44,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  -d, --dir DIR      Installation directory (default: ~/.rosetta)"
-            echo "  -b, --branch BRANCH Git branch to install (default: release-1.0.0)"
+            echo "  -b, --branch BRANCH Git branch to install (default: release-1.0.1)"
             echo "  -h, --help         Show this help message"
             exit 0
             ;;
@@ -148,9 +155,14 @@ SHELL_RC=""
 PATH_EXPORT="export PATH=\"$ROSETTA_BIN:\$PATH\""
 
 # Detect shell and set rc file
-if [[ -n "$ZSH_VERSION" ]]; then
+# Check user's default login shell first (works even when script runs via `curl | bash`)
+if [[ -n "$ZSH_VERSION" ]] || grep -q zsh /proc/$PPID/cmdline 2>/dev/null || [[ "$(getent passwd $USER 2>/dev/null | cut -d: -f7)" == *zsh* ]]; then
     SHELL_RC="$HOME/.zshrc"
-elif [[ -n "$BASH_VERSION" ]]; then
+elif [[ -n "$BASH_VERSION" ]] || [[ "$(getent passwd $USER 2>/dev/null | cut -d: -f7)" == *bash* ]]; then
+    SHELL_RC="$HOME/.bashrc"
+elif [[ -f "$HOME/.zshrc" ]]; then
+    SHELL_RC="$HOME/.zshrc"
+elif [[ -f "$HOME/.bashrc" ]]; then
     SHELL_RC="$HOME/.bashrc"
 else
     SHELL_RC="$HOME/.profile"
@@ -190,10 +202,31 @@ echo ""
 echo -e "Installation directory: ${BLUE}$INSTALL_DIR${NC}"
 echo -e "Version: ${BLUE}$(python3 -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); from rosetta import __version__; print(__version__)" 2>/dev/null || echo "unknown")${NC}"
 echo ""
+
+# Check if running in a subshell (piped via curl | bash)
+# In a subshell we cannot modify the parent's PATH, so output the export
+# command so that `eval "$(curl ... | bash)"` works.
+if [[ "$BASH_SOURCE" != "$0" || -p /dev/stdin ]]; then
+    echo -e "${YELLOW}To activate rosetta in the current shell, run:${NC}"
+    echo -e "  ${BLUE}source $SHELL_RC${NC}"
+    echo ""
+    # Also output the export for eval mode
+    echo "export PATH=\"$ROSETTA_BIN:\$PATH\""
+else
+    # Running directly, source the rc file to activate in current shell
+    source "$SHELL_RC" 2>/dev/null || true
+    if command -v rosetta &> /dev/null; then
+        echo -e "${GREEN}✓ rosetta command is ready${NC}"
+    else
+        echo -e "${YELLOW}Run the following to activate rosetta:${NC}"
+        echo -e "  ${BLUE}source $SHELL_RC${NC}"
+    fi
+fi
+
+echo ""
 echo -e "${YELLOW}Next steps:${NC}"
-echo -e "  1. ${BLUE}source $SHELL_RC${NC}  (or restart your terminal)"
-echo -e "  2. ${BLUE}rosetta config init${NC}  (generate sample dbms_config.json)"
-echo -e "  3. ${BLUE}rosetta --help${NC}  (show available commands)"
+echo -e "  1. ${BLUE}rosetta config init${NC}  (generate sample dbms_config.json)"
+echo -e "  2. ${BLUE}rosetta --help${NC}  (show available commands)"
 echo ""
 echo -e "${YELLOW}Quick start:${NC}"
 echo -e "  ${BLUE}rosetta${NC}                # Launch interactive mode"
@@ -202,4 +235,7 @@ echo -e "  ${BLUE}rosetta bench --help${NC}   # Run benchmarks"
 echo ""
 echo -e "${YELLOW}Documentation:${NC}"
 echo -e "  ${BLUE}https://github.com/sjyango/rosetta#readme${NC}"
+echo ""
+echo -e "${YELLOW}To uninstall:${NC}"
+echo -e "  ${BLUE}eval \"\$(curl -fsSL https://raw.githubusercontent.com/sjyango/rosetta/main/uninstall.sh)\"${NC}"
 echo ""
