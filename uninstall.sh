@@ -62,11 +62,21 @@ fi
 
 # Confirmation
 if [[ "$SKIP_CONFIRM" != true ]]; then
-    echo -e "${YELLOW}This will remove Rosetta and all its data from:$NC"
+    echo -e "${YELLOW}This will remove Rosetta and all its data from:$NC}"
     echo -e "  ${BLUE}$INSTALL_DIR${NC}"
     echo ""
-    read -p "Are you sure? [y/N] " -n 1 -r
-    echo ""
+    REPLY=""
+    if [[ -t 0 ]]; then
+        read -r -p "Are you sure? [y/N] " REPLY
+    else
+        # stdin is not a terminal (e.g., eval mode), read from /dev/tty
+        if [[ -e /dev/tty ]]; then
+            read -r -p "Are you sure? [y/N] " REPLY < /dev/tty
+        else
+            echo -e "${YELLOW}Cannot prompt for confirmation (no terminal). Use -y to skip.${NC}"
+            exit 1
+        fi
+    fi
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         echo -e "${YELLOW}Uninstall cancelled.${NC}"
         exit 0
