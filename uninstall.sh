@@ -90,11 +90,14 @@ else
     SHELL_RC="$HOME/.profile"
 fi
 
+# Display-friendly rc path (use ~ instead of $HOME)
+SHELL_RC_DISPLAY="${SHELL_RC/#$HOME\//~/}"
+
 # Remove PATH entries from all shell rc files
 SHELL_RCS=("$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile")
 
 for rc in "${SHELL_RCS[@]}"; do
-    if [[ -f "$rc" ]] && grep -q "Rosetta installer" "$rc"; then
+    if [[ -f "$rc" ]] && grep -q "\.rosetta/\.venv/bin" "$rc"; then
         # Remove the two lines added by installer:
         #   # Added by Rosetta installer
         #   export PATH="<rosetta_venv_bin>:$PATH"
@@ -119,9 +122,6 @@ echo -e "${GREEN}╔════════════════════
 echo -e "${GREEN}║              ✓ Rosetta uninstalled successfully               ║${NC}"
 echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
-
-# Display-friendly rc path (use ~ instead of $HOME)
-SHELL_RC_DISPLAY="${SHELL_RC/#$HOME\//~/}"
 
 # Handle subshell vs direct execution (same pattern as install.sh)
 if [[ "$BASH_SOURCE" != "$0" || -p /dev/stdin ]]; then

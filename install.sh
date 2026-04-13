@@ -168,18 +168,21 @@ else
     SHELL_RC="$HOME/.profile"
 fi
 
+# Display-friendly rc path (use ~ instead of $HOME)
+SHELL_RC_DISPLAY="${SHELL_RC/#$HOME\//~/}"
+
 # Check if already in PATH
 if [[ ":$PATH:" != *":$ROSETTA_BIN:"* ]]; then
     echo -e "${YELLOW}Adding rosetta to PATH...${NC}"
     
     # Check if already in shell rc
-    if [[ -f "$SHELL_RC" ]] && grep -q "rosetta" "$SHELL_RC"; then
-        echo -e "${GREEN}✓ Already configured in $SHELL_RC${NC}"
+    if [[ -f "$SHELL_RC" ]] && grep -q "\.rosetta/\.venv/bin" "$SHELL_RC"; then
+        echo -e "${GREEN}✓ Already configured in $SHELL_RC_DISPLAY${NC}"
     else
         echo "" >> "$SHELL_RC"
         echo "# Added by Rosetta installer" >> "$SHELL_RC"
         echo "$PATH_EXPORT" >> "$SHELL_RC"
-        echo -e "${GREEN}✓ Added to $SHELL_RC${NC}"
+        echo -e "${GREEN}✓ Added to $SHELL_RC_DISPLAY${NC}"
     fi
     
     # Add to current session
@@ -202,9 +205,6 @@ echo ""
 echo -e "Installation directory: ${BLUE}$INSTALL_DIR${NC}"
 echo -e "Version: ${BLUE}$(python3 -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); from rosetta import __version__; print(__version__)" 2>/dev/null || echo "unknown")${NC}"
 echo ""
-
-# Display-friendly rc path (use ~ instead of $HOME)
-SHELL_RC_DISPLAY="${SHELL_RC/#$HOME\//~/}"
 
 # Check if running in a subshell (piped via curl | bash)
 # In a subshell we cannot modify the parent's PATH, so output the export
