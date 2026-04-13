@@ -203,12 +203,15 @@ echo -e "Installation directory: ${BLUE}$INSTALL_DIR${NC}"
 echo -e "Version: ${BLUE}$(python3 -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); from rosetta import __version__; print(__version__)" 2>/dev/null || echo "unknown")${NC}"
 echo ""
 
+# Display-friendly rc path (use ~ instead of $HOME)
+SHELL_RC_DISPLAY="${SHELL_RC/#$HOME\//~/}"
+
 # Check if running in a subshell (piped via curl | bash)
 # In a subshell we cannot modify the parent's PATH, so output the export
 # command so that `eval "$(curl ... | bash)"` works.
 if [[ "$BASH_SOURCE" != "$0" || -p /dev/stdin ]]; then
     echo -e "${YELLOW}To activate rosetta in the current shell, run:${NC}"
-    echo -e "  ${BLUE}source $SHELL_RC${NC}"
+    echo -e "  ${BLUE}source $SHELL_RC_DISPLAY${NC}"
     echo ""
     # Also output the export for eval mode
     echo "export PATH=\"$ROSETTA_BIN:\$PATH\""
@@ -219,7 +222,7 @@ else
         echo -e "${GREEN}✓ rosetta command is ready${NC}"
     else
         echo -e "${YELLOW}Run the following to activate rosetta:${NC}"
-        echo -e "  ${BLUE}source $SHELL_RC${NC}"
+        echo -e "  ${BLUE}source $SHELL_RC_DISPLAY${NC}"
     fi
 fi
 

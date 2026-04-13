@@ -120,10 +120,13 @@ echo -e "${GREEN}║              ✓ Rosetta uninstalled successfully          
 echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
+# Display-friendly rc path (use ~ instead of $HOME)
+SHELL_RC_DISPLAY="${SHELL_RC/#$HOME\//~/}"
+
 # Handle subshell vs direct execution (same pattern as install.sh)
 if [[ "$BASH_SOURCE" != "$0" || -p /dev/stdin ]]; then
     echo -e "${YELLOW}To update PATH in the current shell, run:${NC}"
-    echo -e "  ${BLUE}source $SHELL_RC${NC}"
+    echo -e "  ${BLUE}source $SHELL_RC_DISPLAY${NC}"
     echo ""
     # Output PATH cleanup for eval mode
     echo "export PATH=\"\$(echo \"\$PATH\" | tr ':' '\n' | grep -v '\.rosetta/\.venv/bin' | tr '\n' ':')\""
@@ -134,7 +137,7 @@ else
         echo -e "${GREEN}✓ rosetta command removed from PATH${NC}"
     else
         echo -e "${YELLOW}Run the following to update PATH:${NC}"
-        echo -e "  ${BLUE}source $SHELL_RC${NC}"
+        echo -e "  ${BLUE}source $SHELL_RC_DISPLAY${NC}"
     fi
 fi
 
