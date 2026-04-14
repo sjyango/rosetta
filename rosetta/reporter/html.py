@@ -9,9 +9,9 @@ import html
 import json
 import logging
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 
-from ..models import CompareResult
+from ..models import CompareResult, Statement, StmtType
 
 log = logging.getLogger("rosetta")
 
@@ -66,6 +66,21 @@ def _build_diff_data(comparisons: Dict[str, CompareResult]) -> List[dict]:
             "diffs": diffs,
         })
     return sections
+
+
+def _build_sql_list_data(sql_list: Optional[List[Statement]]) -> List[dict]:
+    """Build SQL list data for the template."""
+    if not sql_list:
+        return []
+    return [
+        {
+            "idx": i + 1,
+            "sql": s.text,
+            "skipped": s.stmt_type == StmtType.SKIP,
+        }
+        for i, s in enumerate(sql_list)
+        if s.text.strip()
+    ]
 
 
 _HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -221,6 +236,34 @@ tr:hover { background: var(--bg3); }
   .side-by-side { grid-template-columns: 1fr; }
   .diff-pane:first-child { border-right: none; border-bottom: 1px solid var(--border); }
 }
+
+/* SQL list */
+.sql-toggle { display: flex; align-items: center; gap: 10px;
+  margin-bottom: 16px; cursor: pointer; user-select: none;
+  padding: 10px 16px; background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 8px; }
+.sql-toggle:hover { background: var(--bg3); }
+.sql-toggle .arrow { transition: transform 0.2s; color: var(--fg2); }
+.sql-toggle.open .arrow { transform: rotate(90deg); }
+.sql-toggle .label { font-size: 14px; font-weight: 600; color: var(--fg); }
+.sql-toggle .count { font-size: 13px; color: var(--fg2); }
+.sql-list { display: none; margin-bottom: 24px; }
+.sql-list.open { display: block; }
+.sql-list-card { background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden; }
+.sql-item { display: flex; align-items: flex-start; padding: 4px 16px;
+  border-bottom: 1px solid var(--border); font-size: 13px; }
+.sql-item:last-child { border-bottom: none; }
+.sql-item:hover { background: var(--bg3); }
+.sql-idx { color: var(--fg2); min-width: 36px; padding-top: 2px;
+  font-family: 'SF Mono', Consolas, monospace; font-size: 12px; }
+.sql-text { font-family: 'SF Mono', Consolas, monospace; font-size: 13px;
+  color: var(--blue); white-space: pre-wrap; word-break: break-all;
+  line-height: 1.5; }
+.sql-item.skipped { opacity: 0.5; }
+.sql-item.skipped .sql-text { color: var(--fg2); text-decoration: line-through; }
+.sql-item.skipped .sql-idx::after { content: '⊘'; margin-left: 2px;
+  color: var(--yellow); font-size: 11px; }
 </style>
 </head>
 <body>
@@ -236,6 +279,15 @@ tr:hover { background: var(--bg3); }
     <span>Test: <strong>{{TEST_NAME}}</strong></span>
     <span>Time: {{TIME}}</span>
     <span>Baseline: <strong>{{BASELINE}}</strong></span>
+  </div>
+
+  <div class="sql-list" id="sql-list-section">
+    <div class="sql-list-card" id="sql-list-body"></div>
+  </div>
+  <div class="sql-toggle" id="sql-list-toggle" style="display:none">
+    <span class="arrow">&#9654;</span>
+    <span class="label">Executed SQL</span>
+    <span class="count" id="sql-list-count"></span>
   </div>
 
   <div class="summary-card">
@@ -272,6 +324,30 @@ tr:hover { background: var(--bg3); }
 <script>
 const SUMMARY = {{SUMMARY_JSON}};
 const DIFFS = {{DIFFS_JSON}};
+const SQL_LIST = {{SQL_LIST_JSON}};
+
+// Render SQL list
+(function() {
+  if (!SQL_LIST || SQL_LIST.length === 0) return;
+  const toggle = document.getElementById('sql-list-toggle');
+  const section = document.getElementById('sql-list-section');
+  const body = document.getElementById('sql-list-body');
+  const countEl = document.getElementById('sql-list-count');
+  toggle.style.display = 'flex';
+  countEl.textContent = '(' + SQL_LIST.length + ' statements)';
+  const frag = document.createDocumentFragment();
+  SQL_LIST.forEach(s => {
+    const item = document.createElement('div');
+    item.className = 'sql-item' + (s.skipped ? ' skipped' : '');
+    item.innerHTML = '<span class="sql-idx">' + s.idx + '</span><span class="sql-text">' + esc(s.sql) + '</span>';
+    frag.appendChild(item);
+  });
+  body.appendChild(frag);
+  toggle.onclick = () => {
+    toggle.classList.toggle('open');
+    section.classList.toggle('open');
+  };
+})();
 
 function showToast(msg, type) {
   const t = document.getElementById('toast');
@@ -614,10 +690,12 @@ syncFromAPI();
 
 def write_html_report(path: str, test_file: str,
                       comparisons: Dict[str, CompareResult],
-                      baseline: str = ""):
+                      baseline: str = "",
+                      sql_list: Optional[List[Statement]] = None):
     """Generate a self-contained HTML report file."""
     summary = _build_summary_data(comparisons)
     diffs = _build_diff_data(comparisons)
+    sql_data = _build_sql_list_data(sql_list)
 
     test_name = test_file.rsplit("/", 1)[-1] if "/" in test_file else test_file
 
@@ -637,6 +715,7 @@ def write_html_report(path: str, test_file: str,
 
     page = page.replace("{{SUMMARY_JSON}}", _safe_json(summary))
     page = page.replace("{{DIFFS_JSON}}", _safe_json(diffs))
+    page = page.replace("{{SQL_LIST_JSON}}", _safe_json(sql_data))
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(page)

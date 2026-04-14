@@ -84,7 +84,7 @@ def generate_sample_config(path: str):
                 "user": "root",
                 "password": "",
                 "driver": "pymysql",
-                "skip_patterns": [],
+                "skip_patterns": ["tdsql_", "ddl_recovery"],
                 "init_sql": [
                     "SET sql_mode='STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'"
                 ],
@@ -113,7 +113,7 @@ def generate_sample_config(path: str):
                 "user": "root",
                 "password": "",
                 "driver": "pymysql",
-                "skip_patterns": [],
+                "skip_patterns": ["tdsql_", "ddl_recovery"],
                 "init_sql": [],
                 "skip_explain": True,
                 "skip_analyze": True,
@@ -126,7 +126,7 @@ def generate_sample_config(path: str):
                 "user": "root@mysql",
                 "password": "",
                 "driver": "pymysql",
-                "skip_patterns": [],
+                "skip_patterns": ["tdsql_", "ddl_recovery"],
                 "init_sql": [],
                 "skip_explain": True,
                 "skip_analyze": True,

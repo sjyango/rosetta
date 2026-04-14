@@ -31,7 +31,9 @@ def handle_interactive(args, output: "OutputFormatter") -> CommandResult:
     # Load config
     if not os.path.isfile(args.config):
         return CommandResult.failure(
-            f"Config file not found: {args.config}",
+            f"Config file not found: {args.config}\n"
+            f"Run 'rosetta config init' to create a sample config, "
+            f"or use '-c' to specify the config file path.",
         )
     
     all_configs = load_config(args.config)

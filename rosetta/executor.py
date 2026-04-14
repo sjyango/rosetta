@@ -365,6 +365,11 @@ def run_on_dbms(config: DBMSConfig, statements: List[Statement],
                     on_progress(error=False)
                 continue
 
+            if stmt.stmt_type == StmtType.SKIP:
+                if on_progress:
+                    on_progress(error=False)
+                continue
+
             if should_skip_fn and should_skip_fn(stmt):
                 if on_progress:
                     on_progress(error=False)

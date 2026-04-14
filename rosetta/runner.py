@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import socket
+import socketserver
 import subprocess
 import sys
 import threading
@@ -31,8 +32,10 @@ from .ui import (ExecutionProgress, RichLogHandler, console, flush_all,
 log = logging.getLogger("rosetta")
 
 
-class _SilentHTTPServer(http.server.HTTPServer):
-    """HTTPServer that silently handles connection errors."""
+class _SilentHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    """Threaded HTTPServer that silently handles connection errors."""
+    daemon_threads = True
+    request_queue_size = 128
 
     def handle_error(self, request, client_address):
         """Silently ignore connection reset/broken pipe errors."""
@@ -175,8 +178,15 @@ class RosettaRunner:
         # Parse
         print_phase("Parse", self.test_file)
         parser = TestFileParser(self.test_file)
-        statements = parser.parse()
-        print_success(f"Parsed {len(statements)} statements")
+        prefer_result = not getattr(self, 'no_result', False)
+        all_statements = parser.parse(prefer_result=prefer_result)
+        self.statements = [s for s in all_statements
+                           if s.stmt_type in (StmtType.SQL, StmtType.SKIP)]
+        # Only execute SQL statements (SKIP type is for display only)
+        statements = [s for s in all_statements if s.stmt_type == StmtType.SQL]
+        print_success(f"Parsed {len(all_statements)} statements "
+                      f"({len(statements)} SQL, "
+                      f"{len(self.statements) - len(statements)} skipped)")
 
         # Execute on each DBMS (in parallel)
         configs = self._order_configs()
@@ -279,6 +289,7 @@ class RosettaRunner:
                           comparisons: Dict[str, CompareResult]):
         """Generate output reports based on format setting."""
         fmt = self.output_format
+        sql_list = getattr(self, 'statements', None)
 
         if fmt in ("text", "all"):
             report_path = os.path.join(
@@ -300,6 +311,7 @@ class RosettaRunner:
             write_html_report(
                 html_path, self.test_file, comparisons,
                 baseline=self.baseline or "",
+                sql_list=sql_list,
             )
             print_report_file(html_path, label="html")
 
@@ -566,7 +578,8 @@ def main(argv=None):
     if args.parse_only:
         flush_all()
         parser = TestFileParser(args.test)
-        stmts = parser.parse()
+        prefer_result = not getattr(args, 'no_result', False)
+        stmts = parser.parse(prefer_result=prefer_result)
         for s in stmts:
             tag = s.stmt_type.name
             err = (f" [expect error: {s.expected_error}]"
@@ -578,7 +591,11 @@ def main(argv=None):
         return 0
 
     if not os.path.isfile(args.config):
-        print_error(f"Config file not found: {args.config}")
+        print_error(
+            f"Config file not found: {args.config}\n"
+            f"Run 'rosetta config init' to create a sample config, "
+            f"or use '-c' to specify the config file path."
+        )
         flush_all()
         return 1
 
@@ -705,7 +722,11 @@ def _run_benchmark(args) -> int:
 
     # Load DBMS configs
     if not os.path.isfile(args.config):
-        print_error(f"Config file not found: {args.config}")
+        print_error(
+            f"Config file not found: {args.config}\n"
+            f"Run 'rosetta config init' to create a sample config, "
+            f"or use '-c' to specify the config file path."
+        )
         flush_all()
         return 1
 
@@ -2472,7 +2493,11 @@ def _enter_interactive(args) -> int:
     from .interactive import BenchInteractiveSession, InteractiveSession
 
     if not os.path.isfile(args.config):
-        print_error(f"Config file not found: {args.config}")
+        print_error(
+            f"Config file not found: {args.config}\n"
+            f"Run 'rosetta config init' to create a sample config, "
+            f"or use '-c' to specify the config file path."
+        )
         flush_all()
         return 1
 

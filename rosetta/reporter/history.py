@@ -869,6 +869,16 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .btn-exec:active { transform: translateY(0); }
 .btn-exec:disabled { opacity: 0.5; cursor: not-allowed; transform: none;
   box-shadow: none; }
+.btn-stop { background: linear-gradient(135deg, #d1242f, #f85149);
+  color: #fff; border: none; border-radius: 10px; padding: 14px 28px;
+  font-size: 15px; font-weight: 600; cursor: pointer; white-space: nowrap;
+  transition: all 0.2s; box-shadow: 0 2px 8px rgba(248,81,73,0.3);
+  display: none; }
+.btn-stop:hover { transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(248,81,73,0.4); }
+.btn-stop:active { transform: translateY(0); }
+.btn-stop:disabled { opacity: 0.5; cursor: not-allowed; transform: none;
+  box-shadow: none; }
 .btn-clear { background: var(--bg3); color: var(--fg2); border: 1px solid var(--border);
   border-radius: 8px; padding: 8px 16px; font-size: 13px; cursor: pointer;
   transition: all 0.15s; }
@@ -1060,6 +1070,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
         spellcheck="false"></textarea>
       <div class="right-controls">
         <button class="btn-exec" id="btn-exec" onclick="executeSql()">&#9654; Execute</button>
+        <button class="btn-stop" id="btn-stop" onclick="stopExecution()">&#9632; Stop</button>
         <button class="btn-clear" onclick="clearResults()">Clear</button>
         <span class="shortcut-hint"><kbd>Ctrl</kbd>+<kbd>Enter</kbd></span>
       </div>
@@ -1091,6 +1102,7 @@ let DBMS_LIST = [];
 let ACTIVE_DBMS = new Set();
 let BASELINE_DBMS = '';
 let DATABASE = '';
+let _currentAbortController = null;
 
 function showToast(msg, type) {
   const t = document.getElementById('toast');
@@ -1205,8 +1217,11 @@ function executeSql() {
   if (ACTIVE_DBMS.size === 0) { showToast('Select at least one DBMS'); return; }
 
   const btn = document.getElementById('btn-exec');
+  const stopBtn = document.getElementById('btn-stop');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner" style="width:16px;height:16px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:6px"></span>Running...';
+  stopBtn.style.display = 'block';
+  stopBtn.disabled = false;
 
   const area = document.getElementById('results-area');
   area.innerHTML = '';
@@ -1235,10 +1250,14 @@ function executeSql() {
   const port = location.port || '80';
   const base = location.protocol + '//' + location.hostname + ':' + port;
 
+  const abortCtrl = new AbortController();
+  _currentAbortController = abortCtrl;
+
   fetch(base + '/api/execute/stream', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ sql: sql, dbms: dbmsList })
+    body: JSON.stringify({ sql: sql, dbms: dbmsList }),
+    signal: abortCtrl.signal
   }).then(response => {
     if (!response.ok) {
       throw new Error('HTTP ' + response.status);
@@ -1300,6 +1319,9 @@ function executeSql() {
               }
             } else if (event === 'done') {
               finalizeExecution();
+            } else if (event === 'cancelled') {
+              showToast('Execution cancelled by user', 'error');
+              finalizeExecution();
             } else if (event === 'error') {
               showToast('Execution error: ' + (parsed.error || 'Unknown'));
               finalizeExecution();
@@ -1314,11 +1336,19 @@ function executeSql() {
     }
 
     processChunk().catch(e => {
-      showToast('Stream error: ' + e.message);
+      if (e.name === 'AbortError') {
+        showToast('Execution cancelled', 'error');
+      } else {
+        showToast('Stream error: ' + e.message);
+      }
       finalizeExecution();
     });
   }).catch(e => {
-    showToast('Request failed: ' + e.message);
+    if (e.name === 'AbortError') {
+      showToast('Execution cancelled', 'error');
+    } else {
+      showToast('Request failed: ' + e.message);
+    }
     finalizeExecution();
   });
 
@@ -1326,12 +1356,41 @@ function executeSql() {
   function finalizeExecution() {
     if (finalized) return;
     finalized = true;
+    _currentAbortController = null;
     btn.disabled = false;
     btn.innerHTML = '&#9654; Execute';
+    stopBtn.style.display = 'none';
+    stopBtn.disabled = true;
+    stopBtn.innerHTML = '&#9632; Stop';
 
     if (Object.keys(results).length > 0) {
       renderResults(results, sql);
+    } else {
+      // No results (e.g. cancelled before any DBMS responded) — clear progress
+      area.innerHTML = '<div class="empty-state"><p>Execution was cancelled. No results.</p></div>';
     }
+  }
+}
+
+function stopExecution() {
+  const stopBtn = document.getElementById('btn-stop');
+  stopBtn.disabled = true;
+  stopBtn.innerHTML = '&#9632; Stopping...';
+
+  const port = location.port || '80';
+  const base = location.protocol + '//' + location.hostname + ':' + port;
+
+  // 1. Tell backend to kill active DB connections
+  fetch(base + '/api/stop', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({})
+  }).catch(() => {});
+
+  // 2. Abort the SSE fetch stream so the UI unblocks immediately
+  if (_currentAbortController) {
+    _currentAbortController.abort();
+    _currentAbortController = null;
   }
 }
 

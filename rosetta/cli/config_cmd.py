@@ -50,7 +50,9 @@ def _handle_config_show(args, output: "OutputFormatter") -> CommandResult:
     
     if not os.path.isfile(args.config):
         return CommandResult.failure(
-            f"Config file not found: {args.config}",
+            f"Config file not found: {args.config}\n"
+            f"Run 'rosetta config init' to create a sample config, "
+            f"or use '-c' to specify the config file path.",
         )
     
     try:
@@ -103,7 +105,9 @@ def _handle_config_validate(args, output: "OutputFormatter") -> CommandResult:
     
     if not os.path.isfile(args.config):
         return CommandResult.failure(
-            f"Config file not found: {args.config}",
+            f"Config file not found: {args.config}\n"
+            f"Run 'rosetta config init' to create a sample config, "
+            f"or use '-c' to specify the config file path.",
         )
     
     errors = []
@@ -216,7 +220,7 @@ def _handle_config_init(args, output: "OutputFormatter") -> CommandResult:
     from ..config import generate_sample_config
     
     # Determine output path
-    output_path = args.output if args.output else "dbms_config.sample.json"
+    output_path = args.output if args.output else "dbms_config.json"
     
     # Check if file already exists
     if os.path.isfile(output_path):

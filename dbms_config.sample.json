@@ -7,7 +7,7 @@
       "user": "root",
       "password": "",
       "driver": "pymysql",
-      "skip_patterns": [],
+      "skip_patterns": ["tdsql_", "ddl_recovery"],
       "init_sql": [
         "SET sql_mode='STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'"
       ],
@@ -35,7 +35,7 @@
       "user": "root",
       "password": "",
       "driver": "pymysql",
-      "skip_patterns": [],
+      "skip_patterns": ["tdsql_", "ddl_recovery"],
       "init_sql": [],
       "skip_explain": true,
       "skip_analyze": true,
@@ -48,7 +48,7 @@
       "user": "root@mysql",
       "password": "",
       "driver": "pymysql",
-      "skip_patterns": [],
+      "skip_patterns": ["tdsql_", "ddl_recovery"],
       "init_sql": [],
       "skip_explain": true,
       "skip_analyze": true,

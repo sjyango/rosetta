@@ -46,7 +46,9 @@ def _handle_run_mtr(args, output: "OutputFormatter") -> CommandResult:
     # Load config
     if not os.path.isfile(args.config):
         return CommandResult.failure(
-            f"Config file not found: {args.config}",
+            f"Config file not found: {args.config}\n"
+            f"Run 'rosetta config init' to create a sample config, "
+            f"or use '-c' to specify the config file path.",
         )
     
     all_configs = load_config(args.config)
@@ -73,7 +75,8 @@ def _handle_run_mtr(args, output: "OutputFormatter") -> CommandResult:
     if args.parse_only:
         try:
             parser = TestFileParser(args.test)
-            stmts = parser.parse()
+            prefer_result = not getattr(args, 'no_result', False)
+            stmts = parser.parse(prefer_result=prefer_result)
             return CommandResult.success(
                 "mtr parse-only",
                 {
@@ -238,7 +241,9 @@ def _handle_run_bench(args, output: "OutputFormatter") -> CommandResult:
     # Load config
     if not os.path.isfile(args.config):
         return CommandResult.failure(
-            f"Config file not found: {args.config}",
+            f"Config file not found: {args.config}\n"
+            f"Run 'rosetta config init' to create a sample config, "
+            f"or use '-c' to specify the config file path.",
         )
 
     all_configs = load_config(args.config)

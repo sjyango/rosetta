@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import socket
+import socketserver
 import subprocess
 import threading
 import time as _time
@@ -75,8 +76,14 @@ _PROMPT_STYLE = Style.from_dict({
 # HTTP server management
 # ---------------------------------------------------------------------------
 
-class _SilentHTTPServer(http.server.HTTPServer):
-    """HTTPServer that silently handles connection errors."""
+class _SilentHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    """Threaded HTTPServer that silently handles connection errors.
+
+    Uses ThreadingMixIn so that long-running requests (like SSE streams)
+    don't block other requests (like /api/stop).
+    """
+    daemon_threads = True
+    request_queue_size = 128  # Default 5 is too low for repeated SSE requests
 
     def handle_error(self, request, client_address):
         """Silently ignore connection reset/broken pipe errors."""
@@ -93,6 +100,22 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
     _configs: List[DBMSConfig] = []
     _all_configs: List[DBMSConfig] = []
     _database: str = ""
+    # Cancellation event — set by /api/stop, cleared when a new execution starts
+    _cancel_event: threading.Event = threading.Event()
+    # Active DB connections that can be killed on stop
+    _active_connections: list = []
+    _active_connections_lock: threading.Lock = threading.Lock()
+
+    @classmethod
+    def _cleanup_connections(cls):
+        """Force-close and clear all remaining active connections."""
+        with cls._active_connections_lock:
+            for db in cls._active_connections:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+            cls._active_connections.clear()
 
     def log_message(self, format, *args):  # noqa: A002
         pass  # Suppress all request logs
@@ -141,6 +164,8 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
             self._handle_execute_api()
         elif self.path == "/api/execute/stream":
             self._handle_execute_stream_api()
+        elif self.path == "/api/stop":
+            self._handle_stop_api()
         elif self.path == "/api/runs/delete":
             self._handle_runs_delete_api()
         else:
@@ -291,6 +316,17 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
             log.error("Failed to delete directory %s: %s", target_dir, e)
             self._respond_json({"ok": False, "error": str(e)}, 500)
 
+    def _handle_stop_api(self):
+        """POST /api/stop — cancel the currently running execution.
+
+        Sets the cancel event AND forcibly closes all active DB connections
+        so that any blocking cursor.execute() is interrupted immediately.
+        """
+        self._cancel_event.set()
+        self._cleanup_connections()
+        log.info("Execution stop requested via /api/stop")
+        self._respond_json({"ok": True, "message": "Execution cancelled"})
+
     # -- Playground API -----------------------------------------------------
 
     def _handle_dbms_list(self):
@@ -314,6 +350,11 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
         import concurrent.futures
 
         from .executor import DBConnection, check_port
+
+        # Kill any lingering execution from a previous request
+        self._cancel_event.set()
+        self._cleanup_connections()
+        self._cancel_event.clear()
 
         try:
             body = self._read_json()
@@ -343,6 +384,7 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         database = self._database
+        cancel = self._cancel_event
 
         # Reuse the full MTR parser to extract SQL statements,
         # filtering out all MTR directives (--echo, --error, etc.)
@@ -356,6 +398,7 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
                 "name": config.name,
                 "statements": [],
                 "error": None,
+                "cancelled": False,
             }
 
             if not check_port(config.host, config.port):
@@ -364,14 +407,27 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
                 return result
 
             db = DBConnection(config, database)
+            with self._active_connections_lock:
+                self._active_connections.append(db)
             try:
                 db.connect()
             except Exception as e:
+                with self._active_connections_lock:
+                    try:
+                        self._active_connections.remove(db)
+                    except ValueError:
+                        pass
+                if cancel.is_set():
+                    result["cancelled"] = True
+                    return result
                 result["error"] = f"Connection failed: {e}"
                 return result
 
             try:
                 for sql in stmts:
+                    if cancel.is_set():
+                        result["cancelled"] = True
+                        break
                     stmt_result = {"sql": sql, "columns": None,
                                    "rows": None, "error": None,
                                    "affected_rows": 0,
@@ -398,6 +454,9 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
                             (t1 - t0) * 1000, 3)
                     except Exception as e:
                         t1 = _time.monotonic()
+                        if cancel.is_set():
+                            result["cancelled"] = True
+                            break
                         stmt_result["error"] = str(e)
                         # Extract error code if available (e.g., MySQL error code)
                         # Most DB-API exceptions have error code in args[0]
@@ -412,20 +471,50 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
 
                     result["statements"].append(stmt_result)
             finally:
-                db.close()
+                with self._active_connections_lock:
+                    try:
+                        self._active_connections.remove(db)
+                    except ValueError:
+                        pass
+                try:
+                    db.close()
+                except Exception:
+                    pass
 
             return result
 
         # Execute in parallel across all DBMS targets
-        results = {}
-        with concurrent.futures.ThreadPoolExecutor(
-                max_workers=len(targets)) as pool:
-            futures = {pool.submit(_exec_on_dbms, c): c for c in targets}
-            for fut in concurrent.futures.as_completed(futures):
-                r = fut.result()
-                results[r["name"]] = r
+        # Watchdog: auto-kill if total execution exceeds timeout
+        exec_timeout = max(30, len(stmts) * 30 + 15)
+        watchdog_stop = threading.Event()
 
-        self._respond_json({"ok": True, "results": results})
+        def _watchdog():
+            if watchdog_stop.wait(timeout=exec_timeout):
+                return
+            if not cancel.is_set():
+                log.warning("Playground execution watchdog timeout "
+                            "(%ds), force killing", exec_timeout)
+                cancel.set()
+                self._cleanup_connections()
+
+        wd_thread = threading.Thread(target=_watchdog, daemon=True)
+        wd_thread.start()
+
+        results = {}
+        try:
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=len(targets)) as pool:
+                futures = {pool.submit(_exec_on_dbms, c): c for c in targets}
+                for fut in concurrent.futures.as_completed(futures):
+                    r = fut.result()
+                    results[r["name"]] = r
+        finally:
+            watchdog_stop.set()
+            self._cleanup_connections()
+
+        cancelled = any(r.get("cancelled") for r in results.values())
+        self._respond_json({"ok": True, "results": results,
+                            "cancelled": cancelled})
 
     def _handle_execute_stream_api(self):
         """POST /api/execute/stream — execute SQL on selected DBMS targets
@@ -435,11 +524,18 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
         SSE events:
           - event: progress  data: {"name": "...", "index": N, "total": N, "result": {...}}
           - event: done      data: {"ok": true}
+          - event: cancelled data: {"ok": false, "message": "Execution cancelled by user"}
           - event: error     data: {"error": "..."}
         """
         import concurrent.futures
 
         from .executor import DBConnection, check_port
+
+        # Kill any lingering execution from a previous request
+        self._cancel_event.set()
+        self._cleanup_connections()
+        # Now reset for the new execution
+        self._cancel_event.clear()
 
         try:
             body = self._read_json()
@@ -469,32 +565,53 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         database = self._database
+        cancel = self._cancel_event
 
         from .parser import TestFileParser
         parsed = TestFileParser.parse_text(sql_text)
         stmts = [s.text for s in parsed]
         total = len(targets)
 
-        # Set up SSE response headers
+        # Set up SSE response — use raw socket to avoid buffered wfile issues
+        # that cause connection leaks under ThreadingMixIn.
+        try:
+            raw_sock = self.connection
+            raw_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            raw_sock = None
+
+        # Send HTTP response headers via the normal mechanism
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
+        self.send_header("Connection", "close")
         self._send_cors_headers()
         self.end_headers()
+        self.wfile.flush()
 
         sse_lock = threading.Lock()
+        _client_gone = False
 
         def _send_sse(event: str, data: dict):
             """Send a single SSE event to the client (thread-safe)."""
+            nonlocal _client_gone
             with sse_lock:
+                if _client_gone:
+                    return
                 try:
                     payload = json.dumps(data, ensure_ascii=False)
-                    self.wfile.write(
-                        f"event: {event}\ndata: {payload}\n\n".encode("utf-8"))
-                    self.wfile.flush()
+                    msg = f"event: {event}\ndata: {payload}\n\n".encode("utf-8")
+                    if raw_sock:
+                        raw_sock.sendall(msg)
+                    else:
+                        self.wfile.write(msg)
+                        self.wfile.flush()
                 except Exception:
-                    pass
+                    _client_gone = True
+                    # Client disconnected — cancel execution
+                    if not cancel.is_set():
+                        cancel.set()
+                        self._cleanup_connections()
 
         def _exec_on_dbms(config, index):
             """Execute all statements on one DBMS, return result dict."""
@@ -502,7 +619,18 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
                 "name": config.name,
                 "statements": [],
                 "error": None,
+                "cancelled": False,
             }
+
+            if cancel.is_set():
+                result["cancelled"] = True
+                _send_sse("progress", {
+                    "name": config.name,
+                    "index": index,
+                    "total": total,
+                    "result": result,
+                })
+                return result
 
             if not check_port(config.host, config.port):
                 result["error"] = (f"Cannot reach {config.host}:"
@@ -516,9 +644,27 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
                 return result
 
             db = DBConnection(config, database)
+            # Register connection BEFORE connect so /api/stop can kill it
+            # even if connect() itself is blocking
+            with self._active_connections_lock:
+                self._active_connections.append(db)
             try:
                 db.connect()
             except Exception as e:
+                with self._active_connections_lock:
+                    try:
+                        self._active_connections.remove(db)
+                    except ValueError:
+                        pass
+                if cancel.is_set():
+                    result["cancelled"] = True
+                    _send_sse("progress", {
+                        "name": config.name,
+                        "index": index,
+                        "total": total,
+                        "result": result,
+                    })
+                    return result
                 result["error"] = f"Connection failed: {e}"
                 _send_sse("progress", {
                     "name": config.name,
@@ -530,6 +676,9 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
 
             try:
                 for sql in stmts:
+                    if cancel.is_set():
+                        result["cancelled"] = True
+                        break
                     stmt_result = {"sql": sql, "columns": None,
                                    "rows": None, "error": None,
                                    "affected_rows": 0,
@@ -555,6 +704,10 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
                             (t1 - t0) * 1000, 3)
                     except Exception as e:
                         t1 = _time.monotonic()
+                        # If cancelled, mark as cancelled rather than error
+                        if cancel.is_set():
+                            result["cancelled"] = True
+                            break
                         stmt_result["error"] = str(e)
                         error_code = None
                         if hasattr(e, 'args') and e.args and isinstance(e.args[0], int):
@@ -567,7 +720,16 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
 
                     result["statements"].append(stmt_result)
             finally:
-                db.close()
+                # Unregister and close
+                with self._active_connections_lock:
+                    try:
+                        self._active_connections.remove(db)
+                    except ValueError:
+                        pass
+                try:
+                    db.close()
+                except Exception:
+                    pass
 
             _send_sse("progress", {
                 "name": config.name,
@@ -578,6 +740,28 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
             return result
 
         # Execute in parallel across all DBMS targets
+        # Watchdog: auto-kill if total execution exceeds timeout
+        exec_timeout = max(30, len(stmts) * 30 + 15)  # 30s per stmt + 15s connect
+        watchdog_stop = threading.Event()
+
+        def _watchdog():
+            """Kill everything if execution stalls beyond timeout."""
+            if watchdog_stop.wait(timeout=exec_timeout):
+                return  # Normal completion — stop was signalled
+            # Timeout reached — force cancel
+            if not cancel.is_set():
+                log.warning("Playground execution watchdog timeout "
+                            "(%ds), force killing", exec_timeout)
+                cancel.set()
+                self._cleanup_connections()
+                _send_sse("cancelled", {
+                    "ok": False,
+                    "message": f"Execution timed out after {exec_timeout}s"
+                })
+
+        wd_thread = threading.Thread(target=_watchdog, daemon=True)
+        wd_thread.start()
+
         try:
             with concurrent.futures.ThreadPoolExecutor(
                     max_workers=len(targets)) as pool:
@@ -587,9 +771,17 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
                 for fut in concurrent.futures.as_completed(futures):
                     fut.result()  # propagate exceptions if any
 
-            _send_sse("done", {"ok": True})
+            if cancel.is_set():
+                _send_sse("cancelled",
+                          {"ok": False, "message": "Execution cancelled"})
+            else:
+                _send_sse("done", {"ok": True})
         except Exception as e:
             _send_sse("error", {"error": str(e)})
+        finally:
+            watchdog_stop.set()  # Tell watchdog to stop
+            # Ensure all DB connections are cleaned up
+            self._cleanup_connections()
 
 
 def _format_val(value) -> str:

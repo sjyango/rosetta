@@ -106,6 +106,12 @@ def _add_mtr_arguments(parser):
         help="Path to .test file",
     )
     parser.add_argument(
+        "--no-result",
+        action="store_true",
+        default=False,
+        help="Do not use .result file even if available (parse .test directly)",
+    )
+    parser.add_argument(
         "--dbms",
         required=True,
         help="DBMS targets, comma-separated (e.g. tdsql,mysql,tidb)",
