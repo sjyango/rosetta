@@ -110,6 +110,78 @@ def split_into_blocks(lines: List[str]) -> List[List[str]]:
 
 
 # ---------------------------------------------------------------------------
+# Block alignment helpers
+# ---------------------------------------------------------------------------
+_RE_LINE_TAG = re.compile(r"^\[L(\d+)\]\s+")
+
+
+def _block_line_tag(block: List[str]) -> Optional[int]:
+    """Extract the [Lnnn] line-number tag from the first line of a block."""
+    if not block:
+        return None
+    m = _RE_LINE_TAG.match(block[0].strip())
+    return int(m.group(1)) if m else None
+
+
+def _align_blocks(blocks_a: List[List[str]],
+                  blocks_b: List[List[str]]):
+    """Align two block lists by [Lnnn] line tags.
+
+    Returns a list of (block_a_or_empty, block_b_or_empty) pairs.
+    Blocks sharing the same [Lxxx] tag are paired together; blocks
+    present only on one side are paired with an empty list.
+    """
+    # Build tag -> block mappings while preserving order.
+    def _build(blocks):
+        tag_map = {}
+        order = []
+        untagged_id = -1
+        for blk in blocks:
+            tag = _block_line_tag(blk)
+            if tag is not None:
+                tag_map[tag] = blk
+                order.append(tag)
+            else:
+                tag_map[untagged_id] = blk
+                order.append(untagged_id)
+                untagged_id -= 1
+        return tag_map, order
+
+    map_a, order_a = _build(blocks_a)
+    map_b, order_b = _build(blocks_b)
+
+    # Merge order: walk through both sequences, preserving relative order
+    seen = set()
+    merged = []
+    ia = ib = 0
+    while ia < len(order_a) or ib < len(order_b):
+        if ia < len(order_a) and order_a[ia] not in seen:
+            key = order_a[ia]
+            merged.append(key)
+            seen.add(key)
+            ia += 1
+            if ib < len(order_b) and order_b[ib] == key:
+                ib += 1
+        elif ib < len(order_b) and order_b[ib] not in seen:
+            key = order_b[ib]
+            merged.append(key)
+            seen.add(key)
+            ib += 1
+        else:
+            if ia < len(order_a):
+                ia += 1
+            if ib < len(order_b):
+                ib += 1
+
+    pairs = []
+    for key in merged:
+        ba = map_a.get(key, [])
+        bb = map_b.get(key, [])
+        pairs.append((ba, bb))
+    return pairs
+
+
+# ---------------------------------------------------------------------------
 # Comparison
 # ---------------------------------------------------------------------------
 def block_has_unexpected_error(block: List[str]) -> bool:
@@ -125,6 +197,10 @@ def compare_outputs(lines_a: List[str], lines_b: List[str],
                     buglist: Optional[Buglist] = None) -> CompareResult:
     """Compare two result outputs block-by-block.
 
+    Blocks are aligned by their ``[Lnnn]`` line-number tag so that
+    statements skipped on one DBMS (via skip_patterns) do not cause
+    all subsequent blocks to mis-align.
+
     If baseline_name is set, blocks where the baseline has an unexpected
     error are skipped.
 
@@ -139,12 +215,30 @@ def compare_outputs(lines_a: List[str], lines_b: List[str],
     blocks_a = split_into_blocks(lines_a)
     blocks_b = split_into_blocks(lines_b)
 
-    max_blocks = max(len(blocks_a), len(blocks_b))
-    result.total_stmts = max_blocks
+    # Check whether blocks carry [Lxxx] tags — if both sides have tags
+    # we use tag-based alignment; otherwise fall back to positional.
+    has_tags_a = any(_block_line_tag(b) is not None for b in blocks_a)
+    has_tags_b = any(_block_line_tag(b) is not None for b in blocks_b)
 
-    for i in range(max_blocks):
-        ba = blocks_a[i] if i < len(blocks_a) else []
-        bb = blocks_b[i] if i < len(blocks_b) else []
+    if has_tags_a and has_tags_b:
+        pairs = _align_blocks(blocks_a, blocks_b)
+    else:
+        # Fallback: positional alignment (legacy behaviour)
+        max_blocks = max(len(blocks_a), len(blocks_b))
+        pairs = [
+            (blocks_a[i] if i < len(blocks_a) else [],
+             blocks_b[i] if i < len(blocks_b) else [])
+            for i in range(max_blocks)
+        ]
+
+    result.total_stmts = len(pairs)
+
+    for idx, (ba, bb) in enumerate(pairs):
+        # Skip blocks that only exist on one side (the other DBMS
+        # skipped this statement) — they are not real mismatches.
+        if not ba or not bb:
+            result.skipped += 1
+            continue
 
         if baseline_name:
             baseline_block = ba if name_a == baseline_name else bb
@@ -161,25 +255,24 @@ def compare_outputs(lines_a: List[str], lines_b: List[str],
             result.mismatched += 1
             diff = list(difflib.unified_diff(
                 filter_warnings(ba), filter_warnings(bb),
-                fromfile=f"{name_a} (block {i + 1})",
-                tofile=f"{name_b} (block {i + 1})",
+                fromfile=f"{name_a} (block {idx + 1})",
+                tofile=f"{name_b} (block {idx + 1})",
                 lineterm="",
             ))
 
             # Collect nearby block headers as context (2 before, 2 after)
-            # so reports can show surrounding SQL for quick orientation.
             ctx_before = []
-            for ci in range(max(0, i - 2), i):
-                blk = blocks_a[ci] if ci < len(blocks_a) else []
-                if blk:
+            for ci in range(max(0, idx - 2), idx):
+                blk_a, _ = pairs[ci]
+                if blk_a:
                     ctx_before.append({"block": ci + 1,
-                                       "stmt": blk[0][:120]})
+                                       "stmt": blk_a[0][:120]})
             ctx_after = []
-            for ci in range(i + 1, min(i + 3, max_blocks)):
-                blk = blocks_a[ci] if ci < len(blocks_a) else []
-                if blk:
+            for ci in range(idx + 1, min(idx + 3, len(pairs))):
+                blk_a, _ = pairs[ci]
+                if blk_a:
                     ctx_after.append({"block": ci + 1,
-                                      "stmt": blk[0][:120]})
+                                      "stmt": blk_a[0][:120]})
 
             stmt = ba[0] if ba else (bb[0] if bb else "???")
             fa = filter_warnings(ba)
@@ -190,7 +283,7 @@ def compare_outputs(lines_a: List[str], lines_b: List[str],
             bm = buglist.contains(fp) if buglist else False
 
             result.diffs.append({
-                "block": i + 1,
+                "block": idx + 1,
                 "stmt": stmt,
                 "lines_a": fa,
                 "lines_b": fb,

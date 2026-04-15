@@ -107,7 +107,15 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
   background: var(--bg); color: var(--fg); line-height: 1.5; padding: 20px; }
 .container { max-width: 1400px; margin: 0 auto; }
-h1 { color: var(--fg); margin-bottom: 4px; font-size: 24px; display: flex; align-items: center; gap: 8px; }
+h1 { margin-bottom: 4px; font-size: 24px; display: flex; align-items: center; gap: 8px; }
+h1 .brand { background: linear-gradient(135deg, #1f6feb 0%, #58a6ff 50%, #79c0ff 100%);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  background-clip: text; font-weight: 700; }
+h1 .title-rest { background: linear-gradient(135deg, #1f6feb 0%, #58a6ff 50%, #79c0ff 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; font-weight: 600; }
+.btn-nav { color: var(--fg2); font-size: 13px; border: 1px solid var(--border);
+  border-radius: 6px; padding: 5px 14px; background: var(--bg3); text-decoration: none;
+  transition: all 0.15s; display: inline-block; }
+.btn-nav:hover { border-color: var(--blue); color: var(--blue); background: var(--bg2); }
 h2 { font-size: 18px; margin-bottom: 16px; color: var(--fg); }
 .meta { color: var(--fg2); font-size: 14px; margin-bottom: 24px; }
 .meta span { margin-right: 16px; }
@@ -349,8 +357,8 @@ tr:hover { background: var(--bg3); }
       <line x1="10" y1="7" x2="34" y2="7" stroke="#30363d" stroke-width="1.2" stroke-linecap="round"/>
       <line x1="10" y1="10" x2="28" y2="10" stroke="#30363d" stroke-width="1.2" stroke-linecap="round"/>
     </svg>
-    <h1>Rosetta Benchmark Report</h1>
-    <a href="../index.html" style="color:var(--blue);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#9664; History</a>
+    <h1><span class="brand">Rosetta</span> <span class="title-rest">Benchmark Report</span></h1>
+    <a href="../index.html" class="btn-nav">&#9664; History</a>
   </div>
   <div class="config-panel" id="config-panel"></div>
 

@@ -18,16 +18,16 @@ log = logging.getLogger("rosetta")
 # Inline SVG Logos
 # ---------------------------------------------------------------------------
 
-# Playground Logo — terminal/play icon style
+# Playground Logo — terminal/play icon style (blue theme)
 _PLAYGROUND_LOGO_SVG = (
     '<svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">'
-    '<rect x="1" y="4" width="30" height="24" rx="4" stroke="#3fb950" stroke-width="2" fill="none"/>'
+    '<rect x="1" y="4" width="30" height="24" rx="4" stroke="#58a6ff" stroke-width="2" fill="none"/>'
     '<rect x="1" y="4" width="30" height="8" rx="4" fill="#21262d"/>'
     '<circle cx="7" cy="8" r="1.5" fill="#f85149"/>'
     '<circle cx="12" cy="8" r="1.5" fill="#d29922"/>'
     '<circle cx="17" cy="8" r="1.5" fill="#3fb950"/>'
-    '<path d="M11 20L15 23L11 26Z" fill="#3fb950"/>'
-    '<line x1="18" y1="22" x2="25" y2="22" stroke="#58a6ff" stroke-width="2" stroke-linecap="round"/>'
+    '<path d="M11 20L15 23L11 26Z" fill="#58a6ff"/>'
+    '<line x1="18" y1="22" x2="25" y2="22" stroke="#79c0ff" stroke-width="2" stroke-linecap="round"/>'
     '<line x1="18" y1="26" x2="22" y2="26" stroke="#8b949e" stroke-width="1.5" stroke-linecap="round"/>'
     '</svg>'
 )
@@ -172,9 +172,17 @@ _INDEX_TEMPLATE = r"""<!DOCTYPE html>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
   background: var(--bg); color: var(--fg); line-height: 1.5; padding: 20px; }
-.container { max-width: 1200px; margin: 0 auto; }
-h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; display: flex; align-items: center; gap: 8px; }
+.container { max-width: 1600px; margin: 0 auto; }
+h1 { margin-bottom: 4px; font-size: 28px; display: flex; align-items: center; gap: 8px; }
+h1 .brand { background: linear-gradient(135deg, #1f6feb 0%, #58a6ff 50%, #79c0ff 100%);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  background-clip: text; font-weight: 700; }
+h1 .title-rest { background: linear-gradient(135deg, #1f6feb 0%, #58a6ff 50%, #79c0ff 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; font-weight: 600; }
 .subtitle { color: var(--fg2); font-size: 14px; margin-bottom: 24px; }
+.btn-nav { color: var(--fg2); font-size: 13px; border: 1px solid var(--border);
+  border-radius: 6px; padding: 5px 14px; background: var(--bg3); text-decoration: none;
+  transition: all 0.15s; display: inline-block; }
+.btn-nav:hover { border-color: var(--blue); color: var(--blue); background: var(--bg2); }
 
 /* Filter */
 .toolbar { display: flex; gap: 12px; margin-bottom: 20px; align-items: center; flex-wrap: wrap; }
@@ -191,9 +199,9 @@ h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; display: flex; align
   display: flex; align-items: center; gap: 20px; transition: border-color 0.15s; }
 .run-card:hover { border-color: var(--accent); }
 .run-time { color: var(--fg2); font-size: 13px; width: 155px; flex-shrink: 0; font-family: 'SF Mono', Consolas, monospace; }
-.run-id { font-size: 12px; width: 210px; flex-shrink: 0; font-family: 'SF Mono', Consolas, monospace;
+.run-id { font-size: 12px; width: 320px; flex-shrink: 0; font-family: 'SF Mono', Consolas, monospace;
   color: var(--fg2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.run-workload { font-weight: 600; font-size: 14px; width: 150px; flex-shrink: 0;
+.run-workload { font-weight: 600; font-size: 14px; width: 200px; flex-shrink: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run-dbms { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; align-items: center; }
 .dbms-tag { background: var(--bg3); border: 1px solid var(--border);
@@ -220,10 +228,10 @@ h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; display: flex; align
 <body>
 <div class="container">
   <div style="display:flex;align-items:center;gap:16px;margin-bottom:4px">
-    <h1><svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 3C6 1.9 6.9 1 8 1H24C25.1 1 26 1.9 26 3V28C26 29.1 25.1 30 24 30H8C6.9 30 6 29.1 6 28V3Z" stroke="#58a6ff" stroke-width="2" fill="none"/><line x1="16" y1="5" x2="16" y2="27" stroke="#30363d" stroke-width="1" stroke-dasharray="2 2"/><line x1="9" y1="8" x2="14" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="8" x2="23" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="12" x2="14" y2="12" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="12" x2="23" y2="12" stroke="#f85149" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="16" x2="14" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="16" x2="23" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="20" x2="14" y2="20" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="20" x2="23" y2="20" stroke="#d29922" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="24" x2="14" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="24" x2="23" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/></svg> Rosetta History</h1>
-    <a href="playground.html" style="color:var(--green);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#9654; Playground</a>
-    <a href="whitelist.html" style="color:var(--yellow);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#9782; Whitelist</a>
-    <a href="buglist.html" style="color:var(--red);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#128027; Buglist</a>
+    <h1><svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 3C6 1.9 6.9 1 8 1H24C25.1 1 26 1.9 26 3V28C26 29.1 25.1 30 24 30H8C6.9 30 6 29.1 6 28V3Z" stroke="#58a6ff" stroke-width="2" fill="none"/><line x1="16" y1="5" x2="16" y2="27" stroke="#30363d" stroke-width="1" stroke-dasharray="2 2"/><line x1="9" y1="8" x2="14" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="8" x2="23" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="12" x2="14" y2="12" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="12" x2="23" y2="12" stroke="#f85149" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="16" x2="14" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="16" x2="23" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="20" x2="14" y2="20" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="20" x2="23" y2="20" stroke="#d29922" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="24" x2="14" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="24" x2="23" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/></svg> <span class="brand">Rosetta</span> <span class="title-rest">History</span></h1>
+    <a href="playground.html" class="btn-nav">&#9654; Playground</a>
+    <a href="whitelist.html" class="btn-nav">&#9782; Whitelist</a>
+    <a href="buglist.html" class="btn-nav">&#128027; Buglist</a>
   </div>
   <div class="subtitle">Cross-DBMS SQL behavioral consistency verification</div>
 
@@ -390,8 +398,12 @@ _WHITELIST_TEMPLATE = r"""<!DOCTYPE html>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
   background: var(--bg); color: var(--fg); line-height: 1.5; padding: 20px; }
-.container { max-width: 1200px; margin: 0 auto; }
-h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; display: flex; align-items: center; gap: 8px; }
+.container { max-width: 1600px; margin: 0 auto; }
+h1 { margin-bottom: 4px; font-size: 28px; display: flex; align-items: center; gap: 8px; }
+h1 .brand { background: linear-gradient(135deg, #1f6feb 0%, #58a6ff 50%, #79c0ff 100%);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  background-clip: text; font-weight: 700; }
+h1 .title-rest { background: linear-gradient(135deg, #1f6feb 0%, #58a6ff 50%, #79c0ff 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; font-weight: 600; }
 .subtitle { color: var(--fg2); font-size: 14px; margin-bottom: 24px; }
 
 .toolbar { display: flex; gap: 12px; margin-bottom: 20px; align-items: center; flex-wrap: wrap; }
@@ -407,8 +419,10 @@ h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; display: flex; align
 .btn-danger:hover { opacity: 0.85; }
 .btn-secondary { background: var(--bg3); color: var(--fg2); }
 .btn-secondary:hover { color: var(--fg); border-color: var(--fg2); }
-.btn-nav { color: var(--blue); font-size: 14px; border: 1px solid var(--border);
-  border-radius: 6px; padding: 4px 12px; background: none; text-decoration: none; }
+.btn-nav { color: var(--fg2); font-size: 13px; border: 1px solid var(--border);
+  border-radius: 6px; padding: 5px 14px; background: var(--bg3); text-decoration: none;
+  transition: all 0.15s; display: inline-block; }
+.btn-nav:hover { border-color: var(--blue); color: var(--blue); background: var(--bg2); }
 
 .wl-card { background: var(--bg2); border: 1px solid var(--border);
   border-radius: 8px; padding: 16px 20px; margin-bottom: 12px;
@@ -445,9 +459,9 @@ h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; display: flex; align
 <body>
 <div class="container">
   <div style="display:flex;align-items:center;gap:16px;margin-bottom:4px">
-    <h1><svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 3C6 1.9 6.9 1 8 1H24C25.1 1 26 1.9 26 3V28C26 29.1 25.1 30 24 30H8C6.9 30 6 29.1 6 28V3Z" stroke="#58a6ff" stroke-width="2" fill="none"/><line x1="16" y1="5" x2="16" y2="27" stroke="#30363d" stroke-width="1" stroke-dasharray="2 2"/><line x1="9" y1="8" x2="14" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="8" x2="23" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="12" x2="14" y2="12" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="12" x2="23" y2="12" stroke="#f85149" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="16" x2="14" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="16" x2="23" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="20" x2="14" y2="20" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="20" x2="23" y2="20" stroke="#d29922" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="24" x2="14" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="24" x2="23" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/></svg> Whitelist</h1>
+    <h1><svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 3C6 1.9 6.9 1 8 1H24C25.1 1 26 1.9 26 3V28C26 29.1 25.1 30 24 30H8C6.9 30 6 29.1 6 28V3Z" stroke="#58a6ff" stroke-width="2" fill="none"/><line x1="16" y1="5" x2="16" y2="27" stroke="#30363d" stroke-width="1" stroke-dasharray="2 2"/><line x1="9" y1="8" x2="14" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="8" x2="23" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="12" x2="14" y2="12" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="12" x2="23" y2="12" stroke="#f85149" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="16" x2="14" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="16" x2="23" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="20" x2="14" y2="20" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="20" x2="23" y2="20" stroke="#d29922" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="24" x2="14" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="24" x2="23" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/></svg> <span class="brand">Rosetta</span> <span class="title-rest">Whitelist</span></h1>
     <a href="index.html" class="btn-nav">&#9664; History</a>
-    <a href="playground.html" style="color:var(--green);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#9654; Playground</a>
+    <a href="playground.html" class="btn-nav">&#9654; Playground</a>
   </div>
   <div class="subtitle">Manage whitelisted diffs — these are excluded from mismatch counts</div>
 
@@ -617,8 +631,12 @@ _BUGLIST_TEMPLATE = r"""<!DOCTYPE html>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
   background: var(--bg); color: var(--fg); line-height: 1.5; padding: 20px; }
-.container { max-width: 1200px; margin: 0 auto; }
-h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; display: flex; align-items: center; gap: 8px; }
+.container { max-width: 1600px; margin: 0 auto; }
+h1 { margin-bottom: 4px; font-size: 28px; display: flex; align-items: center; gap: 8px; }
+h1 .brand { background: linear-gradient(135deg, #1f6feb 0%, #58a6ff 50%, #79c0ff 100%);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  background-clip: text; font-weight: 700; }
+h1 .title-rest { background: linear-gradient(135deg, #1f6feb 0%, #58a6ff 50%, #79c0ff 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; font-weight: 600; }
 .subtitle { color: var(--fg2); font-size: 14px; margin-bottom: 24px; }
 
 .toolbar { display: flex; gap: 12px; margin-bottom: 20px; align-items: center; flex-wrap: wrap; }
@@ -634,8 +652,10 @@ h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; display: flex; align
 .btn-danger:hover { opacity: 0.85; }
 .btn-secondary { background: var(--bg3); color: var(--fg2); }
 .btn-secondary:hover { color: var(--fg); border-color: var(--fg2); }
-.btn-nav { color: var(--blue); font-size: 14px; border: 1px solid var(--border);
-  border-radius: 6px; padding: 4px 12px; background: none; text-decoration: none; }
+.btn-nav { color: var(--fg2); font-size: 13px; border: 1px solid var(--border);
+  border-radius: 6px; padding: 5px 14px; background: var(--bg3); text-decoration: none;
+  transition: all 0.15s; display: inline-block; }
+.btn-nav:hover { border-color: var(--blue); color: var(--blue); background: var(--bg2); }
 
 .bl-card { background: var(--bg2); border: 1px solid var(--border);
   border-radius: 8px; padding: 16px 20px; margin-bottom: 12px;
@@ -672,10 +692,10 @@ h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; display: flex; align
 <body>
 <div class="container">
   <div style="display:flex;align-items:center;gap:16px;margin-bottom:4px">
-    <h1><svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 3C6 1.9 6.9 1 8 1H24C25.1 1 26 1.9 26 3V28C26 29.1 25.1 30 24 30H8C6.9 30 6 29.1 6 28V3Z" stroke="#58a6ff" stroke-width="2" fill="none"/><line x1="16" y1="5" x2="16" y2="27" stroke="#30363d" stroke-width="1" stroke-dasharray="2 2"/><line x1="9" y1="8" x2="14" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="8" x2="23" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="12" x2="14" y2="12" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="12" x2="23" y2="12" stroke="#f85149" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="16" x2="14" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="16" x2="23" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="20" x2="14" y2="20" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="20" x2="23" y2="20" stroke="#d29922" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="24" x2="14" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="24" x2="23" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/></svg> Buglist</h1>
+    <h1><svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 3C6 1.9 6.9 1 8 1H24C25.1 1 26 1.9 26 3V28C26 29.1 25.1 30 24 30H8C6.9 30 6 29.1 6 28V3Z" stroke="#58a6ff" stroke-width="2" fill="none"/><line x1="16" y1="5" x2="16" y2="27" stroke="#30363d" stroke-width="1" stroke-dasharray="2 2"/><line x1="9" y1="8" x2="14" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="8" x2="23" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="12" x2="14" y2="12" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="12" x2="23" y2="12" stroke="#f85149" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="16" x2="14" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="16" x2="23" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="20" x2="14" y2="20" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="20" x2="23" y2="20" stroke="#d29922" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="24" x2="14" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="24" x2="23" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/></svg> <span class="brand">Rosetta</span> <span class="title-rest">Buglist</span></h1>
     <a href="index.html" class="btn-nav">&#9664; History</a>
-    <a href="playground.html" style="color:var(--green);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#9654; Playground</a>
-    <a href="whitelist.html" style="color:var(--yellow);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#9782; Whitelist</a>
+    <a href="playground.html" class="btn-nav">&#9654; Playground</a>
+    <a href="whitelist.html" class="btn-nav">&#9782; Whitelist</a>
   </div>
   <div class="subtitle">Manage bug-marked diffs — these still count toward the failure rate</div>
 
@@ -868,6 +888,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
   display: flex; align-items: center; gap: 16px;
   background: linear-gradient(180deg, var(--bg2) 0%, var(--bg) 100%); }
 .header h1 { font-size: 22px; display: flex; align-items: center; gap: 8px; }
+.header h1 .brand { background: linear-gradient(135deg, #1f6feb 0%, #58a6ff 50%, #79c0ff 100%);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  background-clip: text; font-weight: 700; }
+.header h1 .title-rest { background: linear-gradient(135deg, #1f6feb 0%, #58a6ff 50%, #79c0ff 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; font-weight: 600; }
 .header h1 .icon { font-size: 18px; color: var(--green); }
 .btn-nav { color: var(--fg2); font-size: 13px; border: 1px solid var(--border);
   border-radius: 6px; padding: 5px 14px; background: var(--bg3); text-decoration: none;
@@ -1091,7 +1115,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 <body>
 
 <div class="header">
-  <h1>""" + _PLAYGROUND_LOGO_SVG + r""" SQL Playground</h1>
+  <h1>""" + _PLAYGROUND_LOGO_SVG + r""" <span class="brand">Rosetta</span> <span class="title-rest">SQL Playground</span></h1>
   <a href="index.html" class="btn-nav">&#9664; History</a>
   <a href="whitelist.html" class="btn-nav">&#9782; Whitelist</a>
   <a href="buglist.html" class="btn-nav">&#128027; Buglist</a>
