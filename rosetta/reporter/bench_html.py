@@ -107,7 +107,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
   background: var(--bg); color: var(--fg); line-height: 1.5; padding: 20px; }
 .container { max-width: 1400px; margin: 0 auto; }
-h1 { color: var(--fg); margin-bottom: 4px; font-size: 24px; }
+h1 { color: var(--fg); margin-bottom: 4px; font-size: 24px; display: flex; align-items: center; gap: 8px; }
 h2 { font-size: 18px; margin-bottom: 16px; color: var(--fg); }
 .meta { color: var(--fg2); font-size: 14px; margin-bottom: 24px; }
 .meta span { margin-right: 16px; }

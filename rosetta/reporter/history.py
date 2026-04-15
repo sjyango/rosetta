@@ -14,6 +14,43 @@ from typing import List
 
 log = logging.getLogger("rosetta")
 
+# ---------------------------------------------------------------------------
+# Inline SVG Logos
+# ---------------------------------------------------------------------------
+
+# Playground Logo — terminal/play icon style
+_PLAYGROUND_LOGO_SVG = (
+    '<svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">'
+    '<rect x="1" y="4" width="30" height="24" rx="4" stroke="#3fb950" stroke-width="2" fill="none"/>'
+    '<rect x="1" y="4" width="30" height="8" rx="4" fill="#21262d"/>'
+    '<circle cx="7" cy="8" r="1.5" fill="#f85149"/>'
+    '<circle cx="12" cy="8" r="1.5" fill="#d29922"/>'
+    '<circle cx="17" cy="8" r="1.5" fill="#3fb950"/>'
+    '<path d="M11 20L15 23L11 26Z" fill="#3fb950"/>'
+    '<line x1="18" y1="22" x2="25" y2="22" stroke="#58a6ff" stroke-width="2" stroke-linecap="round"/>'
+    '<line x1="18" y1="26" x2="22" y2="26" stroke="#8b949e" stroke-width="1.5" stroke-linecap="round"/>'
+    '</svg>'
+)
+
+# MTR / History Logo — stone tablet / comparison icon
+_MTR_LOGO_SVG = (
+    '<svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">'
+    '<path d="M6 3C6 1.9 6.9 1 8 1H24C25.1 1 26 1.9 26 3V28C26 29.1 25.1 30 24 30H8C6.9 30 6 29.1 6 28V3Z" '
+    'stroke="#58a6ff" stroke-width="2" fill="none"/>'
+    '<line x1="16" y1="5" x2="16" y2="27" stroke="#30363d" stroke-width="1" stroke-dasharray="2 2"/>'
+    '<line x1="9" y1="8" x2="14" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/>'
+    '<line x1="18" y1="8" x2="23" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/>'
+    '<line x1="9" y1="12" x2="14" y2="12" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/>'
+    '<line x1="18" y1="12" x2="23" y2="12" stroke="#f85149" stroke-width="2" stroke-linecap="round"/>'
+    '<line x1="9" y1="16" x2="14" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/>'
+    '<line x1="18" y1="16" x2="23" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/>'
+    '<line x1="9" y1="20" x2="14" y2="20" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/>'
+    '<line x1="18" y1="20" x2="23" y2="20" stroke="#d29922" stroke-width="2" stroke-linecap="round"/>'
+    '<line x1="9" y1="24" x2="14" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/>'
+    '<line x1="18" y1="24" x2="23" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/>'
+    '</svg>'
+)
+
 # Pattern: <test_name>_YYYYMMDD_HHMMSS
 _RUN_DIR_RE = re.compile(r"^(.+)_(\d{8}_\d{6})$")
 # Pattern for benchmark: bench_<workload>_YYYYMMDD_HHMMSS
@@ -136,7 +173,7 @@ _INDEX_TEMPLATE = r"""<!DOCTYPE html>
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
   background: var(--bg); color: var(--fg); line-height: 1.5; padding: 20px; }
 .container { max-width: 1200px; margin: 0 auto; }
-h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; }
+h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; display: flex; align-items: center; gap: 8px; }
 .subtitle { color: var(--fg2); font-size: 14px; margin-bottom: 24px; }
 
 /* Filter */
@@ -183,7 +220,7 @@ h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; }
 <body>
 <div class="container">
   <div style="display:flex;align-items:center;gap:16px;margin-bottom:4px">
-    <h1>Rosetta History</h1>
+    <h1><svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 3C6 1.9 6.9 1 8 1H24C25.1 1 26 1.9 26 3V28C26 29.1 25.1 30 24 30H8C6.9 30 6 29.1 6 28V3Z" stroke="#58a6ff" stroke-width="2" fill="none"/><line x1="16" y1="5" x2="16" y2="27" stroke="#30363d" stroke-width="1" stroke-dasharray="2 2"/><line x1="9" y1="8" x2="14" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="8" x2="23" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="12" x2="14" y2="12" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="12" x2="23" y2="12" stroke="#f85149" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="16" x2="14" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="16" x2="23" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="20" x2="14" y2="20" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="20" x2="23" y2="20" stroke="#d29922" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="24" x2="14" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="24" x2="23" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/></svg> Rosetta History</h1>
     <a href="playground.html" style="color:var(--green);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#9654; Playground</a>
     <a href="whitelist.html" style="color:var(--yellow);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#9782; Whitelist</a>
     <a href="buglist.html" style="color:var(--red);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#128027; Buglist</a>
@@ -354,7 +391,7 @@ _WHITELIST_TEMPLATE = r"""<!DOCTYPE html>
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
   background: var(--bg); color: var(--fg); line-height: 1.5; padding: 20px; }
 .container { max-width: 1200px; margin: 0 auto; }
-h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; }
+h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; display: flex; align-items: center; gap: 8px; }
 .subtitle { color: var(--fg2); font-size: 14px; margin-bottom: 24px; }
 
 .toolbar { display: flex; gap: 12px; margin-bottom: 20px; align-items: center; flex-wrap: wrap; }
@@ -408,7 +445,7 @@ h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; }
 <body>
 <div class="container">
   <div style="display:flex;align-items:center;gap:16px;margin-bottom:4px">
-    <h1>&#9782; Whitelist</h1>
+    <h1><svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 3C6 1.9 6.9 1 8 1H24C25.1 1 26 1.9 26 3V28C26 29.1 25.1 30 24 30H8C6.9 30 6 29.1 6 28V3Z" stroke="#58a6ff" stroke-width="2" fill="none"/><line x1="16" y1="5" x2="16" y2="27" stroke="#30363d" stroke-width="1" stroke-dasharray="2 2"/><line x1="9" y1="8" x2="14" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="8" x2="23" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="12" x2="14" y2="12" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="12" x2="23" y2="12" stroke="#f85149" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="16" x2="14" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="16" x2="23" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="20" x2="14" y2="20" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="20" x2="23" y2="20" stroke="#d29922" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="24" x2="14" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="24" x2="23" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/></svg> Whitelist</h1>
     <a href="index.html" class="btn-nav">&#9664; History</a>
     <a href="playground.html" style="color:var(--green);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#9654; Playground</a>
   </div>
@@ -581,7 +618,7 @@ _BUGLIST_TEMPLATE = r"""<!DOCTYPE html>
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
   background: var(--bg); color: var(--fg); line-height: 1.5; padding: 20px; }
 .container { max-width: 1200px; margin: 0 auto; }
-h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; }
+h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; display: flex; align-items: center; gap: 8px; }
 .subtitle { color: var(--fg2); font-size: 14px; margin-bottom: 24px; }
 
 .toolbar { display: flex; gap: 12px; margin-bottom: 20px; align-items: center; flex-wrap: wrap; }
@@ -635,7 +672,7 @@ h1 { color: var(--fg); margin-bottom: 4px; font-size: 28px; }
 <body>
 <div class="container">
   <div style="display:flex;align-items:center;gap:16px;margin-bottom:4px">
-    <h1>&#128027; Buglist</h1>
+    <h1><svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 3C6 1.9 6.9 1 8 1H24C25.1 1 26 1.9 26 3V28C26 29.1 25.1 30 24 30H8C6.9 30 6 29.1 6 28V3Z" stroke="#58a6ff" stroke-width="2" fill="none"/><line x1="16" y1="5" x2="16" y2="27" stroke="#30363d" stroke-width="1" stroke-dasharray="2 2"/><line x1="9" y1="8" x2="14" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="8" x2="23" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="12" x2="14" y2="12" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="12" x2="23" y2="12" stroke="#f85149" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="16" x2="14" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="16" x2="23" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="20" x2="14" y2="20" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="20" x2="23" y2="20" stroke="#d29922" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="24" x2="14" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="24" x2="23" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/></svg> Buglist</h1>
     <a href="index.html" class="btn-nav">&#9664; History</a>
     <a href="playground.html" style="color:var(--green);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#9654; Playground</a>
     <a href="whitelist.html" style="color:var(--yellow);font-size:14px;text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:4px 12px">&#9782; Whitelist</a>
@@ -1054,7 +1091,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 <body>
 
 <div class="header">
-  <h1><span class="icon">&#9654;</span> SQL Playground</h1>
+  <h1>""" + _PLAYGROUND_LOGO_SVG + r""" SQL Playground</h1>
   <a href="index.html" class="btn-nav">&#9664; History</a>
   <a href="whitelist.html" class="btn-nav">&#9782; Whitelist</a>
   <a href="buglist.html" class="btn-nav">&#128027; Buglist</a>

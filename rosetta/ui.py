@@ -62,6 +62,17 @@ BANNER_TEXT = (
     "[dim]Cross-DBMS SQL Behavioral Consistency Verification[/dim]\n"
 )
 
+# ASCII art logo for interactive mode (prompt_toolkit formatted text tuples)
+LOGO_LINES = [
+    r"    ____                 __  __       ",
+    r"   / __ \____  _______ / /_/ /_____ _",
+    r"  / /_/ / __ \/ ___/ _ \ __/ __/ __ `/",
+    r" / _, _/ /_/ (__  )  __/ /_/ /_/ /_/ / ",
+    r"/_/ |_|\____/____/\___/\__/\__/\__,_/  ",
+]
+LOGO_WIDTH = max(len(line) for line in LOGO_LINES)
+LOGO_SUBTITLE = "Cross-DBMS SQL Consistency Verification"
+
 
 def print_banner():
     """Buffer the Rosetta banner."""

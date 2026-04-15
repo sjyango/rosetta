@@ -24,7 +24,8 @@ from .parser import TestFileParser
 from .reporter.html import write_html_report
 from .reporter.history import generate_index_html
 from .reporter.text import write_diff_file, write_text_report
-from .ui import (ExecutionProgress, RichLogHandler, console, flush_all,
+from .ui import (ExecutionProgress, LOGO_LINES, LOGO_SUBTITLE, LOGO_WIDTH,
+                 RichLogHandler, console, flush_all,
                  print_banner, print_error, print_info, print_phase,
                  print_report_file, print_server_info, print_success,
                  print_summary, print_warning)
@@ -1296,27 +1297,33 @@ def _select_bench_params(
     Returns a dict with mode-specific parameters, or ``None`` if cancelled.
     For RERUN mode, returns {"mode": "rerun", "run_data": {...}}.
     """
-    # Step 1: Mode selection
-    mode_result = _select_bench_mode()
-    if mode_result is None:
-        return None
-    if mode_result.get("action") == "back":
-        return {"action": "back"}
+    while True:
+        # Step 1: Mode selection
+        mode_result = _select_bench_mode()
+        if mode_result is None:
+            return None
+        if mode_result.get("action") == "back":
+            return {"action": "back"}
 
-    mode = mode_result["mode"]  # "serial", "concurrent", or "rerun"
+        mode = mode_result["mode"]  # "serial", "concurrent", or "rerun"
 
-    # Step 2: Parameter configuration based on mode
-    if mode == "serial":
-        return _select_serial_params(iterations, warmup, profile, skip_setup, skip_teardown)
-    elif mode == "concurrent":
-        return _select_concurrent_params(concurrency, duration, ramp_up, profile, skip_setup, skip_teardown)
-    else:  # mode == "rerun"
-        # Load historical run parameters
-        run_selection = _select_rerun_run_id(output_dir)
-        if run_selection is None:
-            # User cancelled rerun selection, return special marker to re-show Benchmark Mode
-            return {"action": "cancel"}
-        return {"mode": "rerun", "run_data": run_selection}
+        # Step 2: Parameter configuration based on mode
+        if mode == "serial":
+            result = _select_serial_params(iterations, warmup, profile, skip_setup, skip_teardown)
+        elif mode == "concurrent":
+            result = _select_concurrent_params(concurrency, duration, ramp_up, profile, skip_setup, skip_teardown)
+        else:  # mode == "rerun"
+            # Load historical run parameters
+            run_selection = _select_rerun_run_id(output_dir)
+            if run_selection is None:
+                # User cancelled rerun selection — loop back to mode selection
+                continue
+            return {"mode": "rerun", "run_data": run_selection}
+
+        # If sub-config returned back, loop back to mode selection
+        if result is not None and result.get("action") == "back":
+            continue
+        return result
 
 
 def _select_bench_mode() -> Optional[dict]:
@@ -1338,7 +1345,14 @@ def _select_bench_mode() -> Optional[dict]:
          "Multi-threaded stress test with duration-based execution"),
         ("rerun", "RERUN",
          "Replay a historical benchmark run"),
+        ("back", "Back",
+         "return to main menu"),
+        ("quit", "Quit",
+         "exit"),
     ]
+
+    BACK_IDX = 3
+    QUIT_IDX = 4
 
     selected = [0]
     result = [None]
@@ -1356,53 +1370,69 @@ def _select_bench_mode() -> Optional[dict]:
         selected[0] = (selected[0] + 1) % len(MODES)
 
     @kb.add("enter")
+    @kb.add("right")
+    @kb.add("l")
     def _confirm(event):
-        result[0] = {"mode": MODES[selected[0]][0]}
+        key = MODES[selected[0]][0]
+        if key == "quit":
+            result[0] = None
+        elif key == "back":
+            result[0] = {"action": "back"}
+        else:
+            result[0] = {"mode": key}
         event.app.exit()
 
     @kb.add("c-c")
     @kb.add("escape")
+    @kb.add("q")
     def _cancel(event):
         result[0] = None
         event.app.exit()
 
     @kb.add("b")
+    @kb.add("left")
+    @kb.add("h")
     def _back(event):
         result[0] = {"action": "back"}
         event.app.exit()
 
     def _get_text():
         lines = []
-        border = "═" * 58
-        title = "Select Benchmark Mode".center(58)
-        hint = "↑↓ move · Enter select · B back · Esc cancel".center(58)
 
-        lines.append(("bold cyan", f"  ╔{border}╗\n"))
-        lines.append(("bold cyan", "  ║"))
-        lines.append(("bold white", title))
-        lines.append(("bold cyan", "║\n"))
-        lines.append(("bold cyan", "  ║"))
-        lines.append(("", hint))
-        lines.append(("bold cyan", "║\n"))
-        lines.append(("bold cyan", f"  ╚{border}╝\n"))
+        # ASCII Logo
+        lines.append(("", "\n"))
+        for logo_line in LOGO_LINES:
+            lines.append(("bold cyan", f"  {logo_line}\n"))
+        lines.append(("", "\n"))
+        lines.append(("dim", f"  {LOGO_SUBTITLE}\n"))
+        from . import __version__
+        lines.append(("dim", f"  v{__version__}"))
+        lines.append(("bold white", "  Benchmark Mode\n"))
+        lines.append(("", "\n"))
+
+        lines.append(("dim", "  ↑/↓ move  →/Enter select  ←/b back  Esc/q quit\n"))
         lines.append(("", "\n"))
 
         for i, (mode_key, mode_name, mode_desc) in enumerate(MODES):
             is_sel = (i == selected[0])
+            is_action = (i >= BACK_IDX)
             if is_sel:
-                lines.append(("bold cyan", "  ❯ "))
-                lines.append(("bold yellow", mode_name))
-                lines.append(("", "\n"))
-                lines.append(("", "      "))
-                lines.append(("dim", mode_desc))
-                lines.append(("", "\n"))
+                if is_action:
+                    lines.append(("bold cyan", "  ❯ "))
+                    lines.append(("bold cyan", mode_name))
+                else:
+                    lines.append(("bold cyan", "  ❯ "))
+                    lines.append(("bold cyan", f"{mode_name:<14s}"))
+                    lines.append(("cyan", f"— {mode_desc}"))
             else:
-                lines.append(("", "    "))
-                lines.append(("bold", mode_name))
-                lines.append(("", "\n"))
-                lines.append(("", "      "))
-                lines.append(("dim", mode_desc))
-                lines.append(("", "\n"))
+                if is_action:
+                    lines.append(("", "    "))
+                    lines.append(("dim", mode_name))
+                else:
+                    lines.append(("", "    "))
+                    lines.append(("", f"{mode_name:<14s}"))
+                    lines.append(("gray", f"— {mode_desc}"))
+            lines.append(("", "\n"))
 
         lines.append(("", "\n"))
         lines.append(("dim", "  ────────────────────────────────────────\n"))
@@ -1667,18 +1697,18 @@ def _select_serial_params(
 
     def _get_text():
         lines = []
-        border = "═" * 55
-        title = "SERIAL Mode Configuration".center(55)
-        hint = ("←→ change · Enter confirm/custom · ↑↓ move"
-                " · Esc cancel").center(55)
-        lines.append(("bold cyan", f"  ╔{border}╗\n"))
-        lines.append(("bold cyan", "  ║"))
-        lines.append(("bold white", title))
-        lines.append(("bold cyan", "║\n"))
-        lines.append(("bold cyan", "  ║"))
-        lines.append(("", hint))
-        lines.append(("bold cyan", "║\n"))
-        lines.append(("bold cyan", f"  ╚{border}╝\n"))
+
+        # ASCII Logo
+        lines.append(("", "\n"))
+        for logo_line in LOGO_LINES:
+            lines.append(("bold cyan", f"  {logo_line}\n"))
+        lines.append(("", "\n"))
+        lines.append(("dim", f"  {LOGO_SUBTITLE}\n"))
+        from . import __version__
+        lines.append(("dim", f"  v{__version__}"))
+        lines.append(("bold white", "  SERIAL Mode Configuration\n"))
+        lines.append(("", "\n"))
+        lines.append(("dim", "  ←/→ change  Enter confirm/custom  ↑/↓ move  Esc cancel\n"))
         lines.append(("", "\n"))
 
         if editing[0] is not None:
@@ -2033,18 +2063,18 @@ def _select_concurrent_params(
 
     def _get_text():
         lines = []
-        border = "═" * 55
-        title = "CONCURRENT Mode Configuration".center(55)
-        hint = ("←→ change · Enter confirm/custom · ↑↓ move"
-                " · Esc cancel").center(55)
-        lines.append(("bold cyan", f"  ╔{border}╗\n"))
-        lines.append(("bold cyan", "  ║"))
-        lines.append(("bold white", title))
-        lines.append(("bold cyan", "║\n"))
-        lines.append(("bold cyan", "  ║"))
-        lines.append(("", hint))
-        lines.append(("bold cyan", "║\n"))
-        lines.append(("bold cyan", f"  ╚{border}╝\n"))
+
+        # ASCII Logo
+        lines.append(("", "\n"))
+        for logo_line in LOGO_LINES:
+            lines.append(("bold cyan", f"  {logo_line}\n"))
+        lines.append(("", "\n"))
+        lines.append(("dim", f"  {LOGO_SUBTITLE}\n"))
+        from . import __version__
+        lines.append(("dim", f"  v{__version__}"))
+        lines.append(("bold white", "  CONCURRENT Mode Configuration\n"))
+        lines.append(("", "\n"))
+        lines.append(("dim", "  ←/→ change  Enter confirm/custom  ↑/↓ move  Esc cancel\n"))
         lines.append(("", "\n"))
 
         if editing[0] is not None:
@@ -2160,6 +2190,8 @@ def _select_mode(configs, database: str) -> Optional[str]:
         selected[0] = (selected[0] + 1) % len(MODES)
 
     @kb.add("enter")
+    @kb.add("right")
+    @kb.add("l")
     def _confirm(event):
         key = MODES[selected[0]][0]
         result[0] = key  # None for Quit, 'mtr' or 'bench' otherwise
@@ -2167,6 +2199,9 @@ def _select_mode(configs, database: str) -> Optional[str]:
 
     @kb.add("c-c")
     @kb.add("escape")
+    @kb.add("left")
+    @kb.add("h")
+    @kb.add("q")
     def _cancel(event):
         result[0] = None
         event.app.exit()
@@ -2174,17 +2209,15 @@ def _select_mode(configs, database: str) -> Optional[str]:
     # -- layout -------------------------------------------------------------
     def _get_menu_text():
         lines = []
-        border = "═" * 55
-        title = "Rosetta Interactive Mode".center(55)
-        hint = "↑/↓ to move, Enter to select, Esc to quit".center(55)
-        lines.append(("bold cyan", f"  ╔{border}╗\n"))
-        lines.append(("bold cyan", "  ║"))
-        lines.append(("bold white", title))
-        lines.append(("bold cyan", "║\n"))
-        lines.append(("bold cyan", "  ║"))
-        lines.append(("", hint))
-        lines.append(("bold cyan", "║\n"))
-        lines.append(("bold cyan", f"  ╚{border}╝\n"))
+
+        # ASCII Logo
+        lines.append(("", "\n"))
+        for logo_line in LOGO_LINES:
+            lines.append(("bold cyan", f"  {logo_line}\n"))
+        lines.append(("", "\n"))
+        lines.append(("dim", f"  {LOGO_SUBTITLE}\n"))
+        from . import __version__
+        lines.append(("dim", f"  v{__version__}\n"))
         lines.append(("", "\n"))
 
         dbms_str = ", ".join(c.name for c in configs)
@@ -2193,6 +2226,9 @@ def _select_mode(configs, database: str) -> Optional[str]:
         lines.append(("gray", "  Database: "))
         lines.append(("bold", database))
         lines.append(("", "\n\n"))
+
+        # Hint
+        lines.append(("dim", "  ↑/↓ move  →/Enter select  ←/Esc/q quit\n\n"))
 
         for i, (key, label, desc) in enumerate(MODES):
             is_quit = (key is None)
@@ -2213,6 +2249,13 @@ def _select_mode(configs, database: str) -> Optional[str]:
                     lines.append(("", f"{label:<18s}"))
                     lines.append(("gray", f"— {desc}"))
             lines.append(("", "\n"))
+
+        lines.append(("", "\n"))
+        lines.append(("dim", "  ────────────────────────────────────────────────────────\n"))
+        lines.append(("dim", "  MTR          Run .test files against multiple DBs and diff results\n"))
+        lines.append(("dim", "  Playground   Launch an interactive SQL playground in the browser\n"))
+        lines.append(("dim", "  Benchmark    Compare query performance with latency/QPS reports\n"))
+        lines.append(("dim", "  History      Browse and view historical test/benchmark runs\n"))
 
         return lines
 
@@ -2394,6 +2437,7 @@ def _select_rerun_run_id(output_dir: str) -> Optional[dict]:
 
     @kb.add("c-c")
     @kb.add("escape")
+    @kb.add("q")
     def _cancel(event):
         if editing[0]:
             editing[0] = False
@@ -2406,18 +2450,20 @@ def _select_rerun_run_id(output_dir: str) -> Optional[dict]:
     def _get_menu_text():
         lines = []
         border_len = COL_ID + COL_WK + COL_TS + COL_MODE + 10
-        border = "═" * border_len
-        title = "Select Historical Run".center(border_len)
-        hint = "↑↓ move · ←→ page · / search · Enter select · Esc back".center(border_len)
-        
-        lines.append(("bold cyan", f"  ╔{border}╗\n"))
-        lines.append(("bold cyan", "  ║"))
-        lines.append(("bold white", title))
-        lines.append(("bold cyan", "║\n"))
-        lines.append(("bold cyan", "  ║"))
-        lines.append(("", hint))
-        lines.append(("bold cyan", "║\n"))
-        lines.append(("bold cyan", f"  ╚{border}╝\n"))
+
+        # ASCII Logo
+        lines.append(("", "\n"))
+        for logo_line in LOGO_LINES:
+            lines.append(("bold cyan", f"  {logo_line}\n"))
+        lines.append(("", "\n"))
+        lines.append(("dim", f"  {LOGO_SUBTITLE}\n"))
+        from . import __version__
+        lines.append(("dim", f"  v{__version__}"))
+        lines.append(("bold white", "  Rerun Mode\n"))
+        lines.append(("", "\n"))
+
+        lines.append(("bold white", "  Select Historical Run\n"))
+        lines.append(("dim", "  ↑/↓ move  ←/→ page  / search  Enter select  Esc/q back\n"))
         lines.append(("", "\n"))
 
         # If in editing mode, show inline input
@@ -2549,6 +2595,15 @@ def _enter_interactive(args) -> int:
             from .interactive import ReportServer, _APIHandler
             from .whitelist import Whitelist
             from .buglist import Buglist
+            from . import __version__
+
+            # ASCII Logo
+            console.print()
+            for logo_line in LOGO_LINES:
+                console.print(f"  [bold cyan]{logo_line}[/bold cyan]")
+            console.print()
+            console.print(f"  [dim]{LOGO_SUBTITLE}[/dim]")
+            console.print(f"  [dim]v{__version__}[/dim]  [bold white]Playground Mode[/bold white]")
 
             whitelist = Whitelist(output_dir)
             buglist = Buglist(output_dir)
@@ -2583,10 +2638,10 @@ def _enter_interactive(args) -> int:
             from prompt_toolkit import HTML as _HTML
             from prompt_toolkit.history import InMemoryHistory as _IMH
             from prompt_toolkit import PromptSession as _PS
-            from .interactive import _PROMPT_STYLE
+            from .interactive import _PROMPT_STYLE, _make_repl_bindings, _BackSignal
 
             _pg_placeholder = _HTML(
-                "<placeholder>Type 'help', 'back', or 'quit'"
+                "<placeholder>Type 'help', ← back, or 'quit'"
                 "</placeholder>")
             _pg_prompt = _HTML(
                 '<prompt>rosetta</prompt> <path>▶</path> ')
@@ -2594,6 +2649,7 @@ def _enter_interactive(args) -> int:
                 history=_IMH(),
                 style=_PROMPT_STYLE,
                 multiline=False,
+                key_bindings=_make_repl_bindings(),
             )
 
             console.print()
@@ -2603,13 +2659,17 @@ def _enter_interactive(args) -> int:
                     user_input = _pg_session.prompt(
                         _pg_prompt,
                         placeholder=_pg_placeholder,
-                    ).strip()
+                    )
                 except (EOFError, KeyboardInterrupt):
                     srv.stop()
                     console.print(
                         "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
                     return 0
 
+                if isinstance(user_input, _BackSignal):
+                    break
+
+                user_input = user_input.strip()
                 if not user_input:
                     continue
 
@@ -2664,6 +2724,15 @@ def _enter_interactive(args) -> int:
             from .interactive import ReportServer, _APIHandler
             from .whitelist import Whitelist
             from .buglist import Buglist
+            from . import __version__
+
+            # ASCII Logo
+            console.print()
+            for logo_line in LOGO_LINES:
+                console.print(f"  [bold cyan]{logo_line}[/bold cyan]")
+            console.print()
+            console.print(f"  [dim]{LOGO_SUBTITLE}[/dim]")
+            console.print(f"  [dim]v{__version__}[/dim]  [bold white]History Mode[/bold white]")
 
             whitelist = Whitelist(output_dir)
             buglist = Buglist(output_dir)
@@ -2698,10 +2767,10 @@ def _enter_interactive(args) -> int:
             from prompt_toolkit import HTML as _HTML
             from prompt_toolkit.history import InMemoryHistory as _IMH
             from prompt_toolkit import PromptSession as _PS
-            from .interactive import _PROMPT_STYLE
+            from .interactive import _PROMPT_STYLE, _make_repl_bindings, _BackSignal
 
             _hist_placeholder = _HTML(
-                "<placeholder>Type 'help', 'back', or 'quit'"
+                "<placeholder>Type 'help', ← back, or 'quit'"
                 "</placeholder>")
             _hist_prompt = _HTML(
                 '<prompt>rosetta</prompt> <path>▶</path> ')
@@ -2709,6 +2778,7 @@ def _enter_interactive(args) -> int:
                 history=_IMH(),
                 style=_PROMPT_STYLE,
                 multiline=False,
+                key_bindings=_make_repl_bindings(),
             )
 
             console.print()
@@ -2718,12 +2788,17 @@ def _enter_interactive(args) -> int:
                     user_input = _hist_session.prompt(
                         _hist_prompt,
                         placeholder=_hist_placeholder,
-                    ).strip()
+                    )
                 except (EOFError, KeyboardInterrupt):
                     srv.stop()
                     console.print(
                         "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
                     return 0
+
+                if isinstance(user_input, _BackSignal):
+                    break
+
+                user_input = user_input.strip()
 
                 if not user_input:
                     continue

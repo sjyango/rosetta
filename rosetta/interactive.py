@@ -73,6 +73,54 @@ _PROMPT_STYLE = Style.from_dict({
 
 
 # ---------------------------------------------------------------------------
+# Left-arrow "back" key binding for REPL sessions
+# ---------------------------------------------------------------------------
+
+class _BackSignal:
+    """Sentinel object returned by app.exit() when left-arrow triggers back."""
+    pass
+
+_BACK = _BackSignal()
+
+
+def _make_back_bindings():
+    """Create key bindings: left-arrow on empty input = type 'back' + submit."""
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.filters import Condition
+
+    kb = KeyBindings()
+
+    @kb.add("left", filter=Condition(
+        lambda: not getattr(kb, '_app', None)
+        or not kb._app.current_buffer.text))
+    def _left_back(event):
+        buf = event.app.current_buffer
+        if not buf.text:
+            event.app.exit(result=_BACK)
+
+    # Store app reference for the filter
+    return kb
+
+
+def _make_repl_bindings():
+    """Create key bindings for REPL: left-arrow on empty input triggers back."""
+    from prompt_toolkit.key_binding import KeyBindings
+
+    kb = KeyBindings()
+
+    @kb.add("left")
+    def _left_back(event):
+        buf = event.app.current_buffer
+        if not buf.text:
+            event.app.exit(result=_BACK)
+        else:
+            # Normal left-arrow behavior when there is text
+            buf.cursor_left()
+
+    return kb
+
+
+# ---------------------------------------------------------------------------
 # HTTP server management
 # ---------------------------------------------------------------------------
 
@@ -1126,25 +1174,21 @@ class InteractiveSession:
             style=_PROMPT_STYLE,
             complete_while_typing=True,
             multiline=False,
+            key_bindings=_make_repl_bindings(),
         )
 
-        _placeholder = HTML('<placeholder>Type a path, \'help\', \'back\', or \'quit\'</placeholder>')
-        #   ║ + 55 chars content + ║
-        #   ╚ + 55×═ + ╝
-        border = "═" * 55
-        title = "Rosetta Interactive Mode"
-        hint = "Enter .test file paths to execute, or 'help'"
-        # Center-pad content to 55 visible characters
-        title_line = f"  {title}  ".center(55)
-        hint_line = f"  {hint}  ".center(55)
-        console.print(f"  [bold cyan]╔{border}╗[/bold cyan]")
-        console.print(f"  [bold cyan]║[/bold cyan]"
-                       f"[bold white]{title_line}[/bold white]"
-                       f"[bold cyan]║[/bold cyan]")
-        console.print(f"  [bold cyan]║[/bold cyan]"
-                       f"[dim]{hint_line}[/dim]"
-                       f"[bold cyan]║[/bold cyan]")
-        console.print(f"  [bold cyan]╚{border}╝[/bold cyan]")
+        _placeholder = HTML('<placeholder>Type a path, \'help\', ← back, or \'quit\'</placeholder>')
+
+        # ASCII Logo banner
+        from .ui import LOGO_LINES, LOGO_SUBTITLE
+        from . import __version__
+        console.print()
+        for logo_line in LOGO_LINES:
+            console.print(f"  [bold cyan]{logo_line}[/bold cyan]")
+        console.print()
+        console.print(f"  [dim]{LOGO_SUBTITLE}[/dim]")
+        console.print(f"  [dim]v{__version__}[/dim]  [bold white]MTR Mode[/bold white]")
+        console.print()
 
         # Show status
         console.print(
@@ -1170,10 +1214,15 @@ class InteractiveSession:
                 prompt_msg = HTML(
                     '<prompt>rosetta</prompt> <path>▶</path> ')
                 user_input = session.prompt(
-                    prompt_msg, placeholder=_placeholder).strip()
+                    prompt_msg, placeholder=_placeholder)
             except (EOFError, KeyboardInterrupt):
                 break
 
+            if isinstance(user_input, _BackSignal):
+                exit_reason = "back"
+                break
+
+            user_input = user_input.strip()
             if not user_input:
                 continue
 
@@ -1836,24 +1885,21 @@ class BenchInteractiveSession:
             style=_PROMPT_STYLE,
             complete_while_typing=True,
             multiline=False,
+            key_bindings=_make_repl_bindings(),
         )
 
-        _placeholder = HTML('<placeholder>Type a path, \'help\', \'back\', or \'quit\'</placeholder>')
+        _placeholder = HTML('<placeholder>Type a path, \'help\', ← back, or \'quit\'</placeholder>')
 
-        # Welcome banner
-        border = "═" * 55
-        title = "Rosetta Benchmark Interactive Mode"
-        hint = "Enter bench file (.json/.sql) to execute, or 'help'"
-        title_line = f"  {title}  ".center(55)
-        hint_line = f"  {hint}  ".center(55)
-        console.print(f"  [bold cyan]╔{border}╗[/bold cyan]")
-        console.print(f"  [bold cyan]║[/bold cyan]"
-                       f"[bold white]{title_line}[/bold white]"
-                       f"[bold cyan]║[/bold cyan]")
-        console.print(f"  [bold cyan]║[/bold cyan]"
-                       f"[dim]{hint_line}[/dim]"
-                       f"[bold cyan]║[/bold cyan]")
-        console.print(f"  [bold cyan]╚{border}╝[/bold cyan]")
+        # ASCII Logo banner
+        from .ui import LOGO_LINES, LOGO_SUBTITLE
+        from . import __version__
+        console.print()
+        for logo_line in LOGO_LINES:
+            console.print(f"  [bold cyan]{logo_line}[/bold cyan]")
+        console.print()
+        console.print(f"  [dim]{LOGO_SUBTITLE}[/dim]")
+        console.print(f"  [dim]v{__version__}[/dim]  [bold white]Benchmark Mode[/bold white]")
+        console.print()
 
         # Show config
         if self.concurrency > 0:
@@ -1906,10 +1952,15 @@ class BenchInteractiveSession:
                 prompt_msg = HTML(
                     '<prompt>rosetta</prompt> <path>▶</path> ')
                 user_input = session.prompt(
-                    prompt_msg, placeholder=_placeholder).strip()
+                    prompt_msg, placeholder=_placeholder)
             except (EOFError, KeyboardInterrupt):
                 break
 
+            if isinstance(user_input, _BackSignal):
+                exit_reason = "back"
+                break
+
+            user_input = user_input.strip()
             if not user_input:
                 continue
 
