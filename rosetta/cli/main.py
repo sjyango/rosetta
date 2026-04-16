@@ -83,6 +83,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
     
     # Add subcommands
+    _add_test_subparser(subparsers)
     _add_mtr_subparser(subparsers)
     _add_bench_subparser(subparsers)
     _add_status_subparser(subparsers)
@@ -98,18 +99,18 @@ def create_parser() -> argparse.ArgumentParser:
 # Shared argument helpers
 # ---------------------------------------------------------------------------
 
-def _add_mtr_arguments(parser):
-    """Add MTR-specific arguments to a parser."""
+def _add_test_arguments(parser):
+    """Add cross-DBMS consistency test arguments to a parser."""
     parser.add_argument(
         "-t", "--test",
         required=True,
         help="Path to .test file",
     )
     parser.add_argument(
-        "--no-result",
+        "--result",
         action="store_true",
         default=False,
-        help="Do not use .result file even if available (parse .test directly)",
+        help="Use .result file instead of .test (MTR variables pre-expanded)",
     )
     parser.add_argument(
         "--dbms",
@@ -173,6 +174,97 @@ def _add_mtr_arguments(parser):
         type=int,
         default=19527,
         help="HTTP server port (default: 19527)",
+    )
+
+
+def _add_mtr_arguments(parser):
+    """Add native MTR runner arguments to a parser."""
+    parser.add_argument(
+        "--test-dir",
+        default=None,
+        help="Path to MySQL test directory containing ./mtr (default: auto-detect)",
+    )
+    parser.add_argument(
+        "--skip-list",
+        default=None,
+        help="Path to skip-test list file (default: auto-detect)",
+    )
+    parser.add_argument(
+        "-t", "--total",
+        action="store_true",
+        default=False,
+        help="Total MTR mode (use port-base=30000)",
+    )
+    parser.add_argument(
+        "-o", "--optimistic",
+        action="store_true",
+        default=False,
+        help="Enable optimistic transaction mode (--mysqld=--tdsql_trans_type=1)",
+    )
+    parser.add_argument(
+        "-ve", "--vector",
+        action="store_true",
+        default=False,
+        help="Enable vector engine mode (--ve-protocol)",
+    )
+    parser.add_argument(
+        "-pq", "--parallel-query",
+        action="store_true",
+        default=False,
+        help="Enable parallel query mode (--parallel-query)",
+    )
+    parser.add_argument(
+        "-r", "--record",
+        action="store_true",
+        default=False,
+        help="Enable record mode (--record)",
+    )
+    parser.add_argument(
+        "-s", "--suite",
+        type=str,
+        default=None,
+        help="Test suite name (e.g. main, innodb)",
+    )
+    parser.add_argument(
+        "--parallel",
+        type=int,
+        default=8,
+        help="Number of parallel workers (default: 8)",
+    )
+    parser.add_argument(
+        "--retry",
+        type=int,
+        default=3,
+        help="Number of retries for failed tests (default: 3)",
+    )
+    parser.add_argument(
+        "--retry-failure",
+        type=int,
+        default=3,
+        help="Number of retries for failure (default: 3)",
+    )
+    parser.add_argument(
+        "--max-test-fail",
+        type=int,
+        default=3000,
+        help="Maximum test failures before stopping (default: 3000)",
+    )
+    parser.add_argument(
+        "--testcase-timeout",
+        type=int,
+        default=1200,
+        help="Test case timeout in seconds (default: 1200)",
+    )
+    parser.add_argument(
+        "--suite-timeout",
+        type=int,
+        default=600,
+        help="Suite timeout in seconds (default: 600)",
+    )
+    parser.add_argument(
+        "cases",
+        nargs="*",
+        help="Specific test cases to run",
     )
 
 
@@ -306,12 +398,23 @@ def _add_bench_arguments(parser):
 # Subparser registration
 # ---------------------------------------------------------------------------
 
+def _add_test_subparser(subparsers):
+    """Add the 'test' top-level subcommand (cross-DBMS consistency test)."""
+    test_parser = subparsers.add_parser(
+        "test",
+        help="Run cross-DBMS consistency test",
+        description="Execute .test files and compare SQL results across databases",
+    )
+    _add_global_options(test_parser)
+    _add_test_arguments(test_parser)
+
+
 def _add_mtr_subparser(subparsers):
-    """Add the 'mtr' top-level subcommand."""
+    """Add the 'mtr' top-level subcommand (native MySQL MTR runner)."""
     mtr_parser = subparsers.add_parser(
         "mtr",
-        help="Run MTR consistency test",
-        description="Execute .test files and compare SQL results across databases",
+        help="Run native MySQL MTR test suite",
+        description="Execute MySQL MTR test suites using the native ./mtr binary",
     )
     _add_global_options(mtr_parser)
     _add_mtr_arguments(mtr_parser)
@@ -437,7 +540,7 @@ def _add_result_subparser(subparsers):
         help="Page number (default: 1)",
     )
     list_p.add_argument(
-        "--type", choices=["all", "mtr", "bench"], default="all",
+        "--type", choices=["all", "mtr", "test", "bench"], default="all",
         help="Filter by run type (default: all)",
     )
     list_p.add_argument(
@@ -575,8 +678,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     
     # Dispatch to command handlers
     try:
-        if args.command == "mtr":
-            from .run import handle_mtr
+        if args.command == "test":
+            from .run import handle_test
+            result = handle_test(args, output)
+        elif args.command == "mtr":
+            from .mtr_cmd import handle_mtr
             result = handle_mtr(args, output)
         elif args.command == "bench":
             from .run import handle_bench

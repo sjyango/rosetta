@@ -76,6 +76,29 @@ def filter_configs(configs: List[DBMSConfig],
 def generate_sample_config(path: str):
     """Generate a sample configuration file."""
     sample = {
+        "mtr": {
+            "test_dir": "/data/workspace/SQLEngine/bld/mysql-test",
+            "skip_list": "/data/workspace/SQLEngine/mysql-test/collections/disabled.def",
+            "base_port": 13000,
+            "total_port": 30000,
+            "parallel": 8,
+            "retry": 3,
+            "retry_failure": 3,
+            "max_test_fail": 3000,
+            "testcase_timeout": 1200,
+            "suite_timeout": 600,
+            "mysqld_opts": [
+                "tdsql_debug_table_scan_rows=10000",
+                "tdsql_auto_increment_batch_size=1",
+                "tdsql_enable_proxy_for_system_views=off",
+                "log_timestamps=SYSTEM",
+                "tdsql_log_autoinc_result=false",
+                "tdstore_mod_log_flags=SPECIAL_FLAG=off",
+                "tdstore_delete_job_ctx_delay_s=3",
+                "tdstore_safely_destroy_region_delay_time_s=3",
+                "tdsql_check_task_status_retry_interval_ms=1",
+            ],
+        },
         "databases": [
             {
                 "name": "mysql",

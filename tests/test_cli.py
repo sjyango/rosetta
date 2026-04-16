@@ -471,75 +471,75 @@ class TestMtrBenchParsing:
     # -- mtr: required args ------------------------------------------------
 
     def test_mtr_missing_required(self):
-        """mtr without --test and --dbms should fail."""
+        """test without --test and --dbms should fail."""
         with pytest.raises(SystemExit):
-            self._parse("mtr")
+            self._parse("test")
 
     def test_mtr_missing_test(self):
         with pytest.raises(SystemExit):
-            self._parse("mtr", "--dbms", "mysql")
+            self._parse("test", "--dbms", "mysql")
 
     def test_mtr_missing_dbms(self):
         with pytest.raises(SystemExit):
-            self._parse("mtr", "-t", "test.test")
+            self._parse("test", "-t", "test.test")
 
-    # -- mtr: all options --------------------------------------------------
+    # -- test (cross-DBMS consistency): all options ----------------------------
 
     def test_mtr_basic_args(self):
         args = self._parse(
-            "mtr", "--dbms", "mysql,tdsql", "-t", "test.test",
+            "test", "--dbms", "mysql,tdsql", "-t", "test.test",
         )
-        assert args.command == "mtr"
+        assert args.command == "test"
         assert args.test == "test.test"
         assert args.dbms == "mysql,tdsql"
 
     def test_mtr_baseline(self):
         args = self._parse(
-            "mtr", "--dbms", "mysql,tdsql", "-b", "mysql", "-t", "test.test",
+            "test", "--dbms", "mysql,tdsql", "-b", "mysql", "-t", "test.test",
         )
         assert args.baseline == "mysql"
 
     def test_mtr_database(self):
         args = self._parse(
-            "mtr", "--dbms", "mysql", "-d", "mydb", "-t", "t.test",
+            "test", "--dbms", "mysql", "-d", "mydb", "-t", "t.test",
         )
         assert args.database == "mydb"
 
     def test_mtr_output_dir(self):
         args = self._parse(
-            "mtr", "--dbms", "mysql", "-o", "/tmp/out", "-t", "t.test",
+            "test", "--dbms", "mysql", "-o", "/tmp/out", "-t", "t.test",
         )
         assert args.output_dir == "/tmp/out"
 
     def test_mtr_output_format(self):
         for fmt in ["text", "html", "all"]:
             args = self._parse(
-                "mtr", "--dbms", "mysql", "-f", fmt, "-t", "t.test",
+                "test", "--dbms", "mysql", "-f", fmt, "-t", "t.test",
             )
             assert args.output_format == fmt
 
     def test_mtr_parse_only(self):
         args = self._parse(
-            "mtr", "--dbms", "mysql", "--parse-only", "-t", "t.test",
+            "test", "--dbms", "mysql", "--parse-only", "-t", "t.test",
         )
         assert args.parse_only is True
 
     def test_mtr_diff_only(self):
         args = self._parse(
-            "mtr", "--dbms", "mysql", "--diff-only", "-t", "t.test",
+            "test", "--dbms", "mysql", "--diff-only", "-t", "t.test",
         )
         assert args.diff_only is True
 
     def test_mtr_serve_and_port(self):
         args = self._parse(
-            "mtr", "--dbms", "mysql", "--serve", "-p", "8080", "-t", "t.test",
+            "test", "--dbms", "mysql", "--serve", "-p", "8080", "-t", "t.test",
         )
         assert args.serve is True
         assert args.port == 8080
 
     def test_mtr_skip_flags(self):
         args = self._parse(
-            "mtr", "--dbms", "mysql",
+            "test", "--dbms", "mysql",
             "--skip-explain", "--skip-analyze", "--skip-show-create",
             "-t", "t.test",
         )
@@ -549,7 +549,7 @@ class TestMtrBenchParsing:
 
     def test_mtr_defaults(self):
         args = self._parse(
-            "mtr", "--dbms", "mysql", "-t", "t.test",
+            "test", "--dbms", "mysql", "-t", "t.test",
         )
         assert args.baseline == "tdsql"
         assert args.database == "rosetta_mtr_test"
@@ -562,7 +562,7 @@ class TestMtrBenchParsing:
 
     def test_mtr_json_after_subcommand(self):
         args = self._parse(
-            "mtr", "--dbms", "mysql", "-j", "-t", "t.test",
+            "test", "--dbms", "mysql", "-j", "-t", "t.test",
         )
         assert args.json is True
 

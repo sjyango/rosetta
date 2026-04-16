@@ -13,8 +13,8 @@ if TYPE_CHECKING:
     from .output import OutputFormatter
 
 
-def handle_mtr(args, output: "OutputFormatter") -> CommandResult:
-    """Handle the 'mtr' command — execute MTR consistency tests."""
+def handle_test(args, output: "OutputFormatter") -> CommandResult:
+    """Handle the 'test' command — execute MTR consistency tests across databases."""
     return _handle_run_mtr(args, output)
 
 
@@ -75,7 +75,7 @@ def _handle_run_mtr(args, output: "OutputFormatter") -> CommandResult:
     if args.parse_only:
         try:
             parser = TestFileParser(args.test)
-            prefer_result = not getattr(args, 'no_result', False)
+            prefer_result = getattr(args, 'result', False)
             stmts = parser.parse(prefer_result=prefer_result)
             return CommandResult.success(
                 "mtr parse-only",
