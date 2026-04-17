@@ -5,7 +5,7 @@ This wraps the ./mtr binary in the MySQL test directory, supporting
 common options like suite selection, record mode, optimistic transactions,
 vector engine, parallel query, etc.
 
-Configuration is read from the same dbms_config.json file under the
+Configuration is read from the same rosetta_config.json file under the
 "mtr" top-level key.  CLI flags override config values.
 """
 
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 def _load_mtr_config(config_path: str) -> dict:
     """
-    Load the ``mtr`` section from the shared dbms_config.json.
+    Load the ``mtr`` section from the shared rosetta_config.json.
 
     Returns a dict (possibly empty) with whatever keys the user has set.
     Required keys must all be present or the handler will report an error.
@@ -158,7 +158,7 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
     Build and execute a native ./mtr command.
 
     Config resolution order (later wins):
-      1. dbms_config.json ``mtr`` section (required)
+      1. rosetta_config.json ``mtr`` section (required)
       2. CLI flags
 
     All required settings must be present in the config file; otherwise
@@ -168,10 +168,10 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
         CommandResult with execution status
     """
     # --- 1. Load config file ---
-    config_path = getattr(args, "config", "dbms_config.json")
+    config_path = getattr(args, "config", "rosetta_config.json")
     file_cfg = _load_mtr_config(config_path)
 
-    # Required config keys — must be set in dbms_config.json
+    # Required config keys — must be set in rosetta_config.json
     required_keys = [
         "test_dir", "skip_list", "base_port", "total_port",
         "parallel", "retry", "retry_failure", "max_test_fail",

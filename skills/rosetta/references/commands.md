@@ -9,7 +9,7 @@ All commands support these global flags:
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `-j / --json` | `False` | JSON output (AI Agent friendly) |
-| `-c / --config` | `dbms_config.json` | DBMS config file path |
+| `-c / --config` | `rosetta_config.json` | DBMS config file path |
 | `-v / --verbose` | `False` | Enable verbose/debug logging |
 | `--version` | `False` | Show version and exit |
 
@@ -325,7 +325,7 @@ rosetta config <action> [options]
 
 | Action | Description |
 |--------|-------------|
-| `init` | Generate a sample `dbms_config.json` |
+| `init` | Generate a sample `rosetta_config.json` |
 | `show` | Display current config details |
 | `validate` | Validate JSON structure and test connectivity |
 
@@ -460,7 +460,7 @@ rosetta status -j | jq '.databases[] | select(.status=="failed")'
 
 ```bash
 # Keep config in version control
-git add dbms_config.json
+git add rosetta_config.json
 git commit -m "Add production database config"
 ```
 

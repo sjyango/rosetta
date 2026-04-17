@@ -220,7 +220,7 @@ def _handle_config_init(args, output: "OutputFormatter") -> CommandResult:
     from ..config import generate_sample_config
     
     # Determine output path
-    output_path = args.output if args.output else "dbms_config.json"
+    output_path = args.output if args.output else "rosetta_config.json"
     
     # Check if file already exists
     if os.path.isfile(output_path):

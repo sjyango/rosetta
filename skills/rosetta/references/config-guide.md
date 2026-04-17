@@ -4,7 +4,7 @@ Detailed guide for configuring rosetta to connect to your databases.
 
 ## Configuration File
 
-Rosetta uses a JSON configuration file (default: `dbms_config.json`) to define database connections.
+Rosetta uses a JSON configuration file (default: `rosetta_config.json`) to define database connections.
 
 ### Basic Structure
 
@@ -266,15 +266,15 @@ Create separate config files for different environments:
 
 ```bash
 # Development
-rosetta status -c dbms_config.dev.json
+rosetta status -c rosetta_config.dev.json
 
 # Production
-rosetta status -c dbms_config.prod.json
+rosetta status -c rosetta_config.prod.json
 ```
 
 ### Example: Multi-Environment Setup
 
-**dbms_config.dev.json:**
+**rosetta_config.dev.json:**
 ```json
 {
   "databases": [
@@ -298,7 +298,7 @@ rosetta status -c dbms_config.prod.json
 }
 ```
 
-**dbms_config.prod.json:**
+**rosetta_config.prod.json:**
 ```json
 {
   "databases": [
@@ -464,11 +464,11 @@ rosetta config validate
 
 ```bash
 # .gitignore
-dbms_config.json
-dbms_config.*.json
+rosetta_config.json
+rosetta_config.*.json
 
 # Use template
-git add dbms_config.example.json
+git add rosetta_config.example.json
 ```
 
 ### 5. Test Configuration Before Running Tests

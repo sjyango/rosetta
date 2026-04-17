@@ -15,7 +15,7 @@ skills/rosetta/
 │   ├── config-guide.md         # Configuration guide
 │   └── troubleshooting.md      # Troubleshooting guide
 └── examples/
-    ├── dbms_config.example.json # Database configuration example
+    ├── rosetta_config.example.json # Database configuration example
     └── bench.example.json       # Benchmark configuration example
 ```
 
@@ -35,7 +35,7 @@ skills/rosetta/
 
 3. **Edit configuration with your database credentials:**
    ```bash
-   vim dbms_config.json
+   vim rosetta_config.json
    ```
 
 4. **Check database connections:**
@@ -123,7 +123,7 @@ Automatically installed by the installation script:
 
 ## Examples
 
-- **examples/dbms_config.example.json**: Multi-database configuration
+- **examples/rosetta_config.example.json**: Multi-database configuration
 - **examples/bench.example.json**: Benchmark test definition
 
 ## Support

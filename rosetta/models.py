@@ -12,6 +12,7 @@ class StmtType(Enum):
     ERROR = auto()
     SORTED_RESULT = auto()
     SKIP = auto()
+    DDL_WAIT = auto()
 
 
 @dataclass
@@ -22,6 +23,7 @@ class Statement:
     line_no: int
     expected_error: Optional[str] = None
     sort_result: bool = False
+    ddl_wait_table: Optional[str] = None
 
 
 @dataclass
@@ -63,6 +65,7 @@ class CompareResult:
     matched: int = 0
     mismatched: int = 0
     skipped: int = 0
+    sql_whitelisted: int = 0
     diffs: List[Dict] = field(default_factory=list)
 
     @property
@@ -77,15 +80,15 @@ class CompareResult:
 
     @property
     def effective_mismatched(self) -> int:
-        """Mismatches excluding whitelisted diffs."""
-        return self.mismatched - self.whitelisted
+        """Mismatches excluding whitelisted, sql_whitelisted and bug_marked diffs."""
+        return self.mismatched - self.whitelisted - self.sql_whitelisted - self.bug_marked
 
     @property
     def pass_rate(self) -> float:
         effective = self.total_stmts - self.skipped
         if effective == 0:
             return 100.0
-        return ((self.matched + self.whitelisted) / effective) * 100.0
+        return ((self.matched + self.whitelisted + self.sql_whitelisted + self.bug_marked) / effective) * 100.0
 
 
 # ---------------------------------------------------------------------------

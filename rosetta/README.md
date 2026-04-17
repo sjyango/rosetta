@@ -22,12 +22,12 @@ After installation, the `rosetta` command is available globally.
 
 ```bash
 # 1. Generate a sample config file
-rosetta --gen-config dbms_config.json
+rosetta --gen-config rosetta_config.json
 
-# 2. Edit dbms_config.json with your DBMS connection info
+# 2. Edit rosetta_config.json with your DBMS connection info
 
 # 3. Run a test
-rosetta --test path/to/test.test --config dbms_config.json --dbms tdsql,mysql
+rosetta --test path/to/test.test --config rosetta_config.json --dbms tdsql,mysql
 ```
 
 ## Usage
@@ -46,7 +46,7 @@ rosetta --test <test_file> [options]
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--config, -c` | `.doc/dbms_config.json` | Path to DBMS config JSON file |
+| `--config, -c` | `.doc/rosetta_config.json` | Path to DBMS config JSON file |
 | `--dbms` | *(all enabled)* | DBMS to compare, comma-separated (e.g. `tdsql,mysql,tidb`) |
 | `--baseline, -b` | `tdsql` | Baseline DBMS name for comparison |
 | `--output-dir, -o` | `.doc/cross_dbms_results` | Output directory for reports |
@@ -98,7 +98,7 @@ rosetta --test suite/tdsql/json/t/test.test --dbms tdsql,mysql --serve --port 80
 ### Interactive mode (REPL session)
 
 ```bash
-rosetta --interactive --config dbms_config.json --dbms tdsql,mysql --serve
+rosetta --interactive --config rosetta_config.json --dbms tdsql,mysql --serve
 ```
 
 In interactive mode, you get a REPL prompt where you can repeatedly submit `.test` file paths without restarting. Features include:
@@ -160,7 +160,7 @@ The config file is a JSON file with the following structure:
 
 ## Adding a New DBMS
 
-1. Add a new entry in your `dbms_config.json`:
+1. Add a new entry in your `rosetta_config.json`:
 
 ```json
 {

@@ -131,7 +131,7 @@ python install_rosetta.py --force
 
 **Error:**
 ```
-Configuration file not found: dbms_config.json
+Configuration file not found: rosetta_config.json
 ```
 
 **Solution:**
@@ -155,7 +155,7 @@ JSON decode error: Expecting ',' delimiter
 **Solution:**
 ```bash
 # Validate JSON syntax
-python3 -m json.tool dbms_config.json
+python3 -m json.tool rosetta_config.json
 
 # Common mistakes:
 # - Missing comma after field

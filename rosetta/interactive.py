@@ -434,11 +434,17 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
         database = self._database
         cancel = self._cancel_event
 
-        # Reuse the full MTR parser to extract SQL statements,
-        # filtering out all MTR directives (--echo, --error, etc.)
-        from .parser import TestFileParser
-        parsed = TestFileParser.parse_text(sql_text)
-        stmts = [s.text for s in parsed]
+        # Use the new MTR parser to extract SQL statements,
+        # supporting full MTR syntax (variables, conditionals, etc.)
+        from .mtr import MtrParser
+        from .mtr.nodes import MtrCommandType
+        _mtr_parser = MtrParser("<playground>")
+        _mtr_test = _mtr_parser.parse_text(sql_text)
+        stmts = [cmd.argument for cmd in _mtr_test.commands
+                 if cmd.cmd_type in (MtrCommandType.SQL, MtrCommandType.EVAL,
+                                     MtrCommandType.QUERY,
+                                     MtrCommandType.QUERY_VERTICAL,
+                                     MtrCommandType.QUERY_HORIZONTAL)]
 
         def _exec_on_dbms(config):
             """Execute all statements on one DBMS, return result dict."""
@@ -615,9 +621,15 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
         database = self._database
         cancel = self._cancel_event
 
-        from .parser import TestFileParser
-        parsed = TestFileParser.parse_text(sql_text)
-        stmts = [s.text for s in parsed]
+        from .mtr import MtrParser
+        from .mtr.nodes import MtrCommandType
+        _mtr_parser = MtrParser("<playground>")
+        _mtr_test = _mtr_parser.parse_text(sql_text)
+        stmts = [cmd.argument for cmd in _mtr_test.commands
+                 if cmd.cmd_type in (MtrCommandType.SQL, MtrCommandType.EVAL,
+                                     MtrCommandType.QUERY,
+                                     MtrCommandType.QUERY_VERTICAL,
+                                     MtrCommandType.QUERY_HORIZONTAL)]
         total = len(targets)
 
         # Set up SSE response — use raw socket to avoid buffered wfile issues
@@ -1058,6 +1070,13 @@ class InteractiveSession:
             console.print(
                 f"  [yellow]⚡ {wl_count} diff(s) matched whitelist"
                 f"[/yellow]")
+
+        # Print sql-whitelist summary
+        sql_wl_count = sum(cmp.sql_whitelisted for cmp in comparisons.values())
+        if sql_wl_count:
+            console.print(
+                f"  [yellow]🔶 {sql_wl_count} diff(s) auto-whitelisted "
+                f"(SHOW CREATE/EXPLAIN/etc.)[/yellow]")
 
         # Print bug summary
         bug_count = sum(cmp.bug_marked for cmp in comparisons.values())

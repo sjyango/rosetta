@@ -172,22 +172,30 @@ class RosettaRunner:
 
         return comparisons
 
-    def run(self) -> Dict[str, CompareResult]:
-        """Execute the full pipeline: parse, execute, compare, report."""
+    def _run_mtr_native(self) -> Dict[str, CompareResult]:
+        """Execute using the new rosetta.mtr module (full MTR syntax support).
+
+        Uses MtrParser + MtrExecutor + RosettaDBConnector to parse and
+        execute .test files with complete MTR directive support (variables,
+        conditionals, multi-connection, result processing, etc.).
+        """
+        from .mtr import MtrParser, MtrExecutor
+        from .mtr.adapter import RosettaDBConnector
+
         os.makedirs(self.output_dir, exist_ok=True)
 
-        # Parse
-        print_phase("Parse", self.test_file)
-        parser = TestFileParser(self.test_file)
-        prefer_result = not getattr(self, 'no_result', False)
-        all_statements = parser.parse(prefer_result=prefer_result)
-        self.statements = [s for s in all_statements
-                           if s.stmt_type in (StmtType.SQL, StmtType.SKIP)]
-        # Only execute SQL statements (SKIP type is for display only)
-        statements = [s for s in all_statements if s.stmt_type == StmtType.SQL]
-        print_success(f"Parsed {len(all_statements)} statements "
-                      f"({len(statements)} SQL, "
-                      f"{len(self.statements) - len(statements)} skipped)")
+        # Parse with the new MTR parser
+        print_phase("Parse (MTR)", self.test_file)
+
+        # Auto-detect mysql-test directory for --source resolution
+        mysql_test_dir = self._detect_mysql_test_dir()
+
+        parser = MtrParser(self.test_file, mysql_test_dir=mysql_test_dir)
+        test = parser.parse()
+        n_cmds = len(test.commands)
+        cmd_types = len(set(c.cmd_type.name for c in test.commands))
+        print_success(f"Parsed {n_cmds} commands ({cmd_types} types) "
+                      f"via rosetta.mtr")
 
         # Execute on each DBMS (in parallel)
         configs = self._order_configs()
@@ -195,34 +203,52 @@ class RosettaRunner:
                     f"{len(configs)} DBMS targets (parallel)")
 
         def _run_single(config):
-            """Execute on one DBMS; returns (config.name, output_lines | None)."""
+            """Execute on one DBMS using the new MTR engine."""
             with ExecutionProgress(config.name,
-                                   total=len(statements)) as prog:
-                def _on_progress(error=False, _p=prog):
-                    _p.advance(error=error)
+                                   total=n_cmds) as prog:
+                try:
+                    connector = RosettaDBConnector(config,
+                                                   database=self.database)
 
-                def _on_connect(name, ok, msg, _p=prog):
-                    if ok:
-                        _p.set_status(f"[green]{msg}[/green]")
+                    # Progress callback for the executor
+                    def _on_mtr_progress(executed, has_error, _p=prog):
+                        _p.advance(error=has_error)
+
+                    executor = MtrExecutor(connector,
+                                           mysql_test_dir=mysql_test_dir,
+                                           abort_on_error=False,
+                                           on_progress=_on_mtr_progress)
+                    connector.setup_default_connection(executor)
+
+                    result = executor.execute(test)
+
+                    if result.skipped:
+                        prog.set_status(
+                            f"[yellow]SKIPPED: {result.skip_reason}[/yellow]")
+                    elif result.died:
+                        prog.set_status(
+                            f"[red]DIED: {result.die_reason}[/red]")
+                    elif result.errors:
+                        prog.set_status(
+                            f"[yellow]{result.commands_executed} done, "
+                            f"{len(result.errors)} err[/yellow]")
                     else:
-                        _p.set_status(f"[red]{msg}[/red]")
+                        prog.set_status(
+                            f"[green]{result.commands_executed} done[/green]")
 
-                def _on_done(name, executed, errors, _p=prog):
-                    if errors:
-                        _p.set_status(
-                            f"[yellow]{executed} done, {errors} err[/yellow]")
-                    else:
-                        _p.set_status(f"[green]{executed} done[/green]")
+                    # Close all connections
+                    try:
+                        executor.connections.close_all()
+                    except Exception:
+                        pass
 
-                output = run_on_dbms(
-                    config, statements, self.database,
-                    should_skip_fn=self._should_skip_stmt_global,
-                    on_connect=_on_connect,
-                    on_progress=_on_progress,
-                    on_done=_on_done,
-                )
+                    output = result.output_lines if not result.died else None
+                except Exception as e:
+                    log.error("MTR execution failed for %s: %s",
+                              config.name, e)
+                    output = None
+                    prog.set_status(f"[red]FAILED: {e}[/red]")
 
-            # Progress bar is now gone (transient); write static line
             prog.write_summary_to_buffer()
             return config.name, output
 
@@ -235,6 +261,80 @@ class RosettaRunner:
                     self.failed_connections.add(name)
                 else:
                     self.results[name] = output
+
+        # Build statement list for report (from MTR commands)
+        self.statements = self._mtr_commands_to_statements(test)
+
+        # Write result files
+        print_phase("Reports")
+        test_name = Path(self.test_file).stem
+        for name, lines in self.results.items():
+            result_path = os.path.join(
+                self.output_dir, f"{test_name}.{name}.result"
+            )
+            with open(result_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+            print_report_file(result_path, label="result")
+
+        # Compare
+        comparisons = self._compare_all()
+
+        # Generate reports
+        self._generate_reports(test_name, comparisons)
+
+        return comparisons
+
+    def _detect_mysql_test_dir(self) -> Optional[str]:
+        """Auto-detect the mysql-test directory for --source resolution.
+
+        Looks for the mysql-test directory relative to the test file path.
+        """
+        # Walk up from the test file to find a directory containing
+        # either mysql-test/ or t/ subdirectory structure
+        test_dir = os.path.dirname(os.path.abspath(self.test_file))
+        for _ in range(5):  # Check up to 5 levels
+            # Check if current dir is mysql-test itself
+            if os.path.isfile(os.path.join(test_dir, "mysql-test-run.pl")):
+                return test_dir
+            # Check if there's a mysql-test subdirectory
+            mt_dir = os.path.join(test_dir, "mysql-test")
+            if os.path.isdir(mt_dir):
+                return mt_dir
+            # Check if we're inside a suite (t/ subdir)
+            if os.path.isdir(os.path.join(test_dir, "t")):
+                parent = os.path.dirname(test_dir)
+                if os.path.isfile(os.path.join(parent,
+                                               "mysql-test-run.pl")):
+                    return parent
+            test_dir = os.path.dirname(test_dir)
+        return None
+
+    def _mtr_commands_to_statements(self, test) -> list:
+        """Convert MtrTestFile commands to Statement objects for reports."""
+        from .mtr.nodes import MtrCommandType
+
+        stmts = []
+        for cmd in test.commands:
+            if cmd.cmd_type == MtrCommandType.SQL:
+                stmts.append(Statement(
+                    stmt_type=StmtType.SQL,
+                    text=cmd.argument,
+                    line_no=cmd.line_no,
+                ))
+            elif cmd.cmd_type == MtrCommandType.ECHO:
+                stmts.append(Statement(
+                    stmt_type=StmtType.ECHO,
+                    text=cmd.argument or "",
+                    line_no=cmd.line_no,
+                ))
+        return stmts
+
+    def run(self) -> Dict[str, CompareResult]:
+        """Execute the full pipeline: parse, execute, compare, report.
+
+        Always uses the new rosetta.mtr module for full MTR syntax support.
+        """
+        return self._run_mtr_native()
 
         # Write result files
         print_phase("Reports")
@@ -341,7 +441,7 @@ def parse_args(argv=None):
         epilog="""\
 Examples:
   # ── Setup ──────────────────────────────────────────────────
-  rosetta --gen-config dbms_config.json      Generate sample config
+  rosetta --gen-config rosetta_config.json      Generate sample config
 
   # ── MTR (consistency test) ─────────────────────────────────
   rosetta -t path/to/test.test --dbms tdsql,mysql
@@ -371,8 +471,8 @@ Examples:
     general = p.add_argument_group(
         "General", "Options shared across all modes")
     general.add_argument(
-        "--config", "-c", default="dbms_config.json",
-        help="Path to DBMS config JSON (default: dbms_config.json)")
+        "--config", "-c", default="rosetta_config.json",
+        help="Path to DBMS config JSON (default: rosetta_config.json)")
     general.add_argument(
         "--dbms",
         help="DBMS targets, comma-separated (e.g. tdsql,mysql,tidb). "
@@ -579,7 +679,7 @@ def main(argv=None):
     if args.parse_only:
         flush_all()
         parser = TestFileParser(args.test)
-        prefer_result = not getattr(args, 'no_result', False)
+        prefer_result = getattr(args, 'result', False)
         stmts = parser.parse(prefer_result=prefer_result)
         for s in stmts:
             tag = s.stmt_type.name

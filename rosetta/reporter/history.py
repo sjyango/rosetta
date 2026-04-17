@@ -185,12 +185,21 @@ h1 .title-rest { background: linear-gradient(135deg, #1f6feb 0%, #58a6ff 50%, #7
 .btn-nav:hover { border-color: var(--blue); color: var(--blue); background: var(--bg2); }
 
 /* Filter */
-.toolbar { display: flex; gap: 12px; margin-bottom: 20px; align-items: center; flex-wrap: wrap; }
-.toolbar input, .toolbar select {
-  background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
-  padding: 8px 14px; color: var(--fg); font-size: 14px; outline: none; }
-.toolbar input:focus, .toolbar select:focus { border-color: var(--accent); }
-.toolbar input { width: 300px; }
+.toolbar { display: flex; gap: 8px; margin-bottom: 20px; align-items: center; flex-wrap: wrap;
+  padding: 10px 16px; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; }
+.toolbar input {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 12px; color: var(--fg); font-size: 13px; outline: none; width: 260px;
+  transition: border-color 0.15s; }
+.toolbar input:focus { border-color: var(--accent); }
+.dbms-filter-btn { display: inline-flex; align-items: center; gap: 4px;
+  background: none; border: 1px solid transparent; border-radius: 6px;
+  padding: 4px 10px; cursor: pointer; font-size: 13px; font-weight: 600;
+  transition: all 0.15s; color: var(--fg2); }
+.dbms-filter-btn:hover { background: var(--bg3); border-color: var(--border); }
+.dbms-filter-btn.active { background: rgba(31,111,235,0.12); border-color: var(--accent);
+  color: var(--blue); }
+.filter-sep { width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
 .count-label { color: var(--fg2); font-size: 14px; margin-left: auto; }
 
 /* Cards */
@@ -237,7 +246,8 @@ h1 .title-rest { background: linear-gradient(135deg, #1f6feb 0%, #58a6ff 50%, #7
 
   <div class="toolbar">
     <input type="text" id="filter-input" placeholder="Filter by test name...">
-    <select id="filter-dbms"><option value="">All DBMS</option></select>
+    <span class="filter-sep"></span>
+    <span id="dbms-filter-buttons"></span>
     <span class="count-label" id="count-label"></span>
   </div>
 
@@ -259,14 +269,31 @@ h1 .title-rest { background: linear-gradient(135deg, #1f6feb 0%, #58a6ff 50%, #7
 <script>
 const RUNS = {{RUNS_JSON}};
 
-// Populate DBMS filter
+// Populate DBMS filter buttons
 const allDbms = [...new Set(RUNS.flatMap(r => r.dbms))].sort();
-const dbmsSelect = document.getElementById('filter-dbms');
-allDbms.forEach(d => {
-  const opt = document.createElement('option');
-  opt.value = d; opt.textContent = d;
-  dbmsSelect.appendChild(opt);
-});
+const dbmsBtnContainer = document.getElementById('dbms-filter-buttons');
+let activeDbmsSet = new Set();
+
+function renderDbmsButtons() {
+  dbmsBtnContainer.innerHTML = '';
+  const allBtn = document.createElement('button');
+  allBtn.className = 'dbms-filter-btn' + (activeDbmsSet.size === 0 ? ' active' : '');
+  allBtn.textContent = 'All';
+  allBtn.onclick = () => { activeDbmsSet.clear(); renderDbmsButtons(); render(); };
+  dbmsBtnContainer.appendChild(allBtn);
+  allDbms.forEach(d => {
+    const btn = document.createElement('button');
+    btn.className = 'dbms-filter-btn' + (activeDbmsSet.has(d) ? ' active' : '');
+    btn.textContent = d;
+    btn.onclick = () => {
+      if (activeDbmsSet.has(d)) activeDbmsSet.delete(d);
+      else activeDbmsSet.add(d);
+      renderDbmsButtons(); render();
+    };
+    dbmsBtnContainer.appendChild(btn);
+  });
+}
+renderDbmsButtons();
 
 function esc(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -274,14 +301,16 @@ function esc(s) {
 
 function render() {
   const nameFilter = document.getElementById('filter-input').value.toLowerCase();
-  const dbmsFilter = document.getElementById('filter-dbms').value;
   const listEl = document.getElementById('run-list');
   listEl.innerHTML = '';
 
   let count = 0;
   RUNS.forEach(r => {
     if (nameFilter && !r.test_name.toLowerCase().includes(nameFilter)) return;
-    if (dbmsFilter && !r.dbms.includes(dbmsFilter)) return;
+    if (activeDbmsSet.size > 0) {
+      if (r.dbms.length !== activeDbmsSet.size) return;
+      if (!r.dbms.every(d => activeDbmsSet.has(d))) return;
+    }
     count++;
 
     const card = document.createElement('div');
@@ -357,7 +386,6 @@ async function deleteRun() {
 
 
 document.getElementById('filter-input').addEventListener('input', render);
-document.getElementById('filter-dbms').addEventListener('change', render);
 render();
 </script>
 </body>

@@ -56,7 +56,7 @@ curl -fsSL https://raw.githubusercontent.com/sjyango/rosetta/main/uninstall.sh |
 rosetta config init
 
 # 2. Edit DB connection info
-vim dbms_config.json
+vim rosetta_config.json
 
 # 3. Check DB connectivity
 rosetta status
@@ -88,7 +88,7 @@ All commands support these flags (can appear before or after the subcommand):
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `-j / --json` | `False` | JSON output (AI Agent friendly) |
-| `-c / --config` | `dbms_config.json` | DBMS config file path |
+| `-c / --config` | `rosetta_config.json` | DBMS config file path |
 | `-v / --verbose` | `False` | Enable verbose/debug logging |
 
 ### Commands
@@ -242,7 +242,7 @@ rosetta config validate
 
 | Action | Description |
 |--------|-------------|
-| `init` | Generate a sample `dbms_config.sample.json` |
+| `init` | Generate a sample `rosetta_config.sample.json` |
 | `show` | Display current config details |
 | `validate` | Validate JSON structure and test connectivity |
 
@@ -310,7 +310,7 @@ rosetta i --serve
 ---
 
 ## Configuration
-Sample `dbms_config.json`:
+Sample `rosetta_config.json`:
 ```json
 {
   "databases": [

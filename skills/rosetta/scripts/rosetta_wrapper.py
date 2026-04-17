@@ -30,7 +30,7 @@ from typing import List, Optional, Tuple
 INSTALL_DIR = Path.home() / ".rosetta"
 BIN_DIR = INSTALL_DIR / "bin"
 ROSETTA_PYZ = BIN_DIR / "rosetta.pyz"
-CONFIG_FILE = Path.cwd() / "dbms_config.json"
+CONFIG_FILE = Path.cwd() / "rosetta_config.json"
 
 
 class Colors:

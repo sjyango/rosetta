@@ -6,7 +6,7 @@ import socket
 import subprocess
 import time
 import traceback
-from typing import List
+from typing import List, Optional
 
 from .models import DBMSConfig, Statement, StmtResult, StmtType
 
@@ -39,12 +39,20 @@ def format_cell(value) -> str:
 
 
 def format_result(stmt: Statement, result: StmtResult,
-                  dbms_config: DBMSConfig) -> List[str]:
+                  rosetta_config: DBMSConfig) -> List[str]:
     """Format a statement result into lines matching MTR .result style."""
     output: List[str] = []
 
     if stmt.stmt_type == StmtType.ECHO:
         output.append(stmt.text)
+        return output
+
+    if stmt.stmt_type == StmtType.DDL_WAIT:
+        output.append(f"[L{stmt.line_no}] --wait_ddl_recovery(table={stmt.ddl_wait_table or '*'})")
+        if result.error:
+            output.append(f"ERROR (unexpected): {result.error}")
+        else:
+            output.append("DDL recovery done")
         return output
 
     # Prefix the first line of the SQL with the source line number so that
@@ -108,6 +116,7 @@ class DBConnection:
             port=self.config.port,
             user=self.config.user,
             password=self.config.password,
+            charset="utf8mb4",
             connect_timeout=10,  # Connection timeout in seconds
             read_timeout=max(60, qt * 2) if qt > 0 else 60,
         )
@@ -257,6 +266,99 @@ class DBConnection:
 
         return result
 
+    def wait_ddl_recovery(self, table_name: Optional[str] = None,
+                          timeout: int = 120,
+                          poll_interval: float = 1.0) -> StmtResult:
+        """Wait until all DDL recovery jobs are done for a table.
+
+        Polls ``information_schema.ddl_jobs`` until no active (non-history)
+        DDL jobs remain for the specified table (or any table if
+        *table_name* is ``None``).
+
+        Also checks that no ghost tables (``#sql%``) remain, which
+        indicates DDL copy/cleanup is fully complete.
+
+        Args:
+            table_name: Table to check DDL jobs for. None = any table.
+            timeout: Maximum seconds to wait. Default 120.
+            poll_interval: Seconds between polls. Default 1.0.
+
+        Returns:
+            StmtResult with error set if timed out, else success.
+        """
+        result = StmtResult(stmt=Statement(StmtType.DDL_WAIT, "", 0))
+        start = time.time()
+
+        while True:
+            elapsed = time.time() - start
+            if elapsed >= timeout:
+                result.error = (
+                    f"DDL recovery wait timed out after {timeout}s "
+                    f"for table '{table_name or '*'}'"
+                )
+                log.warning("[%s] DDL wait timed out for table '%s'",
+                            self.config.name, table_name or "*")
+                return result
+
+            try:
+                # Check 1: no active DDL jobs for this table
+                if table_name:
+                    ddl_sql = (
+                        "SELECT COUNT(*) FROM information_schema.ddl_jobs "
+                        f"WHERE table_name = '{table_name}' "
+                        "AND is_history = 0"
+                    )
+                else:
+                    ddl_sql = (
+                        "SELECT COUNT(*) FROM information_schema.ddl_jobs "
+                        "WHERE is_history = 0"
+                    )
+                self.cursor.execute(ddl_sql)
+                row = self.cursor.fetchone()
+                ddl_count = row[0] if row else 0
+
+                if ddl_count > 0:
+                    time.sleep(poll_interval)
+                    continue
+
+                # Check 2: no ghost tables (#sql%) remaining
+                ghost_sql = (
+                    "SELECT COUNT(*) FROM information_schema.TABLES "
+                    f"WHERE TABLE_SCHEMA = DATABASE() "
+                    "AND TABLE_NAME LIKE '#sql%'"
+                )
+                self.cursor.execute(ghost_sql)
+                row = self.cursor.fetchone()
+                ghost_count = row[0] if row else 0
+
+                if ghost_count > 0:
+                    time.sleep(poll_interval)
+                    continue
+
+                # Both checks passed — DDL recovery is done
+                log.info("[%s] DDL recovery done for table '%s' "
+                         "(waited %.1fs)",
+                         self.config.name, table_name or "*", elapsed)
+                return result
+
+            except Exception as e:
+                if self._is_connection_lost(e):
+                    log.warning("[%s] Connection lost during DDL wait, "
+                                "reconnecting...", self.config.name)
+                    if self.reconnect():
+                        try:
+                            self.cursor.execute(f"USE `{self.database}`")
+                        except Exception:
+                            pass
+                    time.sleep(poll_interval)
+                    continue
+                # Non-connection error — the DBMS might not support
+                # information_schema.ddl_jobs (e.g., vanilla MySQL).
+                # Log and treat as done.
+                log.debug("[%s] DDL jobs query not supported: %s",
+                          self.config.name, e)
+                return result
+
 
 def check_port(host: str, port: int, timeout: float = 3.0) -> bool:
     """Check if a TCP port is reachable."""
@@ -368,6 +470,21 @@ def run_on_dbms(config: DBMSConfig, statements: List[Statement],
             if stmt.stmt_type == StmtType.SKIP:
                 if on_progress:
                     on_progress(error=False)
+                continue
+
+            if stmt.stmt_type == StmtType.DDL_WAIT:
+                wait_result = db.wait_ddl_recovery(
+                    table_name=stmt.ddl_wait_table)
+                wait_result.stmt = stmt
+                output_lines.extend(format_result(stmt, wait_result, config))
+                executed += 1
+                has_error = bool(wait_result.error)
+                if has_error:
+                    errors += 1
+                    log.warning("[%s] DDL wait error: %s",
+                                name, wait_result.error)
+                if on_progress:
+                    on_progress(error=has_error)
                 continue
 
             if should_skip_fn and should_skip_fn(stmt):

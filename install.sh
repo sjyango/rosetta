@@ -189,10 +189,10 @@ if [[ ":$PATH:" != *":$ROSETTA_BIN:"* ]]; then
 fi
 
 # Create sample config if not exists
-SAMPLE_CONFIG="$INSTALL_DIR/dbms_config.json"
+SAMPLE_CONFIG="$INSTALL_DIR/rosetta_config.json"
 if [[ ! -f "$SAMPLE_CONFIG" ]]; then
-    cp "$INSTALL_DIR/dbms_config.sample.json" "$SAMPLE_CONFIG"
-    echo -e "${GREEN}✓ Created sample dbms_config.json${NC}"
+    cp "$INSTALL_DIR/rosetta_config.sample.json" "$SAMPLE_CONFIG"
+    echo -e "${GREEN}✓ Created sample rosetta_config.json${NC}"
 fi
 
 # Success message
@@ -231,7 +231,7 @@ echo -e "  ${BLUE}pipx install rosetta-sql${NC}         # install"
 echo -e "  ${BLUE}pipx uninstall rosetta-sql${NC}       # uninstall"
 echo ""
 echo -e "${YELLOW}Next steps:${NC}"
-echo -e "  1. ${BLUE}rosetta config init${NC}  (generate sample dbms_config.json)"
+echo -e "  1. ${BLUE}rosetta config init${NC}  (generate sample rosetta_config.json)"
 echo -e "  2. ${BLUE}rosetta --help${NC}  (show available commands)"
 echo ""
 echo -e "${YELLOW}Quick start:${NC}"

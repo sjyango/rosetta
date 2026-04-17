@@ -1,0 +1,277 @@
+{
+  "name": "rosetta-sql",
+  "displayName": "Rosetta SQL",
+  "description": "Cross-DBMS SQL testing & benchmarking toolkit — run MTR tests, benchmarks, and SQL playground directly in VS Code.",
+  "version": "0.1.0",
+  "publisher": "rosetta",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Testing",
+    "Other"
+  ],
+  "keywords": [
+    "sql",
+    "database",
+    "mysql",
+    "tdsql",
+    "tidb",
+    "oceanbase",
+    "testing",
+    "benchmark",
+    "mtr"
+  ],
+  "activationEvents": [
+    "workspaceContains:**/rosetta_config.json",
+    "onLanguage:sql",
+    "onView:rosetta.dbmsView"
+  ],
+  "main": "./dist/extension.js",
+  "icon": "resources/icon.png",
+  "contributes": {
+    "commands": [
+      {
+        "command": "rosetta.refreshStatus",
+        "title": "Refresh DBMS Status",
+        "category": "Rosetta",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "rosetta.runTest",
+        "title": "Run MTR Test",
+        "category": "Rosetta",
+        "icon": "$(play)"
+      },
+      {
+        "command": "rosetta.runBenchmark",
+        "title": "Run Benchmark",
+        "category": "Rosetta",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "rosetta.executeSQL",
+        "title": "Execute SQL on All DBMS",
+        "category": "Rosetta",
+        "icon": "$(run-all)"
+      },
+      {
+        "command": "rosetta.openPlayground",
+        "title": "Open SQL Playground",
+        "category": "Rosetta",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "rosetta.viewHistory",
+        "title": "Refresh History",
+        "category": "Rosetta",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "rosetta.showReport",
+        "title": "Show Report",
+        "category": "Rosetta",
+        "icon": "$(open-preview)"
+      },
+      {
+        "command": "rosetta.showReportFile",
+        "title": "Show Report (File)",
+        "category": "Rosetta"
+      },
+      {
+        "command": "rosetta.installCLI",
+        "title": "Install Rosetta CLI",
+        "category": "Rosetta"
+      },
+      {
+        "command": "rosetta.startServer",
+        "title": "Start Rosetta Server",
+        "category": "Rosetta"
+      },
+      {
+        "command": "rosetta.stopServer",
+        "title": "Stop Rosetta Server",
+        "category": "Rosetta"
+      },
+      {
+        "command": "rosetta.changeConfig",
+        "title": "Change Config File",
+        "category": "Rosetta",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "rosetta.deleteHistoryItem",
+        "title": "Delete Run",
+        "category": "Rosetta",
+        "icon": "$(trash)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "rosetta",
+          "title": "Rosetta",
+          "icon": "resources/rosetta.svg"
+        }
+      ]
+    },
+    "views": {
+      "rosetta": [
+        {
+          "id": "rosetta.dbmsView",
+          "name": "DBMS Connections"
+        },
+        {
+          "id": "rosetta.historyView",
+          "name": "Run History"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "rosetta.dbmsView",
+        "contents": "No Rosetta configuration found.\n[Create Config](command:rosetta.installCLI)\nRun `rosetta config init` to create a rosetta_config.json file."
+      },
+      {
+        "view": "rosetta.historyView",
+        "contents": "No run history found.\nRun an [MTR test](command:rosetta.runTest) or [benchmark](command:rosetta.runBenchmark) to get started."
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "rosetta.refreshStatus",
+          "when": "view == rosetta.dbmsView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "rosetta.runTest",
+          "when": "view == rosetta.dbmsView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "rosetta.runBenchmark",
+          "when": "view == rosetta.dbmsView",
+          "group": "navigation@3"
+        },
+        {
+          "command": "rosetta.openPlayground",
+          "when": "view == rosetta.dbmsView",
+          "group": "navigation@4"
+        },
+        {
+          "command": "rosetta.changeConfig",
+          "when": "view == rosetta.dbmsView",
+          "group": "2_config"
+        },
+        {
+          "command": "rosetta.viewHistory",
+          "when": "view == rosetta.historyView",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "rosetta.deleteHistoryItem",
+          "when": "viewItem == historyItem",
+          "group": "inline"
+        },
+        {
+          "command": "rosetta.deleteHistoryItem",
+          "when": "viewItem == historyItem",
+          "group": "context"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "rosetta.runTest",
+          "when": "resourceExtname == .test",
+          "group": "rosetta@1"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "rosetta.runTest",
+          "when": "resourceExtname == .test",
+          "group": "rosetta@1"
+        },
+        {
+          "command": "rosetta.runBenchmark",
+          "when": "resourceExtname == .json || resourceExtname == .sql",
+          "group": "rosetta@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Rosetta SQL",
+      "properties": {
+        "rosetta.pythonPath": {
+          "type": "string",
+          "default": "python3",
+          "description": "Path to Python interpreter (used for pip install)."
+        },
+        "rosetta.executable": {
+          "type": "string",
+          "default": "",
+          "description": "Path to rosetta executable. Leave empty for auto-detection."
+        },
+        "rosetta.configPath": {
+          "type": "string",
+          "default": "rosetta_config.json",
+          "description": "Path to DBMS configuration file (relative to workspace)."
+        },
+        "rosetta.autoServe": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the Rosetta HTTP server on activation."
+        },
+        "rosetta.serverPort": {
+          "type": "number",
+          "default": 0,
+          "description": "HTTP server port (0 = random available port)."
+        },
+        "rosetta.defaultDatabase": {
+          "type": "string",
+          "default": "cross_dbms_test_db",
+          "description": "Default database name for test execution."
+        },
+        "rosetta.defaultDbms": {
+          "type": "string",
+          "default": "",
+          "description": "Default DBMS targets (comma-separated). Empty = all reachable."
+        }
+      }
+    },
+    "languages": [
+      {
+        "id": "mtr-test",
+        "aliases": [
+          "MTR Test"
+        ],
+        "extensions": [
+          ".test"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "webpack",
+    "watch": "webpack --watch",
+    "package": "webpack --mode production --devtool hidden-source-map",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "eslint": "^8.56.0",
+    "ts-loader": "^9.5.0",
+    "typescript": "^5.3.0",
+    "webpack": "^5.90.0",
+    "webpack-cli": "^5.1.0"
+  }
+}

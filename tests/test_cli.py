@@ -69,7 +69,7 @@ def tmp_dir():
 
 @pytest.fixture()
 def sample_config(tmp_dir):
-    """Write a minimal dbms_config.json and return its path."""
+    """Write a minimal rosetta_config.json and return its path."""
     cfg = {
         "databases": [
             {
@@ -92,7 +92,7 @@ def sample_config(tmp_dir):
             },
         ]
     }
-    path = os.path.join(tmp_dir, "dbms_config.json")
+    path = os.path.join(tmp_dir, "rosetta_config.json")
     with open(path, "w") as f:
         json.dump(cfg, f)
     return path

@@ -65,17 +65,13 @@ _NORMALIZE_PATTERNS = [
     (re.compile(r"\s*AUTO_INCREMENT\s*=\s*\d+", re.IGNORECASE), ""),
     (re.compile(r"\s*ROW_FORMAT\s*=\s*\w+", re.IGNORECASE), ""),
     (re.compile(r"\s*STATS_PERSISTENT\s*=\s*\d+", re.IGNORECASE), ""),
-    (re.compile(r"\s*,?\s*ALGORITHM\s*=\s*\w+", re.IGNORECASE), ""),
-    (re.compile(r"\s*,?\s*LOCK\s*=\s*\w+", re.IGNORECASE), ""),
-    (re.compile(r"\s*CHARACTER SET \w+", re.IGNORECASE), ""),
-    (re.compile(r"\s*COLLATE \w+", re.IGNORECASE), ""),
 ]
 
 # SQL patterns to skip entirely (truly non-functional across all DBMS)
 # NOTE: DBMS-specific SET statements (e.g. SET tdsql_*) should NOT be skipped
 # here — they are valid SQL that affects behavior on specific DBMS.  They are
 # handled by the executor's skip_patterns mechanism instead (configured per DBMS
-# in dbms_config.json).
+# in rosetta_config.json).
 _SKIP_SQL_PATTERNS = [
     re.compile(r"^\s*SET\s+(default_)?storage_engine\s*=", re.IGNORECASE),
     re.compile(r"^\s*SET\s+max_parallel_degree\s*=", re.IGNORECASE),

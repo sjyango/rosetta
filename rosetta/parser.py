@@ -6,6 +6,12 @@ import re
 from typing import List, Optional
 
 from .models import Statement, StmtType
+
+# Source includes that should be replaced with special statement types
+# rather than recursively expanded.
+_SPECIAL_SOURCES = {
+    "wait_until_ddl_recovery_done": StmtType.DDL_WAIT,
+}
 from .result_parser import ResultFileParser
 
 log = logging.getLogger("rosetta")
@@ -55,10 +61,6 @@ class TestFileParser:
         (re.compile(r"\s*STATS_PERSISTENT\s*=\s*\d+", re.IGNORECASE), ""),
         # Remove COMMENT=<string> on table level
         (re.compile(r"\s*COMMENT\s*=?\s*'[^']*'", re.IGNORECASE), ""),
-        # Remove ALGORITHM=<name> from ALTER TABLE (constant values only)
-        (re.compile(r"\s*,?\s*ALGORITHM\s*=\s*\w+", re.IGNORECASE), ""),
-        # Remove LOCK=<name> from ALTER TABLE (constant values only)
-        (re.compile(r"\s*,?\s*LOCK\s*=\s*\w+", re.IGNORECASE), ""),
     ]
 
     # SQL patterns that contain MTR variables — these cannot be resolved from
@@ -81,6 +83,7 @@ class TestFileParser:
             else:
                 self.mysql_test_dir = None
         self._included: set = set()
+        self._mtr_vars: dict = {}  # Track MTR variables ($ddl_wait_table, etc.)
 
     def _resolve_source_path(self, arg: str) -> Optional[str]:
         """Resolve a --source argument to an absolute file path."""
@@ -275,15 +278,16 @@ class TestFileParser:
 
         return None
 
-    def parse(self, prefer_result: bool = True) -> List[Statement]:
+    def parse(self, prefer_result: bool = False) -> List[Statement]:
         """Parse the test file and return list of statements.
 
-        If *prefer_result* is True (default), and a corresponding .result
-        file exists, the .result file is parsed instead.  This provides
-        SQL with all MTR variables expanded and if/while branches resolved,
-        which is much more reliable for cross-DBMS execution.
+        If *prefer_result* is True and a corresponding .result file exists,
+        the .result file is parsed instead.  This provides SQL with all MTR
+        variables expanded and if/while branches resolved.
 
-        Falls back to .test parsing if no .result file is found.
+        By default (prefer_result=False), the .test file is parsed directly
+        so that the latest user edits are always reflected without needing
+        to ``--record`` the .result file first.
         """
         if prefer_result:
             result_path = self.find_result_file(self.filepath)
@@ -311,6 +315,7 @@ class TestFileParser:
         parser._delimiter = ";"
         parser.mysql_test_dir = None
         parser._included = set()
+        parser._mtr_vars = {}
         lines = [ln + "\n" for ln in text.splitlines()]
         parser._parse_lines(lines)
         return [s for s in parser.statements if s.stmt_type == StmtType.SQL]
@@ -370,10 +375,26 @@ class TestFileParser:
                     continue
 
                 if directive == "source":
-                    inc_path = self._resolve_source_path(arg)
-                    if inc_path:
-                        log.info("Including source: %s", arg)
-                        self._parse_file(inc_path)
+                    # Check if this is a special source that should be
+                    # replaced with a built-in action instead of expanded.
+                    source_basename = os.path.splitext(
+                        os.path.basename(arg))[0]
+                    special_type = _SPECIAL_SOURCES.get(source_basename)
+                    if special_type:
+                        ddl_table = self._mtr_vars.get("ddl_wait_table")
+                        self.statements.append(Statement(
+                            stmt_type=special_type,
+                            text=f"--source {arg}",
+                            line_no=line_no,
+                            ddl_wait_table=ddl_table,
+                        ))
+                        log.info("Special source: %s -> %s (table=%s)",
+                                 arg, special_type.name, ddl_table)
+                    else:
+                        inc_path = self._resolve_source_path(arg)
+                        if inc_path:
+                            log.info("Including source: %s", arg)
+                            self._parse_file(inc_path)
                     continue
 
                 if directive == "delimiter":
@@ -425,6 +446,14 @@ class TestFileParser:
                     continue
 
                 if directive in SKIP_DIRECTIVES:
+                    # Track --let variables that are needed by special sources
+                    if directive == "let":
+                        m_var = re.match(
+                            r"\$(\w+)\s*=\s*(.+)", arg, re.IGNORECASE)
+                        if m_var:
+                            var_name = m_var.group(1).lower()
+                            var_value = m_var.group(2).strip().strip("'\"")
+                            self._mtr_vars[var_name] = var_value
                     if directive in ("if", "while"):
                         idx, inner_lines = self._collect_brace_block(
                             lines, idx, stripped)
@@ -469,6 +498,43 @@ class TestFileParser:
                     if inner_lines:
                         self._parse_lines(
                             [ln + "\n" for ln in inner_lines])
+                elif first_word == "let":
+                    # Track let variables for special source directives
+                    rest = stripped[len("let"):].strip()
+                    m_var = re.match(
+                        r"\$(\w+)\s*=\s*(.+)", rest, re.IGNORECASE)
+                    if m_var:
+                        var_name = m_var.group(1).lower()
+                        var_value = m_var.group(2).strip().strip("'\"")
+                        self._mtr_vars[var_name] = var_value
+                    # Consume remaining lines if multi-line
+                    clean = self._strip_line_comment(stripped)
+                    while (not self._ends_with_delimiter(clean)
+                           and idx < len(lines)):
+                        stripped = lines[idx].rstrip("\n\r").strip()
+                        idx += 1
+                        clean = self._strip_line_comment(stripped)
+                elif first_word == "source":
+                    # Handle bare 'source' without '--' prefix
+                    rest = stripped[len("source"):].strip()
+                    source_basename = os.path.splitext(
+                        os.path.basename(rest))[0]
+                    special_type = _SPECIAL_SOURCES.get(source_basename)
+                    if special_type:
+                        ddl_table = self._mtr_vars.get("ddl_wait_table")
+                        self.statements.append(Statement(
+                            stmt_type=special_type,
+                            text=f"source {rest}",
+                            line_no=line_no,
+                            ddl_wait_table=ddl_table,
+                        ))
+                        log.info("Special source: %s -> %s (table=%s)",
+                                 rest, special_type.name, ddl_table)
+                    else:
+                        inc_path = self._resolve_source_path(rest)
+                        if inc_path:
+                            log.info("Including source: %s", rest)
+                            self._parse_file(inc_path)
                 elif first_word == "eval":
                     # eval means "execute the following SQL"
                     # Collect the full eval statement (may span lines)

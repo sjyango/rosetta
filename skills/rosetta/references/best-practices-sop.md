@@ -69,7 +69,7 @@
 ```
 好的，我来为您创建数据库配置文件。
 
-已生成配置文件：dbms_config.json
+已生成配置文件：rosetta_config.json
 ```json
 {
   "tdsql": {
@@ -83,7 +83,7 @@
 }
 ```
 
-配置文件已保存到：./dbms_config.json
+配置文件已保存到：./rosetta_config.json
 
 现在可以测试连接：
 ```bash
@@ -113,7 +113,7 @@ python scripts/rosetta_wrapper.py --check-connection
 ```
 正在检查数据库连接状态...
 
-使用配置文件：dbms_config.json
+使用配置文件：rosetta_config.json
 
 检查结果：
 ✓ tdsql (192.168.1.100:3306)
@@ -141,17 +141,17 @@ python scripts/rosetta_wrapper.py --check-connection
 **AI 响应：**
 ```
 检测到多个配置文件：
-- ./configs/test_dbms_config.json
-- ./configs/prod_dbms_config.json
+- ./configs/test_rosetta_config.json
+- ./configs/prod_rosetta_config.json
 
 正在检查所有数据库连接...
 
-[测试环境] test_dbms_config.json:
+[测试环境] test_rosetta_config.json:
 ✓ mysql-test (192.168.1.100:3306) - 连接成功 (15ms)
 ✓ tidb-test (192.168.1.101:4000) - 连接成功 (23ms)
 ✓ oceanbase-test (192.168.1.102:2881) - 连接成功 (31ms)
 
-[生产环境] prod_dbms_config.json:
+[生产环境] prod_rosetta_config.json:
 ✓ mysql-prod (192.168.2.100:3306) - 连接成功 (18ms)
 ✓ tidb-prod (192.168.2.101:4000) - 连接成功 (25ms)
 ✗ oceanbase-prod (192.168.2.102:2881) - 连接失败

@@ -142,7 +142,7 @@ graph TD
 rosetta config init
 
 # 2. 编辑数据库连接信息
-vim dbms_config.json
+vim rosetta_config.json
 
 # 3. 检查数据库连接
 rosetta status
@@ -159,7 +159,7 @@ rosetta bench --dbms mysql,tdsql --file bench.json
 
 ## Configuration
 
-### 数据库配置文件（dbms_config.json）
+### 数据库配置文件（rosetta_config.json）
 
 配置文件示例：
 
@@ -225,7 +225,7 @@ rosetta bench --dbms mysql,tdsql --file bench.json
 
 `examples/` 目录提供了以下示例文件：
 
-- `dbms_config.example.json`：数据库配置示例
+- `rosetta_config.example.json`：数据库配置示例
 - `bench.example.json`：基准测试配置示例
 
 ## Global Options
@@ -235,7 +235,7 @@ rosetta bench --dbms mysql,tdsql --file bench.json
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `-j / --json` | `False` | JSON 输出（AI Agent 友好） |
-| `-c / --config` | `dbms_config.json` | 数据库配置文件路径 |
+| `-c / --config` | `rosetta_config.json` | 数据库配置文件路径 |
 | `-v / --verbose` | `False` | 启用详细/调试日志 |
 
 ## Requirements

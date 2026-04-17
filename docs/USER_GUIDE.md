@@ -32,10 +32,10 @@ Rosetta 用于在多个数据库（MySQL、TDSQL、TiDB、OceanBase 等）上执
 pip install pymysql rich
 
 # 2. 生成配置文件
-python3 rosetta.pyz --gen-config dbms_config.json
+python3 rosetta.pyz --gen-config rosetta_config.json
 
 # 3. 编辑配置，填入你的数据库连接信息
-vim dbms_config.json
+vim rosetta_config.json
 
 # 4. 运行测试
 python3 rosetta.pyz --test path/to/your_test.test --dbms tdsql,mysql
@@ -85,12 +85,12 @@ rosetta --help
 
 ## 配置文件
 
-Rosetta 通过 JSON 配置文件管理数据库连接。默认读取当前目录下的 `dbms_config.json`。
+Rosetta 通过 JSON 配置文件管理数据库连接。默认读取当前目录下的 `rosetta_config.json`。
 
 ### 生成示例配置
 
 ```bash
-python3 rosetta.pyz --gen-config dbms_config.json
+python3 rosetta.pyz --gen-config rosetta_config.json
 ```
 
 ### 配置格式
@@ -244,7 +244,7 @@ python3 rosetta.pyz --test my_test.test --parse-only
 ### 启动交互模式
 
 ```bash
-python3 rosetta.pyz --interactive --config dbms_config.json --dbms tdsql,mysql --serve
+python3 rosetta.pyz --interactive --config rosetta_config.json --dbms tdsql,mysql --serve
 ```
 
 启动后会显示 `rosetta ▶` 提示符，输入 `.test` 文件路径即可执行测试。
@@ -362,7 +362,7 @@ Bug 标记是**仅供参考的标注**——标记的 diff 仍计入失败率，
 | 参数 | 短写 | 默认值 | 说明 |
 |---|---|---|---|
 | `--test` | `-t` | （必填） | .test 测试文件路径 |
-| `--config` | `-c` | `dbms_config.json` | 数据库配置文件路径 |
+| `--config` | `-c` | `rosetta_config.json` | 数据库配置文件路径 |
 | `--dbms` | | 按 enabled 字段 | 要测试的数据库，逗号分隔 |
 | `--baseline` | `-b` | `tdsql` | 基准数据库 |
 | `--output-dir` | `-o` | `results` | 输出目录 |
@@ -462,7 +462,7 @@ rm -rf /tmp/rosetta_build
 | 文件 | 说明 |
 |---|---|
 | `rosetta.pyz` | 工具本体（必需） |
-| `dbms_config.json` | 数据库配置（可通过 `--gen-config` 生成） |
+| `rosetta_config.json` | 数据库配置（可通过 `--gen-config` 生成） |
 | `.test` 文件 | 测试用例 |
 
 使用者收到后只需：
@@ -472,10 +472,10 @@ rm -rf /tmp/rosetta_build
 pip install pymysql "rich>=13.0"
 
 # 2. 生成配置（如果没有现成的）
-python3 rosetta.pyz --gen-config dbms_config.json
+python3 rosetta.pyz --gen-config rosetta_config.json
 
 # 3. 编辑配置中的数据库连接信息
-vim dbms_config.json
+vim rosetta_config.json
 
 # 4. 运行测试
 python3 rosetta.pyz --test your_test.test --dbms tdsql,mysql

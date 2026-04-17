@@ -244,6 +244,8 @@ def print_summary(comparisons: Dict[str, CompareResult],
     has_wl = any(cmp.whitelisted > 0 for cmp in comparisons.values())
     # Detect whether any comparison has bug-marked diffs
     has_bug = any(cmp.bug_marked > 0 for cmp in comparisons.values())
+    # Detect whether any comparison has auto sql-whitelisted diffs
+    has_sql_wl = any(cmp.sql_whitelisted > 0 for cmp in comparisons.values())
 
     table = Table(
         header_style="bold",
@@ -259,6 +261,8 @@ def print_summary(comparisons: Dict[str, CompareResult],
     table.add_column("Mismatch", justify="right")
     if has_wl:
         table.add_column("Whitelist", justify="right")
+    if has_sql_wl:
+        table.add_column("SQL-WL", justify="right")
     if has_bug:
         table.add_column("Bug", justify="right")
     table.add_column("Skip", justify="right", style="dim")
@@ -270,6 +274,8 @@ def print_summary(comparisons: Dict[str, CompareResult],
             cols = [name, "[yellow]SKIP[/yellow]",
                     "-", "-"]
             if has_wl:
+                cols.append("-")
+            if has_sql_wl:
                 cols.append("-")
             if has_bug:
                 cols.append("-")
@@ -307,6 +313,11 @@ def print_summary(comparisons: Dict[str, CompareResult],
                        if cmp.whitelisted > 0
                        else Text("0", style="dim"))
             cols.append(wl_text)
+        if has_sql_wl:
+            sql_wl_text = (Text(str(cmp.sql_whitelisted), style="yellow")
+                           if cmp.sql_whitelisted > 0
+                           else Text("0", style="dim"))
+            cols.append(sql_wl_text)
         if has_bug:
             bug_text = (Text(str(cmp.bug_marked), style="red")
                         if cmp.bug_marked > 0

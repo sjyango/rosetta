@@ -30,7 +30,7 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--config", "-c",
         default=None,
-        help="Path to DBMS config JSON (default: dbms_config.json)",
+        help="Path to DBMS config JSON (default: rosetta_config.json)",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -634,7 +634,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args.verbose = args.verbose or pre_args.verbose
     args.version = args.version or pre_args.version
     if args.config is None:
-        args.config = pre_args.config if pre_args.config is not None else "dbms_config.json"
+        args.config = pre_args.config if pre_args.config is not None else "rosetta_config.json"
 
     # Derive output format from -j/--json flag
     fmt = "json" if args.json else "human"

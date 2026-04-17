@@ -32,6 +32,7 @@ def _build_summary_data(comparisons: Dict[str, CompareResult]) -> List[dict]:
             "matched": cmp.matched,
             "mismatched": cmp.mismatched,
             "whitelisted": cmp.whitelisted,
+            "sql_whitelisted": cmp.sql_whitelisted,
             "bug_marked": cmp.bug_marked,
             "skipped": cmp.skipped,
             "total": cmp.total_stmts,
@@ -57,6 +58,9 @@ def _build_diff_data(comparisons: Dict[str, CompareResult]) -> List[dict]:
                 "context_after": d.get("context_after", []),
                 "fingerprint": d.get("fingerprint", ""),
                 "whitelisted": d.get("whitelisted", False),
+                "sql_whitelisted": d.get("sql_whitelisted", False),
+                "skipped": d.get("skipped", False),
+                "skip_reason": d.get("skip_reason", ""),
                 "bug_marked": d.get("bug_marked", False),
             })
         sections.append({
@@ -139,23 +143,46 @@ tr:hover { background: var(--bg3); }
 .num-mismatch { color: var(--red); font-weight: 600; }
 .num-match { color: var(--green); }
 .num-wl { color: var(--orange); }
+.num-sql-wl { color: #e6a817; }
 .num-bug { color: var(--red); }
 
 /* Filter bar */
-.filter-bar { display: flex; gap: 12px; align-items: center;
-  margin-bottom: 16px; flex-wrap: wrap; }
-.filter-bar input { background: var(--bg2); border: 1px solid var(--border);
-  border-radius: 6px; padding: 6px 12px; color: var(--fg); font-size: 14px;
-  width: 300px; outline: none; }
+.filter-bar { display: flex; gap: 8px; align-items: center;
+  margin-bottom: 16px; flex-wrap: wrap; padding: 10px 16px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; }
+.filter-bar input { background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 12px; color: var(--fg); font-size: 13px;
+  width: 260px; outline: none; transition: border-color 0.15s; }
 .filter-bar input:focus { border-color: var(--accent); }
-.filter-bar select { background: var(--bg2); border: 1px solid var(--border);
-  border-radius: 6px; padding: 6px 12px; color: var(--fg); font-size: 14px;
-  outline: none; }
+.filter-btn { display: inline-flex; align-items: center; gap: 4px;
+  background: none; border: 1px solid transparent; border-radius: 6px;
+  padding: 4px 10px; cursor: pointer; font-size: 13px; font-weight: 600;
+  transition: all 0.15s; color: var(--fg2); }
+.filter-btn:hover { background: var(--bg3); border-color: var(--border); }
+.filter-btn.active { background: var(--bg3); border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent); color: var(--fg); }
+.filter-btn-all { color: var(--fg2); }
+.filter-btn-all.active { background: var(--bg3); border-color: var(--fg2); box-shadow: none; }
+.filter-btn-diff { color: var(--red); }
+.filter-btn-diff.active { background: var(--red-bg); border-color: var(--red); box-shadow: none; }
+.filter-btn-wl { color: var(--orange); }
+.filter-btn-wl.active { background: var(--orange-bg); border-color: var(--orange); box-shadow: none; }
+.filter-btn-sqlwl { color: #e6a817; }
+.filter-btn-sqlwl.active { background: #2d2009; border-color: #e6a817; box-shadow: none; }
+.filter-btn-bug { color: var(--red); }
+.filter-btn-bug.active { background: var(--red-bg); border-color: var(--red); box-shadow: none; }
+.filter-btn-skip { color: var(--fg2); }
+.filter-btn-skip.active { background: var(--bg3); border-color: var(--fg2); box-shadow: none; }
+.filter-btn-unmarked { color: var(--blue); }
+.filter-btn-unmarked.active { background: rgba(31,111,235,0.12); border-color: var(--accent); box-shadow: none; }
+.filter-sep { width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
 
 /* Diff sections */
 .diff-section { background: var(--bg2); border: 1px solid var(--border);
   border-radius: 8px; margin-bottom: 16px; overflow: hidden; }
 .diff-section.whitelisted { opacity: 0.55; }
+.diff-section.sql-whitelisted { opacity: 0.65; }
+.diff-section.skipped-block { opacity: 0.5; border-left: none; }
 .diff-section.bug-marked { border-left: 3px solid var(--red); }
 .diff-header { padding: 12px 16px; cursor: pointer; display: flex;
   align-items: center; gap: 12px; user-select: none; }
@@ -304,7 +331,7 @@ tr:hover { background: var(--bg3); }
       <thead>
         <tr>
           <th>Comparison</th><th>Status</th><th>Match</th><th>Mismatch</th>
-          <th>Whitelist</th><th>Bug</th><th>Skip</th><th>Total</th><th>Pass Rate</th>
+          <th>Whitelist</th><th>SQL-WL</th><th>Bug</th><th>Skip</th><th>Total</th><th>Pass Rate</th>
         </tr>
       </thead>
       <tbody id="summary-body"></tbody>
@@ -313,15 +340,16 @@ tr:hover { background: var(--bg3); }
 
   <div id="diff-container">
     <div class="comp-tabs" id="comp-tabs"></div>
-    <div class="filter-bar">
-      <input type="text" id="search-input" placeholder="Search SQL statements...">
-      <select id="wl-filter">
-        <option value="all">All diffs</option>
-        <option value="active" selected>Non-whitelisted only</option>
-        <option value="whitelisted">Whitelisted only</option>
-        <option value="bug">Bug-marked only</option>
-        <option value="unmarked">Unmarked only</option>
-      </select>
+    <div class="filter-bar" id="filter-bar">
+      <button class="filter-btn filter-btn-all active" data-filter="all">All</button>
+      <button class="filter-btn filter-btn-diff" data-filter="active">Diff</button>
+      <button class="filter-btn filter-btn-wl" data-filter="whitelisted">WL</button>
+      <button class="filter-btn filter-btn-sqlwl" data-filter="sql_whitelisted">SQL-WL</button>
+      <button class="filter-btn filter-btn-bug" data-filter="bug">Bug</button>
+      <button class="filter-btn filter-btn-skip" data-filter="skipped">Skip</button>
+      <button class="filter-btn filter-btn-unmarked" data-filter="unmarked">Unmarked</button>
+      <span class="filter-sep"></span>
+      <input type="text" id="search-input" placeholder="Search SQL...">
     </div>
     <div id="diff-list"></div>
   </div>
@@ -388,7 +416,7 @@ function callBuglistAPI(action, body) {
 // Render summary table
 const tbody = document.getElementById('summary-body');
 SUMMARY.forEach(r => {
-  const effectiveMismatch = r.mismatched - (r.whitelisted || 0);
+  const effectiveMismatch = r.mismatched - (r.whitelisted || 0) - (r.sql_whitelisted || 0) - (r.bug_marked || 0);
   const status = effectiveMismatch <= 0;
   const pct = r.pass_rate;
   const row = document.createElement('tr');
@@ -398,6 +426,7 @@ SUMMARY.forEach(r => {
     <td class="num-match">${r.matched}</td>
     <td class="${effectiveMismatch > 0 ? 'num-mismatch' : ''}">${effectiveMismatch > 0 ? effectiveMismatch : 0}</td>
     <td class="num-wl">${r.whitelisted || 0}</td>
+    <td class="num-sql-wl">${r.sql_whitelisted || 0}</td>
     <td class="num-bug">${r.bug_marked || 0}</td>
     <td>${r.skipped}</td>
     <td>${r.total}</td>
@@ -421,8 +450,10 @@ function renderTabs() {
     return;
   }
   DIFFS.forEach(sec => {
-    const active = sec.diffs.filter(d => !d.whitelisted).length;
+    const active = sec.diffs.filter(d => !d.whitelisted && !d.sql_whitelisted && !d.skipped).length;
     const wl = sec.diffs.filter(d => d.whitelisted).length;
+    const swl = sec.diffs.filter(d => d.sql_whitelisted).length;
+    const skips = sec.diffs.filter(d => d.skipped).length;
     const bugs = sec.diffs.filter(d => d.bug_marked).length;
     const tab = document.createElement('div');
     tab.className = 'comp-tab' + (sec.key === activeTab ? ' active' : '');
@@ -468,34 +499,67 @@ function renderDiffs() {
   const sec = DIFFS.find(s => s.key === activeTab);
   if (!sec) return;
   const query = document.getElementById('search-input').value.toLowerCase();
-  const wlFilter = document.getElementById('wl-filter').value;
+  const activeBtn = document.querySelector('#filter-bar .filter-btn.active');
+  const wlFilter = activeBtn ? activeBtn.getAttribute('data-filter') : 'all';
 
   const frag = document.createDocumentFragment();
   sec.diffs.forEach(d => {
     if (query && !d.stmt.toLowerCase().includes(query)) return;
-    if (wlFilter === 'active' && d.whitelisted) return;
+    if (wlFilter === 'active' && (d.whitelisted || d.sql_whitelisted || d.skipped)) return;
     if (wlFilter === 'whitelisted' && !d.whitelisted) return;
+    if (wlFilter === 'sql_whitelisted' && !d.sql_whitelisted) return;
+    if (wlFilter === 'skipped' && !d.skipped) return;
     if (wlFilter === 'bug' && !d.bug_marked) return;
-    if (wlFilter === 'unmarked' && (d.whitelisted || d.bug_marked)) return;
+    if (wlFilter === 'unmarked' && (d.whitelisted || d.sql_whitelisted || d.skipped || d.bug_marked)) return;
 
     const section = document.createElement('div');
     let sectionCls = 'diff-section';
     if (d.whitelisted) sectionCls += ' whitelisted';
+    if (d.sql_whitelisted) sectionCls += ' sql-whitelisted';
+    if (d.skipped) sectionCls += ' skipped-block';
     if (d.bug_marked) sectionCls += ' bug-marked';
     section.className = sectionCls;
 
     const header = document.createElement('div');
-    header.className = 'diff-header' + (d.whitelisted ? '' : ' open');
+    header.className = 'diff-header' + (d.whitelisted || d.sql_whitelisted || d.skipped ? '' : ' open');
     const wlTag = d.whitelisted ? '<span class="wl-badge">whitelisted</span>' : '';
+    const sqlWlTag = d.sql_whitelisted ? '<span class="wl-badge" style="background:#e6a817;color:#000">sql-wl</span>' : '';
+    const skipTag = d.skipped ? '<span class="wl-badge" style="background:#888;color:#fff">skipped</span>' : '';
     const bugTag = d.bug_marked ? '<span class="bug-badge">bug</span>' : '';
-    header.innerHTML = `<span class="arrow">&#9654;</span><span class="block-num">Block ${d.block}</span>${wlTag}${bugTag}<span class="sql-preview">${esc(d.stmt)}</span>`;
+    header.innerHTML = `<span class="arrow">&#9654;</span><span class="block-num">Block ${d.block}</span>${wlTag}${sqlWlTag}${skipTag}${bugTag}<span class="sql-preview">${esc(d.stmt)}</span>`;
 
     const body = document.createElement('div');
-    body.className = 'diff-body' + (d.whitelisted ? ' collapsed' : '');
+    body.className = 'diff-body' + (d.whitelisted || d.sql_whitelisted || d.skipped ? ' collapsed' : '');
 
     // Whitelist action bar
     const wlBar = document.createElement('div');
     wlBar.className = 'wl-bar';
+    if (d.skipped) {
+      // Skipped block: show reason and single-side output
+      const skipInfo = document.createElement('div');
+      skipInfo.style.cssText = 'padding: 8px 12px; color: #888; font-style: italic;';
+      const reason = d.skip_reason || 'Skipped (only exists on one side)';
+      skipInfo.textContent = '\u26A0 ' + reason;
+      body.appendChild(skipInfo);
+      // Show output from whichever side has it
+      if (d.lines_a && d.lines_a.length > 0) {
+        const pre = document.createElement('pre');
+        pre.className = 'diff-content';
+        pre.textContent = d.lines_a.join('\\n');
+        body.appendChild(pre);
+      }
+      if (d.lines_b && d.lines_b.length > 0) {
+        const pre = document.createElement('pre');
+        pre.className = 'diff-content';
+        pre.textContent = d.lines_b.join('\\n');
+        body.appendChild(pre);
+      }
+      body.appendChild(wlBar);
+      section.appendChild(header);
+      section.appendChild(body);
+      container.appendChild(section);
+      return;
+    }
     if (d.whitelisted) {
       const span = document.createElement('span');
       span.className = 'wl-status';
@@ -659,7 +723,13 @@ function removeFromBug(btn, fp) {
 }
 
 document.getElementById('search-input').addEventListener('input', renderDiffs);
-document.getElementById('wl-filter').addEventListener('change', renderDiffs);
+document.querySelectorAll('#filter-bar .filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#filter-bar .filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    renderDiffs();
+  });
+});
 
 // Sync whitelisted/bug_marked state from API on page load.
 // The static HTML embeds a snapshot; if the user later added/removed entries

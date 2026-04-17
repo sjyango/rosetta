@@ -37,7 +37,6 @@ def _handle_run_mtr(args, output: "OutputFormatter") -> CommandResult:
         CommandResult with test results
     """
     from ..config import load_config, filter_configs, DEFAULT_TEST_DB
-    from ..parser import TestFileParser
     from ..whitelist import Whitelist
     from ..buglist import Buglist
     from ..runner import RosettaRunner
@@ -74,21 +73,23 @@ def _handle_run_mtr(args, output: "OutputFormatter") -> CommandResult:
     # Parse-only mode
     if args.parse_only:
         try:
-            parser = TestFileParser(args.test)
-            prefer_result = getattr(args, 'result', False)
-            stmts = parser.parse(prefer_result=prefer_result)
+            from ..mtr import MtrParser
+            mtr_parser = MtrParser(args.test)
+            test = mtr_parser.parse()
+            cmd_types = set(c.cmd_type.name for c in test.commands)
             return CommandResult.success(
                 "mtr parse-only",
                 {
                     "test_file": args.test,
-                    "total_statements": len(stmts),
-                    "statements": [
+                    "total_commands": len(test.commands),
+                    "command_types": sorted(cmd_types),
+                    "commands": [
                         {
-                            "line_no": s.line_no,
-                            "type": s.stmt_type.name,
-                            "text": s.text[:200],
+                            "line_no": c.line_no,
+                            "type": c.cmd_type.name,
+                            "argument": (c.argument or "")[:200],
                         }
-                        for s in stmts[:50]  # Limit output
+                        for c in test.commands[:50]  # Limit output
                     ],
                 },
             )
@@ -169,6 +170,7 @@ def _handle_run_mtr(args, output: "OutputFormatter") -> CommandResult:
             "mismatched": cmp.mismatched,
             "effective_mismatched": cmp.effective_mismatched,
             "whitelisted": cmp.whitelisted,
+            "sql_whitelisted": cmp.sql_whitelisted,
             "bug_marked": cmp.bug_marked,
             "pass_rate": round(cmp.pass_rate, 2),
         }
