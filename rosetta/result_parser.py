@@ -71,7 +71,7 @@ _NORMALIZE_PATTERNS = [
 # NOTE: DBMS-specific SET statements (e.g. SET tdsql_*) should NOT be skipped
 # here — they are valid SQL that affects behavior on specific DBMS.  They are
 # handled by the executor's skip_patterns mechanism instead (configured per DBMS
-# in rosetta_config.json).
+# in ~/.rosetta/config.json).
 _SKIP_SQL_PATTERNS = [
     re.compile(r"^\s*SET\s+(default_)?storage_engine\s*=", re.IGNORECASE),
     re.compile(r"^\s*SET\s+max_parallel_degree\s*=", re.IGNORECASE),

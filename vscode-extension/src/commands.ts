@@ -4,6 +4,7 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as os from 'os';
 import * as fs from 'fs';
 import { RosettaCLI } from './rosettaCli';
 import { RosettaServer } from './rosettaServer';
@@ -250,7 +251,7 @@ export function registerCommands(
         }
 
         const configDir = path.dirname(cli.getConfigPath());
-        const playgroundPath = path.join(configDir, 'results', 'playground.html');
+        const playgroundPath = path.join(os.homedir(), '.rosetta', 'results', 'playground.html');
 
         if (!fs.existsSync(playgroundPath)) {
             vscode.window.showErrorMessage(`playground.html not found. Run a test first to generate it.`);

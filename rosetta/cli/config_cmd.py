@@ -208,7 +208,10 @@ def _handle_config_validate(args, output: "OutputFormatter") -> CommandResult:
 
 def _handle_config_init(args, output: "OutputFormatter") -> CommandResult:
     """
-    Generate sample configuration file.
+    Initialize ~/.rosetta directory and generate sample config.
+    
+    Creates the ~/.rosetta/ directory structure and generates a sample
+    config.json if it doesn't already exist.
     
     Args:
         args: Parsed arguments
@@ -218,14 +221,19 @@ def _handle_config_init(args, output: "OutputFormatter") -> CommandResult:
         CommandResult with generated config path
     """
     from ..config import generate_sample_config
+    from ..paths import CONFIG_FILE, ensure_home
     
     # Determine output path
-    output_path = args.output if args.output else "rosetta_config.json"
+    output_path = args.output if args.output else CONFIG_FILE
+    
+    # Ensure ~/.rosetta directory exists
+    home = ensure_home()
     
     # Check if file already exists
     if os.path.isfile(output_path):
         return CommandResult.failure(
-            f"File already exists: {output_path}. Use --output to specify a different path",
+            f"Config already exists: {output_path}. "
+            f"Edit it directly or use --output to specify a different path.",
             command="config init",
         )
     
@@ -241,7 +249,10 @@ def _handle_config_init(args, output: "OutputFormatter") -> CommandResult:
     return CommandResult.success(
         "config init",
         {
+            "rosetta_home": home,
             "config_path": os.path.abspath(output_path),
-            "message": f"Sample config written to {output_path}",
+            "message": f"Initialized {home}\n"
+                       f"Config written to {output_path}\n"
+                       f"Edit the database connections, then run: rosetta status",
         },
     )

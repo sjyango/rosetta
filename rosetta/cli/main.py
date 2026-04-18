@@ -11,6 +11,7 @@ import sys
 from typing import List, Optional
 
 from .. import __version__
+from ..paths import CONFIG_FILE, RESULTS_DIR
 from .output import OutputFormatter
 from .result import CommandResult
 
@@ -30,7 +31,7 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--config", "-c",
         default=None,
-        help="Path to DBMS config JSON (default: rosetta_config.json)",
+        help=f"Path to DBMS config JSON (default: {CONFIG_FILE})",
     )
     parser.add_argument(
         "--verbose",
@@ -84,6 +85,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
     
     # Add subcommands
+    _add_init_subparser(subparsers)
     _add_test_subparser(subparsers)
     _add_mtr_subparser(subparsers)
     _add_bench_subparser(subparsers)
@@ -130,8 +132,8 @@ def _add_test_arguments(parser):
     )
     parser.add_argument(
         "--output-dir", "-o",
-        default="results",
-        help="Output directory for reports (default: results)",
+        default=RESULTS_DIR,
+        help="Output directory for reports (default: ~/.rosetta/results)",
     )
     parser.add_argument(
         "--output-format", "-f",
@@ -326,8 +328,8 @@ def _add_bench_arguments(parser):
     )
     parser.add_argument(
         "--output-dir", "-o",
-        default="results",
-        help="Output directory for reports (default: results)",
+        default=RESULTS_DIR,
+        help="Output directory for reports (default: ~/.rosetta/results)",
     )
     parser.add_argument(
         "--output-format", "-f",
@@ -524,6 +526,20 @@ def _add_exec_subparser(subparsers):
     )
 
 
+def _add_init_subparser(subparsers):
+    """Add the 'init' top-level subcommand (shortcut for config init)."""
+    init_parser = subparsers.add_parser(
+        "init",
+        help="Initialize ~/.rosetta directory and generate config",
+        description="Create ~/.rosetta/ directory structure and generate a sample config.json",
+    )
+    _add_global_options(init_parser)
+    init_parser.add_argument(
+        "--output",
+        help="Output file path (default: ~/.rosetta/config.json)",
+    )
+
+
 def _add_config_subparser(subparsers):
     """Add the 'config' subcommand."""
     config_parser = subparsers.add_parser(
@@ -573,8 +589,8 @@ def _add_result_subparser(subparsers):
         help="Filter by run type (default: all)",
     )
     list_p.add_argument(
-        "--output-dir", "-o", default="results",
-        help="Results directory (default: results)",
+        "--output-dir", "-o", default=RESULTS_DIR,
+        help="Results directory (default: ~/.rosetta/results)",
     )
 
     # result show <run_id>
@@ -588,8 +604,8 @@ def _add_result_subparser(subparsers):
         help="Run ID or path (default: latest)",
     )
     show_p.add_argument(
-        "--output-dir", "-o", default="results",
-        help="Results directory (default: results)",
+        "--output-dir", "-o", default=RESULTS_DIR,
+        help="Results directory (default: ~/.rosetta/results)",
     )
 
 
@@ -613,8 +629,8 @@ def _add_interactive_subparser(subparsers):
         )
         interp_parser.add_argument(
             "--output-dir", "-o",
-            default="results",
-            help="Output directory for reports (default: results)",
+            default=RESULTS_DIR,
+            help="Output directory for reports (default: ~/.rosetta/results)",
         )
         interp_parser.add_argument(
             "--serve", "-s",
@@ -663,7 +679,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args.verbose = args.verbose or pre_args.verbose
     args.version = args.version or pre_args.version
     if args.config is None:
-        args.config = pre_args.config if pre_args.config is not None else "rosetta_config.json"
+        args.config = pre_args.config if pre_args.config is not None else CONFIG_FILE
 
     # Derive output format from -j/--json flag
     fmt = "json" if args.json else "human"
@@ -698,7 +714,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         # Set default values for interactive mode
         args.dbms = getattr(args, 'dbms', None)
         args.database = getattr(args, 'database', 'cross_dbms_test_db')
-        args.output_dir = getattr(args, 'output_dir', 'results')
+        args.output_dir = getattr(args, 'output_dir', RESULTS_DIR)
         args.serve = getattr(args, 'serve', True)
         args.port = getattr(args, 'port', 19527)
         result = handle_interactive(args, output)
@@ -707,7 +723,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     
     # Dispatch to command handlers
     try:
-        if args.command == "test":
+        if args.command == "init":
+            from .config_cmd import handle_config
+            args.action = "init"  # Map to config init action
+            result = handle_config(args, output)
+        elif args.command == "test":
             from .run import handle_test
             result = handle_test(args, output)
         elif args.command == "mtr":

@@ -57,7 +57,7 @@ def handle_interactive(args, output: "OutputFormatter") -> CommandResult:
         
         if not reachable_configs:
             return CommandResult.failure(
-                "No reachable DBMS found. Check your rosetta_config.json"
+                "No reachable DBMS found. Check your ~/.rosetta/config.json"
             )
         
         configs = reachable_configs

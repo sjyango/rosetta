@@ -8,6 +8,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import { RosettaCLI } from '../rosettaCli';
 
 interface RunEntry {
@@ -66,7 +67,7 @@ export class HistoryTreeProvider implements vscode.TreeDataProvider<vscode.TreeI
     }
 
     private _resolveOutputDir(outputDir?: string): string {
-        const dir = outputDir ?? 'results';
+        const dir = outputDir ?? path.join(os.homedir(), '.rosetta', 'results');
         if (path.isAbsolute(dir)) { return dir; }
         // Resolve relative to config file directory (same as CLI cwd)
         const configDir = path.dirname(this._cli.getConfigPath());

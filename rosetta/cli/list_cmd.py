@@ -109,7 +109,8 @@ def _handle_list_history(args, output: "OutputFormatter") -> CommandResult:
     import json
     from pathlib import Path
     
-    output_dir = args.output_dir if hasattr(args, "output_dir") else "results"
+    from ..paths import RESULTS_DIR as _DEFAULT_RESULTS
+    output_dir = args.output_dir if hasattr(args, "output_dir") else _DEFAULT_RESULTS
     
     if not os.path.isdir(output_dir):
         return CommandResult.failure(

@@ -24,7 +24,7 @@
     "mtr"
   ],
   "activationEvents": [
-    "workspaceContains:**/rosetta_config.json",
+    "workspaceContains:**/.rosetta/config.json",
     "onLanguage:sql",
     "onView:rosetta.dbmsView"
   ],
@@ -131,7 +131,7 @@
     "viewsWelcome": [
       {
         "view": "rosetta.dbmsView",
-        "contents": "No Rosetta configuration found.\n[Create Config](command:rosetta.installCLI)\nRun `rosetta config init` to create a rosetta_config.json file."
+        "contents": "No Rosetta configuration found.\n[Create Config](command:rosetta.installCLI)\nRun `rosetta config init` to create a .rosetta/config.json file."
       },
       {
         "view": "rosetta.historyView",
@@ -218,7 +218,7 @@
         },
         "rosetta.configPath": {
           "type": "string",
-          "default": "rosetta_config.json",
+          "default": ".rosetta/config.json",
           "description": "Path to DBMS configuration file (relative to workspace)."
         },
         "rosetta.autoServe": {

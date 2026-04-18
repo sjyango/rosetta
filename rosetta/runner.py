@@ -21,6 +21,7 @@ from .config import (DEFAULT_TEST_DB, filter_configs, generate_sample_config,
 from .executor import run_on_dbms
 from .models import CompareResult, DBMSConfig, Statement, StmtType, WorkloadMode
 from .parser import TestFileParser
+from .paths import CONFIG_FILE, RESULTS_DIR
 from .reporter.html import write_html_report
 from .reporter.history import generate_index_html
 from .reporter.text import write_diff_file, write_text_report
@@ -441,7 +442,7 @@ def parse_args(argv=None):
         epilog="""\
 Examples:
   # ── Setup ──────────────────────────────────────────────────
-  rosetta --gen-config rosetta_config.json      Generate sample config
+  rosetta config init                            Initialize ~/.rosetta and generate config
 
   # ── MTR (consistency test) ─────────────────────────────────
   rosetta -t path/to/test.test --dbms tdsql,mysql
@@ -471,8 +472,8 @@ Examples:
     general = p.add_argument_group(
         "General", "Options shared across all modes")
     general.add_argument(
-        "--config", "-c", default="rosetta_config.json",
-        help="Path to DBMS config JSON (default: rosetta_config.json)")
+        "--config", "-c", default=CONFIG_FILE,
+        help=f"Path to DBMS config JSON (default: {CONFIG_FILE})")
     general.add_argument(
         "--dbms",
         help="DBMS targets, comma-separated (e.g. tdsql,mysql,tidb). "
@@ -481,8 +482,8 @@ Examples:
         "--database", "-d", default=DEFAULT_TEST_DB,
         help=f"Test database name (default: {DEFAULT_TEST_DB})")
     general.add_argument(
-        "--output-dir", "-o", default="results",
-        help="Output directory for reports (default: results)")
+        "--output-dir", "-o", default=RESULTS_DIR,
+        help=f"Output directory for reports (default: {RESULTS_DIR})")
     general.add_argument(
         "--verbose", "-v", action="store_true",
         help="Enable verbose / debug logging")

@@ -9,6 +9,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import { execFile, spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
+import * as os from 'os';
 
 /** Structured result from `rosetta -j <command>`. */
 export interface CommandResult {
@@ -135,7 +136,7 @@ export class RosettaCLI {
             return this._configPathOverride;
         }
         const config = vscode.workspace.getConfiguration('rosetta');
-        const configPath = config.get<string>('configPath') ?? 'rosetta_config.json';
+        const configPath = config.get<string>('configPath') ?? path.join(os.homedir(), '.rosetta', 'config.json');
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         if (workspaceRoot && !path.isAbsolute(configPath)) {
             return path.join(workspaceRoot, configPath);
@@ -179,8 +180,8 @@ export class RosettaCLI {
             }
         } else if (choice.id === 'enter') {
             const input = await vscode.window.showInputBox({
-                prompt: 'Enter the path to your rosetta_config.json',
-                placeHolder: '/path/to/rosetta_config.json',
+                prompt: 'Enter the path to your config.json',
+                placeHolder: '/path/to/config.json',
                 value: currentPath,
                 validateInput: (val) => {
                     if (!val.trim()) { return 'Path cannot be empty'; }
@@ -238,8 +239,8 @@ export class RosettaCLI {
             return this._createNewConfig();
         } else if (choice === 'Enter Path') {
             const input = await vscode.window.showInputBox({
-                prompt: 'Enter the path to your rosetta_config.json',
-                placeHolder: '/path/to/rosetta_config.json',
+                prompt: 'Enter the path to your config.json',
+                placeHolder: '/path/to/config.json',
                 value: currentPath,
                 validateInput: (val) => {
                     if (!val.trim()) { return 'Path cannot be empty'; }
@@ -301,7 +302,7 @@ export class RosettaCLI {
 
         try {
             const exe = await this.getExecutablePath();
-            const outputPath = path.join(workspaceRoot, 'rosetta_config.json');
+            const outputPath = path.join(os.homedir(), '.rosetta', 'config.json');
 
             await new Promise<void>((resolve, reject) => {
                 execFile(exe, ['config', 'init', '--output', outputPath], { cwd: workspaceRoot }, (err) => {
@@ -315,7 +316,7 @@ export class RosettaCLI {
             const doc = await vscode.workspace.openTextDocument(outputPath);
             await vscode.window.showTextDocument(doc);
             vscode.window.showInformationMessage(
-                'Created rosetta_config.json — edit the database connections, then refresh.',
+                'Created config.json — edit the database connections, then refresh.',
             );
             return true;
         } catch (e: any) {

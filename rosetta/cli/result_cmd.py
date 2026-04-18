@@ -152,7 +152,8 @@ def _resolve_run(run_id: Optional[str], output_dir: str) -> Optional[Dict[str, A
 
 def _handle_list(args, output: "OutputFormatter") -> CommandResult:
     """List historical runs with pagination."""
-    output_dir = getattr(args, "output_dir", "results")
+    from ..paths import RESULTS_DIR as _DEFAULT_RESULTS
+    output_dir = getattr(args, "output_dir", _DEFAULT_RESULTS)
     limit = getattr(args, "limit", 20)
     page = max(1, getattr(args, "page", 1))
     type_filter = getattr(args, "type", "all")
@@ -197,7 +198,8 @@ def _handle_list(args, output: "OutputFormatter") -> CommandResult:
 
 def _handle_show(args, output: "OutputFormatter") -> CommandResult:
     """Show details of a specific run."""
-    output_dir = getattr(args, "output_dir", "results")
+    from ..paths import RESULTS_DIR as _DEFAULT_RESULTS
+    output_dir = getattr(args, "output_dir", _DEFAULT_RESULTS)
     run_id = getattr(args, "run_id", None)
 
     run = _resolve_run(run_id, output_dir)

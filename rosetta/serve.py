@@ -1,7 +1,7 @@
 """Headless Rosetta HTTP server for VS Code extension.
 
 Usage:
-    python -m rosetta.serve --config rosetta_config.json --port 19527
+    python -m rosetta.serve --config ~/.rosetta/config.json --port 19527
 
 Starts the ReportServer with Playground + API endpoints, prints the
 port on stdout, then blocks until killed.  No interactive REPL, no
@@ -17,14 +17,15 @@ import threading
 
 
 def main():
+    from rosetta.paths import CONFIG_FILE, RESULTS_DIR
     parser = argparse.ArgumentParser(description="Rosetta headless HTTP server")
-    parser.add_argument("-c", "--config", default="rosetta_config.json",
+    parser.add_argument("-c", "--config", default=CONFIG_FILE,
                         help="Path to DBMS config JSON")
     parser.add_argument("-p", "--port", type=int, default=0,
                         help="Port (0 = auto)")
     parser.add_argument("-d", "--database", default="cross_dbms_test_db",
                         help="Default database name")
-    parser.add_argument("-o", "--output-dir", default="results",
+    parser.add_argument("-o", "--output-dir", default=RESULTS_DIR,
                         help="Results output directory")
     args = parser.parse_args()
 

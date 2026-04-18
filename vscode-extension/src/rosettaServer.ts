@@ -9,6 +9,7 @@ import * as vscode from 'vscode';
 import * as http from 'http';
 import { ChildProcess, spawn } from 'child_process';
 import * as path from 'path';
+import * as os from 'os';
 import { RosettaCLI } from './rosettaCli';
 
 export class RosettaServer {
@@ -47,7 +48,7 @@ export class RosettaServer {
             '-m', 'rosetta.serve',
             '-c', configPath,
             '-p', String(port),
-            '-o', 'results',
+            '-o', path.join(os.homedir(), '.rosetta', 'results'),
         ], {
             cwd,
             stdio: ['pipe', 'pipe', 'pipe'],
