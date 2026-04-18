@@ -39,12 +39,14 @@ class CommandResult:
         )
     
     @classmethod
-    def failure(cls, error: str, command: str = "unknown") -> "CommandResult":
+    def failure(cls, error: str, command: str = "unknown",
+                data: Optional[Dict[str, Any]] = None) -> "CommandResult":
         """Create a failed result."""
         return cls(
             ok=False,
             command=command,
             timestamp=datetime.now().isoformat(),
+            data=data,
             error=error
         )
     

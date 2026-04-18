@@ -16,7 +16,7 @@ from .result import CommandResult
 
 
 def _add_global_options(parser: argparse.ArgumentParser) -> None:
-    """Add global options (-j/--json, -c/--config, -v/--verbose) to a parser.
+    """Add global options (-j/--json, -c/--config, --verbose) to a parser.
     
     Called on every subcommand parser so that flags like ``--json`` can appear
     after the subcommand name (e.g. ``rosetta status --json``).
@@ -33,7 +33,7 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
         help="Path to DBMS config JSON (default: rosetta_config.json)",
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
         action="store_true",
         default=False,
         help="Enable verbose / debug logging",
@@ -52,7 +52,7 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
 _global_preparser = argparse.ArgumentParser(add_help=False)
 _global_preparser.add_argument("-j", "--json", action="store_true", default=False)
 _global_preparser.add_argument("--config", "-c", default=None)
-_global_preparser.add_argument("--verbose", "-v", action="store_true", default=False)
+_global_preparser.add_argument("--verbose", action="store_true", default=False)
 _global_preparser.add_argument("-V", "--version", action="store_true", default=False)
 
 
@@ -65,6 +65,7 @@ def create_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         prog="rosetta",
+        allow_abbrev=False,
         description=(
             "Rosetta — Cross-DBMS SQL testing & benchmarking toolkit.\n\n"
             "Human-readable output by default.\n"
@@ -202,7 +203,7 @@ def _add_mtr_arguments(parser):
         help="Enable optimistic transaction mode (--mysqld=--tdsql_trans_type=1)",
     )
     parser.add_argument(
-        "-ve", "--vector",
+        "-v", "--vector",
         action="store_true",
         default=False,
         help="Enable vector engine mode (--ve-protocol)",
@@ -212,6 +213,15 @@ def _add_mtr_arguments(parser):
         action="store_true",
         default=False,
         help="Enable parallel query mode (--parallel-query)",
+    )
+    parser.add_argument(
+        "-m", "--mode",
+        type=str,
+        default=None,
+        help="Run multiple MTR modes in parallel. "
+             "Comma-separated list of: row (行存), col (列存/ve-protocol), pq (并行查询). "
+             "Example: --mode row,col,pq. "
+             "When specified, --vector and --parallel-query flags are ignored.",
     )
     parser.add_argument(
         "-r", "--record",
@@ -265,6 +275,25 @@ def _add_mtr_arguments(parser):
         "cases",
         nargs="*",
         help="Specific test cases to run",
+    )
+    parser.add_argument(
+        "--gcov",
+        action="store_true",
+        default=False,
+        help="Enable gcov coverage collection (report after MTR run)",
+    )
+    parser.add_argument(
+        "--gcov-clean",
+        action="store_true",
+        default=False,
+        help="Clean gcov counters before running (reset to zero; default: accumulate)",
+    )
+    parser.add_argument(
+        "--gcov-filter",
+        type=str,
+        default="auto",
+        help="Source filter for coverage: 'auto' (default, only test-touched files), "
+             "'all' (full project), or a glob pattern (e.g. '*/ha_rocksdb.cc')",
     )
 
 
