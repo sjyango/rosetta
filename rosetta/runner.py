@@ -24,7 +24,7 @@ from .parser import TestFileParser
 from .paths import CONFIG_FILE, RESULTS_DIR
 from .reporter.html import write_html_report
 from .reporter.history import generate_index_html
-from .reporter.text import write_diff_file, write_text_report
+from .reporter.text import write_text_report
 from .ui import (ExecutionProgress, LOGO_LINES, LOGO_SUBTITLE, LOGO_WIDTH,
                  RichLogHandler, console, flush_all,
                  print_banner, print_error, print_info, print_phase,
@@ -85,9 +85,7 @@ class RosettaRunner:
                  skip_explain: bool = False,
                  skip_analyze: bool = False,
                  skip_show_create: bool = False,
-                 output_format: str = "all",
-                 whitelist=None,
-                 buglist=None):
+                 output_format: str = "all"):
         self.test_file = test_file
         self.configs = configs
         self.output_dir = output_dir
@@ -97,8 +95,6 @@ class RosettaRunner:
         self.skip_analyze_global = skip_analyze
         self.skip_show_create_global = skip_show_create
         self.output_format = output_format
-        self.whitelist = whitelist
-        self.buglist = buglist
         self.results: Dict[str, List[str]] = {}
         self.failed_connections: set = set()
 
@@ -156,8 +152,6 @@ class RosettaRunner:
                     self.results[name],
                     self.baseline, name,
                     baseline_name=self.baseline,
-                    whitelist=self.whitelist,
-                    buglist=self.buglist,
                 )
         else:
             for i in range(len(names)):
@@ -167,8 +161,6 @@ class RosettaRunner:
                         self.results[names[i]],
                         self.results[names[j]],
                         names[i], names[j],
-                        whitelist=self.whitelist,
-                        buglist=self.buglist,
                     )
 
         return comparisons
@@ -198,70 +190,183 @@ class RosettaRunner:
         print_success(f"Parsed {n_cmds} commands ({cmd_types} types) "
                       f"via rosetta.mtr")
 
-        # Execute on each DBMS (in parallel)
+        # Execute on each DBMS (in parallel) with Live Table progress
         configs = self._order_configs()
         print_phase("Execute",
                     f"{len(configs)} DBMS targets (parallel)")
 
+        # --- Live Table progress (same style as rosetta mtr) ---
+        from rich import box
+        from rich.console import Console
+        from rich.live import Live
+        from rich.table import Table
+        from rich.text import Text
+
+        live_console = Console(stderr=True)
+
+        # Track state for each DBMS
+        dbms_state: Dict[str, dict] = {
+            c.name: {
+                "status": "waiting",
+                "progress": 0,
+                "total": n_cmds,
+                "errors": 0,
+                "executed": 0,
+                "elapsed": 0.0,
+                "start_time": None,
+                "last_status": "",
+            }
+            for c in configs
+        }
+        state_lock = threading.Lock()
+        run_start_time = _time.monotonic()
+
+        def _build_progress_table() -> Table:
+            table = Table(
+                show_header=True,
+                header_style="bold cyan",
+                expand=True,
+                padding=(0, 1),
+                box=box.ROUNDED,
+            )
+            table.add_column("DBMS", style="bold", min_width=12)
+            table.add_column("Progress", min_width=14)
+            table.add_column("Elapsed", justify="right", min_width=10)
+            table.add_column("Status", ratio=1, overflow="ellipsis", no_wrap=True)
+
+            for c in configs:
+                st = dbms_state[c.name]
+                # Elapsed time
+                if st["status"] == "done" and st["elapsed"] > 0:
+                    elapsed = st["elapsed"]
+                elif st["start_time"] is not None:
+                    elapsed = _time.monotonic() - st["start_time"]
+                else:
+                    elapsed = 0
+                mins, secs = divmod(int(elapsed), 60)
+                hours, mins = divmod(mins, 60)
+                if hours > 0:
+                    elapsed_str = f"{hours}h{mins:02d}m{secs:02d}s"
+                else:
+                    elapsed_str = f"{mins:02d}m{secs:02d}s"
+
+                # Progress display
+                pct = st.get("progress", 0)
+                if st["status"] == "waiting":
+                    progress = Text("⏳ Waiting", style="dim")
+                elif st["status"] == "running":
+                    bar_filled = int(pct / 5)  # 20-char bar
+                    bar_empty = 20 - bar_filled
+                    bar_str = f"[yellow]{'█' * bar_filled}{'░' * bar_empty}[/yellow] {pct}%"
+                    progress = Text.from_markup(bar_str)
+                elif st["status"] == "done":
+                    if st["errors"] > 0:
+                        progress = Text(f"✅ {st['executed']}/{st['total']} ({st['errors']} err)", style="yellow bold")
+                    else:
+                        progress = Text("✅ Passed", style="green bold")
+                else:
+                    progress = Text(st["status"])
+
+                # Status text
+                status_text = st.get("last_status", "")
+
+                table.add_row(c.name, progress, elapsed_str, status_text)
+
+            return table
+
         def _run_single(config):
             """Execute on one DBMS using the new MTR engine."""
-            with ExecutionProgress(config.name,
-                                   total=n_cmds) as prog:
-                try:
-                    connector = RosettaDBConnector(config,
-                                                   database=self.database)
+            with state_lock:
+                dbms_state[config.name]["status"] = "running"
+                dbms_state[config.name]["start_time"] = _time.monotonic()
 
-                    # Progress callback for the executor
-                    def _on_mtr_progress(executed, has_error, _p=prog):
-                        _p.advance(error=has_error)
+            try:
+                connector = RosettaDBConnector(config,
+                                               database=self.database)
 
-                    executor = MtrExecutor(connector,
-                                           mysql_test_dir=mysql_test_dir,
-                                           abort_on_error=False,
-                                           on_progress=_on_mtr_progress)
-                    connector.setup_default_connection(executor)
+                # Progress callback for the executor
+                def _on_mtr_progress(executed, has_error, _name=config.name):
+                    with state_lock:
+                        st = dbms_state[_name]
+                        st["executed"] = executed
+                        if has_error:
+                            st["errors"] += 1
+                        if n_cmds > 0:
+                            st["progress"] = int(executed / n_cmds * 100)
 
-                    result = executor.execute(test)
+                executor = MtrExecutor(connector,
+                                       mysql_test_dir=mysql_test_dir,
+                                       abort_on_error=False,
+                                       on_progress=_on_mtr_progress)
+                connector.setup_default_connection(executor)
+
+                result = executor.execute(test)
+
+                # Update final status
+                with state_lock:
+                    st = dbms_state[config.name]
+                    st["elapsed"] = _time.monotonic() - (st["start_time"] or _time.monotonic())
+                    st["progress"] = 100
+                    st["executed"] = result.commands_executed
+                    st["status"] = "done"
 
                     if result.skipped:
-                        prog.set_status(
-                            f"[yellow]SKIPPED: {result.skip_reason}[/yellow]")
+                        st["last_status"] = f"SKIPPED: {result.skip_reason}"
                     elif result.died:
-                        prog.set_status(
-                            f"[red]DIED: {result.die_reason}[/red]")
+                        st["last_status"] = f"DIED: {result.die_reason}"
                     elif result.errors:
-                        prog.set_status(
-                            f"[yellow]{result.commands_executed} done, "
-                            f"{len(result.errors)} err[/yellow]")
+                        st["last_status"] = f"{result.commands_executed} done, {len(result.errors)} err"
                     else:
-                        prog.set_status(
-                            f"[green]{result.commands_executed} done[/green]")
+                        st["last_status"] = f"{result.commands_executed} done"
 
-                    # Close all connections
-                    try:
-                        executor.connections.close_all()
-                    except Exception:
-                        pass
+                # Close all connections
+                try:
+                    executor.connections.close_all()
+                except Exception:
+                    pass
 
-                    output = result.output_lines if not result.died else None
-                except Exception as e:
-                    log.error("MTR execution failed for %s: %s",
-                              config.name, e)
-                    output = None
-                    prog.set_status(f"[red]FAILED: {e}[/red]")
+                output = result.output_lines if not result.died else None
+            except Exception as e:
+                log.error("MTR execution failed for %s: %s",
+                          config.name, e)
+                output = None
+                with state_lock:
+                    st = dbms_state[config.name]
+                    st["status"] = "done"
+                    st["elapsed"] = _time.monotonic() - (st["start_time"] or _time.monotonic())
+                    st["progress"] = 100
+                    st["last_status"] = f"FAILED: {e}"
 
-            prog.write_summary_to_buffer()
             return config.name, output
 
-        with concurrent.futures.ThreadPoolExecutor(
-                max_workers=len(configs)) as pool:
-            futures = {pool.submit(_run_single, c): c for c in configs}
-            for fut in concurrent.futures.as_completed(futures):
-                name, output = fut.result()
-                if output is None:
-                    self.failed_connections.add(name)
-                else:
-                    self.results[name] = output
+        with Live(
+            _build_progress_table(),
+            console=live_console,
+            refresh_per_second=2,
+            transient=False,
+        ) as live:
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=len(configs)) as pool:
+                futures = {pool.submit(_run_single, c): c for c in configs}
+
+                while True:
+                    done_futures = {f for f in futures if f.done()}
+                    live.update(_build_progress_table())
+                    if len(done_futures) == len(futures):
+                        break
+                    _time.sleep(0.5)
+
+                for fut in futures:
+                    try:
+                        name, output = fut.result()
+                        if output is None:
+                            self.failed_connections.add(name)
+                        else:
+                            self.results[name] = output
+                    except Exception as e:
+                        m = futures[fut]
+                        self.failed_connections.add(m.name)
+                        log.error("MTR execution failed for %s: %s", m.name, e)
 
         # Build statement list for report (from MTR commands)
         self.statements = self._mtr_commands_to_statements(test)
@@ -400,12 +505,6 @@ class RosettaRunner:
             write_text_report(report_path, self.test_file, comparisons)
             print_report_file(report_path, label="text")
 
-            diff_path = os.path.join(
-                self.output_dir, f"{test_name}.diff"
-            )
-            write_diff_file(diff_path, comparisons)
-            print_report_file(diff_path, label="diff")
-
         if fmt in ("html", "all"):
             html_path = os.path.join(
                 self.output_dir, f"{test_name}.html"
@@ -452,10 +551,7 @@ Examples:
 
   # ── Benchmark ──────────────────────────────────────────────
   rosetta --benchmark --bench-file bench.json --dbms tdsql,mysql
-  rosetta --benchmark --template oltp_read_write --iterations 200
-  rosetta --benchmark --bench-file bench.json --repeat 5
   rosetta --benchmark --bench-file bench.json --concurrency 16 --duration 60
-  rosetta --benchmark --list-templates        Show built-in templates
 
   # ── Interactive / Playground ───────────────────────────────
   rosetta -i --dbms tdsql,mysql -s           Choose mode at startup
@@ -464,7 +560,6 @@ Examples:
 
   # ── Profiling ──────────────────────────────────────────────
   rosetta --benchmark --bench-file b.json --profile --perf-freq 199
-  rosetta --benchmark --bench-file b.json --no-profile
 """,
     )
 
@@ -550,13 +645,6 @@ Examples:
         "--bench-file",
         help="Benchmark definition file (.json or .sql)")
     bench.add_argument(
-        "--template",
-        help="Use a built-in template "
-             "(e.g. oltp_read_write, oltp_read_only)")
-    bench.add_argument(
-        "--list-templates", action="store_true",
-        help="List built-in benchmark templates and exit")
-    bench.add_argument(
         "--iterations", type=int, default=100,
         help="Iterations per query — serial mode (default: 100)")
     bench.add_argument(
@@ -606,11 +694,8 @@ Examples:
         "CPU flame-graph capture via perf (benchmark mode)")
     prof.add_argument(
         "--profile", action="store_true", dest="profile",
-        default=True,
-        help="Enable flame-graph capture (default: on)")
-    prof.add_argument(
-        "--no-profile", action="store_false", dest="profile",
-        help="Disable flame-graph capture")
+        default=False,
+        help="Enable flame-graph capture via perf")
     prof.add_argument(
         "--perf-freq", type=int, default=99,
         help="perf sampling frequency in Hz (default: 99)")
@@ -648,15 +733,6 @@ def main(argv=None):
         flush_all()
         return 0
 
-    # List built-in benchmark templates
-    if args.list_templates:
-        from .benchmark import BenchmarkLoader
-        templates = BenchmarkLoader.list_builtin_templates()
-        console.print("[bold]Available built-in benchmark templates:[/bold]")
-        for t in templates:
-            console.print(f"  [cyan]•[/cyan] {t}")
-        return 0
-
     # Benchmark mode (non-interactive)
     if args.benchmark and not args.interactive:
         return _run_benchmark(args)
@@ -666,20 +742,20 @@ def main(argv=None):
     if args.interactive:
         return _enter_interactive(args)
 
-    if not args.test:
+    if not args.file:
         print_error("--test is required. Use --help for usage.")
         flush_all()
         return 1
 
-    if not os.path.isfile(args.test):
-        print_error(f"Test file not found: {args.test}")
+    if not os.path.isfile(args.file):
+        print_error(f"Test file not found: {args.file}")
         flush_all()
         return 1
 
     # Parse-only mode
     if args.parse_only:
         flush_all()
-        parser = TestFileParser(args.test)
+        parser = TestFileParser(args.file)
         prefer_result = getattr(args, 'result', False)
         stmts = parser.parse(prefer_result=prefer_result)
         for s in stmts:
@@ -725,23 +801,15 @@ def main(argv=None):
 
     # Create a timestamped sub-directory for this run
     run_stamp = _time.strftime("%Y%m%d_%H%M%S")
-    test_name = Path(args.test).stem
+    test_name = Path(args.file).stem
     run_dir = os.path.join(output_dir, f"{test_name}_{run_stamp}")
 
     print_info("DBMS targets:",
                ", ".join(c.name for c in configs))
 
-    # Load whitelist from output directory
-    from .whitelist import Whitelist
-    whitelist = Whitelist(output_dir)
-
-    # Load buglist from output directory
-    from .buglist import Buglist
-    buglist = Buglist(output_dir)
-
     # Run
     runner = RosettaRunner(
-        test_file=args.test,
+        test_file=args.file,
         configs=configs,
         output_dir=run_dir,
         database=args.database,
@@ -750,8 +818,6 @@ def main(argv=None):
         skip_analyze=args.skip_analyze,
         skip_show_create=args.skip_show_create,
         output_format=args.format,
-        whitelist=whitelist,
-        buglist=buglist,
     )
 
     if args.diff_only:
@@ -783,11 +849,8 @@ def main(argv=None):
     except OSError:
         pass
 
-    # Generate history index page and whitelist/buglist pages
+    # Generate history index page
     generate_index_html(output_dir)
-    from .reporter.history import generate_buglist_html, generate_whitelist_html
-    generate_whitelist_html(output_dir)
-    generate_buglist_html(output_dir)
 
     # Print rich summary table
     all_pass = print_summary(comparisons, runner.failed_connections)
@@ -805,7 +868,6 @@ def main(argv=None):
             relative_html = os.path.join(
                 os.path.basename(run_dir), html_file)
             _serve_report(output_dir, relative_html, args.port,
-                          whitelist=whitelist, buglist=buglist,
                           configs=configs, database=args.database)
         else:
             console.print(f"[yellow]HTML report not found: {html_path}[/yellow]")
@@ -814,7 +876,7 @@ def main(argv=None):
 
 
 def _run_benchmark(args) -> int:
-    """Execute the benchmark pipeline (supports --repeat N)."""
+    """Execute the benchmark pipeline."""
     from .benchmark import (BenchmarkLoader, run_benchmark,
                             BUILTIN_TEMPLATES)
     from .models import BenchmarkConfig, WorkloadMode
@@ -852,26 +914,22 @@ def _run_benchmark(args) -> int:
 
     # Load workload
     json_extra_config = {}  # Extra config from JSON file
+    if not args.bench_file:
+        print_error("Missing --bench-file. Specify a benchmark definition file.")
+        flush_all()
+        return 1
     try:
-        if args.bench_file:
-            workload = BenchmarkLoader.from_file(args.bench_file)
-            # Read extra config fields from JSON file
-            if args.bench_file.endswith('.json'):
-                import json
-                with open(args.bench_file, 'r') as f:
-                    json_data = json.load(f)
-                    json_extra_config = {
-                        'database': json_data.get('database'),
-                        'skip_setup': json_data.get('skip_setup'),
-                        'skip_teardown': json_data.get('skip_teardown'),
-                    }
-        elif args.template:
-            workload = BenchmarkLoader.from_builtin(args.template)
-        else:
-            # Default to oltp_read_write
-            print_info("No --bench-file or --template specified, "
-                       "using built-in", "oltp_read_write")
-            workload = BenchmarkLoader.from_builtin("oltp_read_write")
+        workload = BenchmarkLoader.from_file(args.bench_file)
+        # Read extra config fields from JSON file
+        if args.bench_file.endswith('.json'):
+            import json
+            with open(args.bench_file, 'r') as f:
+                json_data = json.load(f)
+                json_extra_config = {
+                    'database': json_data.get('database'),
+                    'skip_setup': json_data.get('skip_setup'),
+                    'skip_teardown': json_data.get('skip_teardown'),
+                }
     except (FileNotFoundError, ValueError) as e:
         print_error(str(e))
         flush_all()
@@ -931,7 +989,6 @@ def _run_benchmark(args) -> int:
 
     # Display plan
     parallel_dbms = getattr(args, 'parallel_dbms', False)
-    repeat = max(1, getattr(args, 'repeat', 1))
     output_dir = os.path.abspath(args.output_dir)
     fmt = args.format
 
@@ -953,8 +1010,6 @@ def _run_benchmark(args) -> int:
                     f"{bench_cfg.concurrency}  Duration: {bench_cfg.duration}s")
     if filter_queries:
         print_info("Filter:", ", ".join(filter_queries))
-    if repeat > 1:
-        print_info("Repeat:", f"{repeat} rounds")
     if bench_cfg.profile:
         print_info("Profiling:",
                     f"[bold red]🔥 perf flame graph[/bold red] "
@@ -967,16 +1022,8 @@ def _run_benchmark(args) -> int:
     # ------------------------------------------------------------------
     # Inner function: execute a single benchmark round
     # ------------------------------------------------------------------
-    def _run_one_round(round_num: int) -> int:
+    def _run_one_round() -> int:
         """Run one benchmark round. Returns 0 on success."""
-        if repeat > 1:
-            console.print(
-                f"\n[bold cyan]{'━' * 60}[/bold cyan]")
-            console.print(
-                f"[bold cyan]  Round {round_num}/{repeat}[/bold cyan]")
-            console.print(
-                f"[bold cyan]{'━' * 60}[/bold cyan]\n")
-
         run_stamp = _time.strftime("%Y%m%d_%H%M%S")
         run_dir = os.path.join(
             output_dir,
@@ -1172,22 +1219,10 @@ def _run_benchmark(args) -> int:
     # Main loop
     # ------------------------------------------------------------------
     last_run_dir = None
-    for rnd in range(1, repeat + 1):
-        try:
-            last_run_dir = _run_one_round(rnd)
-        except KeyboardInterrupt:
-            console.print(
-                f"\n[yellow]Interrupted at round {rnd}/{repeat}. "
-                f"Stopping.[/yellow]")
-            flush_all()
-            break
-        # Small pause between rounds to avoid timestamp collision
-        if rnd < repeat:
-            _time.sleep(1)
-
-    if repeat > 1:
-        console.print(
-            f"\n[bold green]All {repeat} rounds completed.[/bold green]")
+    try:
+        last_run_dir = _run_one_round()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted. Stopping.[/yellow]")
         flush_all()
 
     # Serve if requested (use the latest run)
@@ -2694,8 +2729,6 @@ def _enter_interactive(args) -> int:
         if mode == "playground":
             # Start server and open Playground page in browser
             from .interactive import ReportServer, _APIHandler
-            from .whitelist import Whitelist
-            from .buglist import Buglist
             from . import __version__
 
             # ASCII Logo
@@ -2706,13 +2739,8 @@ def _enter_interactive(args) -> int:
             console.print(f"  [dim]{LOGO_SUBTITLE}[/dim]")
             console.print(f"  [dim]v{__version__}[/dim]  [bold white]Playground Mode[/bold white]")
 
-            whitelist = Whitelist(output_dir)
-            buglist = Buglist(output_dir)
-
             srv = ReportServer(
                 output_dir, port=args.port,
-                whitelist=whitelist,
-                buglist=buglist,
                 configs=configs,
                 all_configs=all_configs,
                 database=args.database,
@@ -2823,8 +2851,6 @@ def _enter_interactive(args) -> int:
         elif mode == "history":
             # Start server and show History URL
             from .interactive import ReportServer, _APIHandler
-            from .whitelist import Whitelist
-            from .buglist import Buglist
             from . import __version__
 
             # ASCII Logo
@@ -2835,13 +2861,8 @@ def _enter_interactive(args) -> int:
             console.print(f"  [dim]{LOGO_SUBTITLE}[/dim]")
             console.print(f"  [dim]v{__version__}[/dim]  [bold white]History Mode[/bold white]")
 
-            whitelist = Whitelist(output_dir)
-            buglist = Buglist(output_dir)
-
             srv = ReportServer(
                 output_dir, port=args.port,
-                whitelist=whitelist,
-                buglist=buglist,
                 configs=configs,
                 all_configs=all_configs,
                 database=args.database,
@@ -3132,7 +3153,6 @@ def _enter_interactive(args) -> int:
                             duration=rr_dur,
                             ramp_up=0.0,
                             bench_filter=rr_filter,
-                            repeat=1,
                             parallel_dbms=True,
                             output_format=args.format,
                             serve=args.serve,
@@ -3186,7 +3206,6 @@ def _enter_interactive(args) -> int:
                     duration=bench_duration,
                     ramp_up=bench_ramp_up,
                     bench_filter=args.bench_filter,
-                    repeat=getattr(args, 'repeat', 1),
                     parallel_dbms=getattr(args, 'parallel_dbms', True),
                     output_format=args.format,
                     serve=args.serve,
@@ -3226,8 +3245,7 @@ def _find_free_port() -> int:
 
 
 def _serve_report(directory: str, html_file: str, port: int = 0,
-                  whitelist=None, buglist=None, configs=None,
-                  database: str = ""):
+                  configs=None, database: str = ""):
     """Start a local HTTP server and print the URL for the HTML report."""
     if port == 0:
         port = _find_free_port()
@@ -3238,11 +3256,9 @@ def _serve_report(directory: str, html_file: str, port: int = 0,
     from .reporter.history import generate_playground_html
     generate_playground_html(abs_dir)
 
-    # Use the API-capable handler from interactive module if whitelist given
-    if whitelist is not None:
+    # Use the API-capable handler from interactive module if configs given
+    if configs is not None:
         from .interactive import _APIHandler
-        _APIHandler._whitelist = whitelist
-        _APIHandler._buglist = buglist
         _APIHandler._configs = configs or []
         _APIHandler._database = database
         handler = lambda *a, **kw: _APIHandler(

@@ -140,11 +140,9 @@ class _SilentHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 class _APIHandler(http.server.SimpleHTTPRequestHandler):
-    """HTTP handler with whitelist/buglist API endpoints and suppressed logging."""
+    """HTTP handler with API endpoints and suppressed logging."""
 
     # Class-level reference set by ReportServer before creating instances.
-    _whitelist = None  # type: ignore
-    _buglist = None    # type: ignore
     _configs: List[DBMSConfig] = []
     _all_configs: List[DBMSConfig] = []
     _database: str = ""
@@ -204,11 +202,7 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
     # -- API routing --------------------------------------------------------
 
     def do_POST(self):                          # noqa: N802
-        if self.path.startswith("/api/whitelist/"):
-            self._handle_whitelist_api()
-        elif self.path.startswith("/api/buglist/"):
-            self._handle_buglist_api()
-        elif self.path == "/api/execute":
+        if self.path == "/api/execute":
             self._handle_execute_api()
         elif self.path == "/api/execute/stream":
             self._handle_execute_stream_api()
@@ -232,92 +226,6 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
-
-    def _handle_whitelist_api(self):
-        action = self.path.split("/api/whitelist/", 1)[-1].strip("/")
-        wl = self._whitelist
-        if wl is None:
-            self._respond_json({"ok": False, "error": "whitelist not loaded"},
-                               500)
-            return
-        try:
-            body = self._read_json()
-        except Exception:
-            body = {}
-
-        if action == "add":
-            fp = body.get("fingerprint", "")
-            if not fp:
-                self._respond_json({"ok": False,
-                                    "error": "fingerprint required"}, 400)
-                return
-            entry = wl.add(
-                fingerprint=fp,
-                stmt=body.get("stmt", ""),
-                dbms_a=body.get("dbms_a", ""),
-                dbms_b=body.get("dbms_b", ""),
-                block=body.get("block", 0),
-                reason=body.get("reason", ""),
-            )
-            self._respond_json({"ok": True, "entry": entry})
-
-        elif action == "remove":
-            fp = body.get("fingerprint", "")
-            removed = wl.remove(fp) if fp else False
-            self._respond_json({"ok": removed})
-
-        elif action == "clear":
-            wl.clear()
-            self._respond_json({"ok": True})
-
-        elif action == "list":
-            self._respond_json({"ok": True, "entries": wl.entries})
-
-        else:
-            self._respond_json({"ok": False, "error": "unknown action"}, 404)
-
-    def _handle_buglist_api(self):
-        action = self.path.split("/api/buglist/", 1)[-1].strip("/")
-        bl = self._buglist
-        if bl is None:
-            self._respond_json({"ok": False, "error": "buglist not loaded"},
-                               500)
-            return
-        try:
-            body = self._read_json()
-        except Exception:
-            body = {}
-
-        if action == "add":
-            fp = body.get("fingerprint", "")
-            if not fp:
-                self._respond_json({"ok": False,
-                                    "error": "fingerprint required"}, 400)
-                return
-            entry = bl.add(
-                fingerprint=fp,
-                stmt=body.get("stmt", ""),
-                dbms_a=body.get("dbms_a", ""),
-                dbms_b=body.get("dbms_b", ""),
-                block=body.get("block", 0),
-                reason=body.get("reason", ""),
-            )
-            self._respond_json({"ok": True, "entry": entry})
-
-        elif action == "remove":
-            fp = body.get("fingerprint", "")
-            removed = bl.remove(fp) if fp else False
-            self._respond_json({"ok": removed})
-
-        elif action == "clear":
-            bl.clear()
-            self._respond_json({"ok": True})
-
-        elif action == "list":
-            self._respond_json({"ok": True, "entries": bl.entries})
-
-        else:
-            self._respond_json({"ok": False, "error": "unknown action"}, 404)
 
     # -- Runs delete API ----------------------------------------------------
 
@@ -858,14 +766,12 @@ def _format_val(value) -> str:
 class ReportServer:
     """Manages a background HTTP server for viewing HTML reports."""
 
-    def __init__(self, directory: str, port: int = 0, whitelist=None,
-                 buglist=None, configs: Optional[List[DBMSConfig]] = None,
+    def __init__(self, directory: str, port: int = 0,
+                 configs: Optional[List[DBMSConfig]] = None,
                  all_configs: Optional[List[DBMSConfig]] = None,
                  database: str = ""):
         self.directory = os.path.abspath(directory)
         self.port = port
-        self.whitelist = whitelist
-        self.buglist = buglist
         self.configs = configs or []
         self.all_configs = all_configs or self.configs
         self.database = database
@@ -889,21 +795,13 @@ class ReportServer:
                 s.bind(("", 0))
                 self.port = s.getsockname()[1]
         os.makedirs(self.directory, exist_ok=True)
-        # Pre-generate index/whitelist/buglist pages so / redirects work
-        from .reporter.history import (generate_buglist_html,
-                                       generate_index_html,
-                                       generate_playground_html,
-                                       generate_whitelist_html)
+        # Pre-generate index and playground pages so / redirects work
+        from .reporter.history import (generate_index_html,
+                                       generate_playground_html)
         generate_index_html(self.directory)
-        generate_whitelist_html(self.directory)
-        generate_buglist_html(self.directory)
         generate_playground_html(self.directory)
         directory = self.directory
-        wl = self.whitelist
-        bl = self.buglist
         # Inject references into handler class
-        _APIHandler._whitelist = wl
-        _APIHandler._buglist = bl
         _APIHandler._configs = self.configs
         _APIHandler._all_configs = self.all_configs
         _APIHandler._database = self.database
@@ -972,12 +870,7 @@ class InteractiveSession:
         self.port = port
         self._run_history: List[Dict] = []
         self._report_server: Optional[ReportServer] = None
-        # Whitelist — shared across all runs in this session
-        from .whitelist import Whitelist
-        self._whitelist = Whitelist(self.output_dir)
-        # Buglist — shared across all runs in this session
-        from .buglist import Buglist
-        self._buglist = Buglist(self.output_dir)
+
 
     # -- server helpers -----------------------------------------------------
 
@@ -990,8 +883,6 @@ class InteractiveSession:
         if self._report_server:
             self._report_server.stop()
         self._report_server = ReportServer(self.output_dir, self.port,
-                                           whitelist=self._whitelist,
-                                           buglist=self._buglist,
                                            configs=self.configs,
                                            all_configs=self.all_configs,
                                            database=self.database)
@@ -1014,7 +905,6 @@ class InteractiveSession:
 
     def _run_test(self, test_file: str) -> bool:
         from .runner import RosettaRunner
-        from .reporter.history import generate_buglist_html, generate_whitelist_html
 
         if not os.path.isfile(test_file):
             print_error(f"Test file not found: {test_file}")
@@ -1025,10 +915,6 @@ class InteractiveSession:
         test_name = Path(test_file).stem
         run_dir = os.path.join(self.output_dir, f"{test_name}_{run_stamp}")
 
-        # Reload whitelist and buglist to pick up any changes from the web UI
-        self._whitelist.load()
-        self._buglist.load()
-
         print_info("DBMS targets:",
                    ", ".join(c.name for c in self.configs))
 
@@ -1038,9 +924,7 @@ class InteractiveSession:
             baseline=self.baseline, skip_explain=self.skip_explain,
             skip_analyze=self.skip_analyze,
             skip_show_create=self.skip_show_create,
-            output_format=self.output_format,
-            whitelist=self._whitelist,
-            buglist=self._buglist)
+            output_format=self.output_format)
 
         comparisons = runner.run()
 
@@ -1061,29 +945,6 @@ class InteractiveSession:
             pass
 
         generate_index_html(self.output_dir)
-        generate_whitelist_html(self.output_dir)
-        generate_buglist_html(self.output_dir)
-
-        # Print whitelist summary
-        wl_count = sum(cmp.whitelisted for cmp in comparisons.values())
-        if wl_count:
-            console.print(
-                f"  [yellow]⚡ {wl_count} diff(s) matched whitelist"
-                f"[/yellow]")
-
-        # Print sql-whitelist summary
-        sql_wl_count = sum(cmp.sql_whitelisted for cmp in comparisons.values())
-        if sql_wl_count:
-            console.print(
-                f"  [yellow]🔶 {sql_wl_count} diff(s) auto-whitelisted "
-                f"(SHOW CREATE/EXPLAIN/etc.)[/yellow]")
-
-        # Print bug summary
-        bug_count = sum(cmp.bug_marked for cmp in comparisons.values())
-        if bug_count:
-            console.print(
-                f"  [red]🐛 {bug_count} diff(s) marked as bug"
-                f"[/red]")
 
         all_pass = print_summary(comparisons, runner.failed_connections)
         flush_all()

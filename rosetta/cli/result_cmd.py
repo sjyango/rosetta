@@ -52,6 +52,14 @@ def _scan_runs(output_dir: str) -> List[Dict[str, Any]]:
         if not os.path.isdir(full) or name in ("latest", "__pycache__"):
             continue
 
+        # Skip empty directories (e.g. interrupted runs with no output)
+        try:
+            dir_files = os.listdir(full)
+        except OSError:
+            continue
+        if not dir_files:
+            continue
+
         run: Dict[str, Any] = {
             "id": name,
             "path": full,
@@ -72,13 +80,16 @@ def _scan_runs(output_dir: str) -> List[Dict[str, Any]]:
             prefix = name[: m.start()].rstrip("_")
             run["workload"] = prefix
 
-        # Detect run type
+        # Detect run type (dir_files already cached above)
         if os.path.isfile(os.path.join(full, "bench_result.json")):
             run["type"] = "bench"
-        else:
-            result_files = [f for f in os.listdir(full) if f.endswith(".result")]
-            if result_files:
-                run["type"] = "mtr"
+        elif any(f.endswith(".result") for f in dir_files):
+            run["type"] = "mtr"
+        elif any(f.endswith(".html") or f.endswith(".report.txt")
+                for f in dir_files):
+            # Has reports but no .result or bench_result.json — likely
+            # an interrupted MTR run or a diff-only re-generation.
+            run["type"] = "test"
 
         # Extra metadata for bench
         if run["type"] == "bench":
@@ -95,7 +106,7 @@ def _scan_runs(output_dir: str) -> List[Dict[str, Any]]:
         # For MTR, list result files
         if run["type"] == "mtr":
             run["result_files"] = sorted(
-                f for f in os.listdir(full) if f.endswith(".result")
+                f for f in dir_files if f.endswith(".result")
             )
             # Infer dbms targets from .result filenames  (e.g. test.mysql.result)
             targets = []
@@ -107,7 +118,7 @@ def _scan_runs(output_dir: str) -> List[Dict[str, Any]]:
 
         # Count report files
         report_files = [
-            f for f in os.listdir(full)
+            f for f in dir_files
             if f.endswith((".html", ".report.txt", ".json", ".diff"))
         ]
         run["report_files"] = sorted(report_files)

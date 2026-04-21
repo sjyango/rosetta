@@ -54,6 +54,9 @@ def filter_configs(configs: List[DBMSConfig],
     """
     if dbms_names:
         requested = [n.strip() for n in dbms_names.split(",")]
+        # "all" is a special keyword meaning all configured DBMS
+        if "all" in requested:
+            return list(configs)
         available = {c.name: c for c in configs}
         result = []
         for name in requested:

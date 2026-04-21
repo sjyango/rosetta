@@ -5,8 +5,6 @@ import re
 from typing import Dict, List, Optional
 
 from .models import CompareResult
-from .buglist import Buglist
-from .whitelist import Whitelist, diff_fingerprint
 
 # ---------------------------------------------------------------------------
 # Normalization regex patterns (compiled once at module load)
@@ -34,67 +32,6 @@ _RE_SQL_START = re.compile(
     r"FLUSH|RENAME|LOCK|UNLOCK|USE|DESCRIBE|DESC)\b",
     re.IGNORECASE,
 )
-
-# SQL patterns whose output is inherently DBMS-specific and should be
-# auto-whitelisted (shown as yellow, not counted as errors).
-_RE_SQL_WHITELIST = [
-    re.compile(
-        r"^(\[L\d+\]\s+)?"
-        r"SHOW\s+CREATE\s+(TABLE|VIEW|PROCEDURE|FUNCTION|TRIGGER|EVENT)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"^(\[L\d+\]\s+)?"
-        r"EXPLAIN\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"^(\[L\d+\]\s+)?"
-        r"ANALYZE\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"^(\[L\d+\]\s+)?"
-        r"DESCRIBE\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"^(\[L\d+\]\s+)?"
-        r"DESC\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"^(\[L\d+\]\s+)?"
-        r"SHOW\s+(INDEX|INDEXES|KEYS|TABLE\s+STATUS|COLUMNS|FIELDS|PLUGINS"
-        r"|ENGINE|ENGINES|VARIABLES|STATUS|PROCESSLIST|MASTER|SLAVE"
-        r"|GRANTS|PRIVILEGES|CHARSET|CHARACTER\s+SET|COLLATION"
-        r"|WARNINGS|ERRORS|TABLES|DATABASES|SCHEMAS|TRIGGERS|EVENTS"
-        r"|PROFILES|PROFILE|FUNCTION\s+CODE|PROCEDURE\s+CODE)\b",
-        re.IGNORECASE,
-    ),
-    # SET statements: output varies across DBMS (affected rows vs ERROR
-    # for unknown variables). These are DBMS-specific configuration
-    # differences, not SQL compatibility issues.
-    re.compile(
-        r"^(\[L\d+\]\s+)?"
-        r"SET\s+",
-        re.IGNORECASE,
-    ),
-]
-
-
-def is_sql_auto_whitelisted(line: str) -> bool:
-    """Check if the SQL statement in a block header is auto-whitelisted.
-
-    SHOW CREATE TABLE, EXPLAIN, etc. produce output that varies across
-    DBMS implementations and should not be treated as errors.
-    """
-    stripped = line.strip()
-    for pattern in _RE_SQL_WHITELIST:
-        if pattern.match(stripped):
-            return True
-    return False
-
 
 # ---------------------------------------------------------------------------
 # Line normalization
@@ -252,9 +189,7 @@ def block_has_unexpected_error(block: List[str]) -> bool:
 
 def compare_outputs(lines_a: List[str], lines_b: List[str],
                     name_a: str, name_b: str,
-                    baseline_name: Optional[str] = None,
-                    whitelist: Optional[Whitelist] = None,
-                    buglist: Optional[Buglist] = None) -> CompareResult:
+                    baseline_name: Optional[str] = None) -> CompareResult:
     """Compare two result outputs block-by-block.
 
     Blocks are aligned by their ``[Lnnn]`` line-number tag so that
@@ -263,12 +198,6 @@ def compare_outputs(lines_a: List[str], lines_b: List[str],
 
     If baseline_name is set, blocks where the baseline has an unexpected
     error are skipped.
-
-    If *whitelist* is provided, each diff is annotated with a fingerprint
-    and ``whitelisted`` flag.  Whitelisted diffs are counted separately.
-
-    If *buglist* is provided, each diff is annotated with a ``bug_marked``
-    flag.  Bug-marked diffs still count toward the failure rate.
     """
     result = CompareResult(dbms_a=name_a, dbms_b=name_b)
 
@@ -308,10 +237,6 @@ def compare_outputs(lines_a: List[str], lines_b: List[str],
                 "diff": [],
                 "context_before": [],
                 "context_after": [],
-                "fingerprint": "",
-                "whitelisted": False,
-                "sql_whitelisted": False,
-                "bug_marked": False,
                 "skipped": True,
                 "skip_reason": (
                     f"Only in {name_a}" if not bb
@@ -334,18 +259,10 @@ def compare_outputs(lines_a: List[str], lines_b: List[str],
                     "diff": [],
                     "context_before": [],
                     "context_after": [],
-                    "fingerprint": "",
-                    "whitelisted": False,
-                    "sql_whitelisted": False,
-                    "bug_marked": False,
                     "skipped": True,
                     "skip_reason": "Baseline has unexpected error",
                 })
                 continue
-
-        # Check if this block's SQL is auto-whitelisted (SHOW CREATE TABLE, EXPLAIN, etc.)
-        block_header = ba[0] if ba else (bb[0] if bb else "")
-        auto_wl = is_sql_auto_whitelisted(block_header)
 
         na = normalize_block(ba)
         nb = normalize_block(bb)
@@ -379,14 +296,6 @@ def compare_outputs(lines_a: List[str], lines_b: List[str],
             fa = filter_warnings(ba)
             fb = filter_warnings(bb)
 
-            fp = diff_fingerprint(stmt, fa, fb)
-            wl = whitelist.contains(fp) if whitelist else False
-            bm = buglist.contains(fp) if buglist else False
-
-            # Auto-whitelisted SQL: count separately, not as real error
-            if auto_wl:
-                result.sql_whitelisted += 1
-
             result.diffs.append({
                 "block": idx + 1,
                 "stmt": stmt,
@@ -395,10 +304,6 @@ def compare_outputs(lines_a: List[str], lines_b: List[str],
                 "diff": diff,
                 "context_before": ctx_before,
                 "context_after": ctx_after,
-                "fingerprint": fp,
-                "whitelisted": wl,
-                "sql_whitelisted": auto_wl,
-                "bug_marked": bm,
                 "skipped": False,
             })
 

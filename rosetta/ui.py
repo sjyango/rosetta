@@ -240,13 +240,6 @@ def print_summary(comparisons: Dict[str, CompareResult],
     _add(Rule(Text.from_markup("[bold white]Summary[/bold white]"), style=_BOX))
     _add(Text(""))
 
-    # Detect whether any comparison has whitelisted diffs
-    has_wl = any(cmp.whitelisted > 0 for cmp in comparisons.values())
-    # Detect whether any comparison has bug-marked diffs
-    has_bug = any(cmp.bug_marked > 0 for cmp in comparisons.values())
-    # Detect whether any comparison has auto sql-whitelisted diffs
-    has_sql_wl = any(cmp.sql_whitelisted > 0 for cmp in comparisons.values())
-
     table = Table(
         header_style="bold",
         show_lines=False,
@@ -259,12 +252,6 @@ def print_summary(comparisons: Dict[str, CompareResult],
     table.add_column("Status", justify="center", min_width=6)
     table.add_column("Match", justify="right", style="green")
     table.add_column("Mismatch", justify="right")
-    if has_wl:
-        table.add_column("Whitelist", justify="right")
-    if has_sql_wl:
-        table.add_column("SQL-WL", justify="right")
-    if has_bug:
-        table.add_column("Bug", justify="right")
     table.add_column("Skip", justify="right", style="dim")
     table.add_column("Total", justify="right")
     table.add_column("Rate", justify="right", min_width=14)
@@ -273,25 +260,18 @@ def print_summary(comparisons: Dict[str, CompareResult],
         for name in failed_connections:
             cols = [name, "[yellow]SKIP[/yellow]",
                     "-", "-"]
-            if has_wl:
-                cols.append("-")
-            if has_sql_wl:
-                cols.append("-")
-            if has_bug:
-                cols.append("-")
             cols += ["-", "-", "[dim]conn failed[/dim]"]
             table.add_row(*cols)
 
     all_pass = True
     for key, cmp in comparisons.items():
-        effective_mismatch = cmp.effective_mismatched
-        is_pass = effective_mismatch <= 0
+        is_pass = cmp.mismatched <= 0
         if not is_pass:
             all_pass = False
 
         status = ("[bold green]PASS[/bold green]" if is_pass
                   else "[bold red]FAIL[/bold red]")
-        mismatch_style = "red bold" if effective_mismatch > 0 else "dim"
+        mismatch_style = "red bold" if cmp.mismatched > 0 else "dim"
         rate = cmp.pass_rate
         rate_color = ("green" if rate >= 100
                       else "yellow" if rate >= 90
@@ -305,24 +285,9 @@ def print_summary(comparisons: Dict[str, CompareResult],
         cols = [
             key, status,
             str(cmp.matched),
-            Text(str(effective_mismatch if effective_mismatch > 0 else 0),
+            Text(str(cmp.mismatched if cmp.mismatched > 0 else 0),
                  style=mismatch_style),
         ]
-        if has_wl:
-            wl_text = (Text(str(cmp.whitelisted), style="yellow")
-                       if cmp.whitelisted > 0
-                       else Text("0", style="dim"))
-            cols.append(wl_text)
-        if has_sql_wl:
-            sql_wl_text = (Text(str(cmp.sql_whitelisted), style="yellow")
-                           if cmp.sql_whitelisted > 0
-                           else Text("0", style="dim"))
-            cols.append(sql_wl_text)
-        if has_bug:
-            bug_text = (Text(str(cmp.bug_marked), style="red")
-                        if cmp.bug_marked > 0
-                        else Text("0", style="dim"))
-            cols.append(bug_text)
         cols += [
             str(cmp.skipped),
             str(cmp.total_stmts),

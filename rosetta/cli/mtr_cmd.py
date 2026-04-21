@@ -165,13 +165,47 @@ def _should_suppress(line: str) -> bool:
     return False
 
 
-def _filter_output(proc, verbose: bool = False) -> int:
-    """Read proc stdout line by line, printing only non-suppressed lines."""
+# Pattern for MTR progress lines: [  XX% ] test_name  worker  [ result ]  time
+_MTR_PROGRESS_RE = re.compile(r"^\[\s*(\d+)%\]")
+
+
+def _parse_mtr_progress(line: str) -> Optional[int]:
+    """Extract progress percentage from an MTR output line.
+
+    Returns the percentage (0-100) if found, else None.
+    """
+    m = _MTR_PROGRESS_RE.search(line.strip())
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _filter_output(proc, verbose: bool = False,
+                   on_progress=None,
+                   log_file=None) -> int:
+    """Read proc stdout line by line, printing only non-suppressed lines.
+
+    Args:
+        proc: subprocess to read from
+        verbose: if True, print all lines including suppressed ones
+        on_progress: optional callback ``on_progress(percent, line)``
+                     called when a progress percentage is detected
+        log_file: optional file object to write all non-suppressed lines to
+    """
     interrupted = False
     try:
         for raw_line in proc.stdout:
             line = raw_line.rstrip("\n")
-            if verbose or not _should_suppress(line):
+            # Check for progress before filtering
+            if on_progress:
+                pct = _parse_mtr_progress(line)
+                if pct is not None:
+                    on_progress(pct, line)
+            is_suppressed = _should_suppress(line)
+            if log_file and not is_suppressed:
+                log_file.write(line + "\n")
+                log_file.flush()
+            if verbose or not is_suppressed:
                 print(line)
                 sys.stdout.flush()
     except KeyboardInterrupt:
@@ -822,8 +856,22 @@ def handle_mtr(args, output: "OutputFormatter") -> CommandResult:
     if modes_str:
         # Multi-mode parallel execution
         requested = [m.strip().lower() for m in modes_str.split(",") if m.strip()]
-        # Apply aliases (e.g. column -> col)
-        requested = [_MODE_ALIASES.get(m, m) for m in requested]
+        # Apply aliases (e.g. column -> col, all -> row,col,pq)
+        expanded = []
+        for m in requested:
+            if m == "all":
+                expanded.extend(list(MTR_MODES.keys()))
+            else:
+                expanded.append(_MODE_ALIASES.get(m, m))
+        requested = expanded
+        # Deduplicate while preserving order
+        seen = set()
+        unique = []
+        for m in requested:
+            if m not in seen:
+                seen.add(m)
+                unique.append(m)
+        requested = unique
         invalid = [m for m in requested if m not in MTR_MODES]
         if invalid:
             return CommandResult.failure(
@@ -956,11 +1004,8 @@ def _run_parallel_modes(
     if not is_json:
         console.print()
         plan_table = Table(
-            title="MTR Parallel Execution Plan",
             show_header=True,
             header_style="bold cyan",
-            border_style="dim",
-            title_style="bold white",
             expand=True,
             box=box.ROUNDED,
         )
@@ -995,7 +1040,7 @@ def _run_parallel_modes(
 
         # Config info panel
         info_lines = []
-        info_lines.append(f"[bold]Config[/bold]   : {os.path.abspath(config_path)}")
+        info_lines.append(f"[bold]Config [/bold]   : {os.path.abspath(config_path)}")
         info_lines.append(f"[bold]Test dir[/bold]  : {test_dir}")
         info_lines.append(f"[bold]Log dir[/bold]   : {log_dir}")
         if getattr(args, "suite", None):
@@ -1006,7 +1051,6 @@ def _run_parallel_modes(
             "\n".join(info_lines),
             title="[bold cyan]Configuration[/bold cyan]",
             title_align="left",
-            border_style="dim",
             padding=(0, 1),
         ))
 
@@ -1019,17 +1063,17 @@ def _run_parallel_modes(
                 f"[dim]{cmd}[/dim]",
                 title=f"[bold cyan]{label}[/bold cyan]",
                 title_align="left",
-                border_style="dim",
                 padding=(0, 1),
             ))
 
     # --- 5. Execute modes in parallel with live progress ---
     results_lock = threading.Lock()
     mode_results: Dict[str, dict] = {}
+    total_start_time = _time.monotonic()
     # Track state for progress display
     mode_state: Dict[str, dict] = {
         m: {"status": "waiting", "elapsed": 0.0, "exit_code": None,
-            "last_line": "", "start_time": None}
+            "last_line": "", "start_time": None, "progress": 0}
         for m in modes
     }
 
@@ -1062,9 +1106,13 @@ def _run_parallel_modes(
                             continue
                         log_f.write(line + "\n")
                         log_f.flush()
+                        # Parse progress percentage
+                        pct = _parse_mtr_progress(stripped)
                         # Update last meaningful line for progress display
                         if stripped:
                             with results_lock:
+                                if pct is not None:
+                                    mode_state[mode_name]["progress"] = pct
                                 mode_state[mode_name]["last_line"] = stripped[-80:]
                 except KeyboardInterrupt:
                     proc.terminate()
@@ -1094,14 +1142,14 @@ def _run_parallel_modes(
         table = Table(
             show_header=True,
             header_style="bold cyan",
-            border_style="dim",
             expand=True,
             padding=(0, 1),
             box=box.ROUNDED,
         )
         table.add_column("Mode", style="bold", min_width=16)
-        table.add_column("Status", min_width=12)
+        table.add_column("Progress", min_width=14)
         table.add_column("Elapsed", justify="right", min_width=10)
+        table.add_column("Log File", min_width=20, no_wrap=True)
         table.add_column("Latest Output", ratio=1, overflow="ellipsis", no_wrap=True)
 
         for m in modes:
@@ -1124,10 +1172,15 @@ def _run_parallel_modes(
                 else:
                     elapsed_str = f"{mins:02d}m{secs:02d}s"
 
+            # Build progress display
+            pct = st.get("progress", 0)
             if st["status"] == "waiting":
                 status = Text("⏳ Waiting", style="dim")
             elif st["status"] == "running":
-                status = Text("🔄 Running", style="yellow bold")
+                bar_filled = int(pct / 5)  # 20-char bar
+                bar_empty = 20 - bar_filled
+                bar_str = f"[yellow]{'█' * bar_filled}{'░' * bar_empty}[/yellow] {pct}%"
+                status = Text.from_markup(bar_str)
             elif st["status"] == "done":
                 if st["exit_code"] == 0:
                     status = Text("✅ Passed", style="green bold")
@@ -1136,67 +1189,61 @@ def _run_parallel_modes(
             else:
                 status = Text(st["status"])
 
-            table.add_row(label, status, elapsed_str, st.get("last_line", ""))
+            # For done states, always show 100%
+            if st["status"] == "done":
+                pct_display = 100
+            else:
+                pct_display = pct
+
+            # Log file path (absolute)
+            log_path = os.path.abspath(os.path.join(log_dir, f"{m}.log"))
+
+            table.add_row(label, status, elapsed_str, log_path, st.get("last_line", ""))
 
         return table
 
     interrupted = False
-    if not is_json:
-        with Live(
-            _build_progress_table(),
-            console=console,
-            refresh_per_second=2,
-            transient=False,
-        ) as live:
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=len(modes)
-            ) as pool:
-                futures = {
-                    pool.submit(_run_single_mode, m): m for m in modes
-                }
-
-                # Update progress while waiting
-                while True:
-                    done_futures = {
-                        f for f in futures if f.done()
-                    }
-                    live.update(_build_progress_table())
-
-                    if len(done_futures) == len(futures):
-                        break
-                    _time.sleep(0.5)
-
-                # Collect results
-                for fut in futures:
-                    try:
-                        result = fut.result()
-                        mode_results[result["mode"]] = result
-                    except KeyboardInterrupt:
-                        interrupted = True
-                    except Exception as e:
-                        m = futures[fut]
-                        mode_results[m] = {
-                            "mode": m,
-                            "label": MTR_MODES[m]["label"],
-                            "exit_code": -1,
-                            "elapsed": 0,
-                            "log_file": os.path.join(log_dir, f"{m}.log"),
-                            "error": str(e),
-                        }
-    else:
-        # JSON mode: no live display
+    # Both JSON and non-JSON modes show live progress on stderr
+    with Live(
+        _build_progress_table(),
+        console=console,
+        refresh_per_second=2,
+        transient=False,
+    ) as live:
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=len(modes)
         ) as pool:
-            futures = {pool.submit(_run_single_mode, m): m for m in modes}
-            for fut in concurrent.futures.as_completed(futures):
+            futures = {
+                pool.submit(_run_single_mode, m): m for m in modes
+            }
+
+            # Update progress while waiting
+            while True:
+                done_futures = {
+                    f for f in futures if f.done()
+                }
+                live.update(_build_progress_table())
+
+                if len(done_futures) == len(futures):
+                    break
+                _time.sleep(0.5)
+
+            # Collect results
+            for fut in futures:
                 try:
                     result = fut.result()
                     mode_results[result["mode"]] = result
+                except KeyboardInterrupt:
+                    interrupted = True
                 except Exception as e:
                     m = futures[fut]
                     mode_results[m] = {
-                        "mode": m, "exit_code": -1, "error": str(e)
+                        "mode": m,
+                        "label": MTR_MODES[m]["label"],
+                        "exit_code": -1,
+                        "elapsed": 0,
+                        "log_file": os.path.join(log_dir, f"{m}.log"),
+                        "error": str(e),
                     }
 
     if interrupted:
@@ -1206,13 +1253,9 @@ def _run_parallel_modes(
 
     # --- 6. Print final summary ---
     if not is_json:
-        console.print()
         summary = Table(
-            title="MTR Execution Summary",
             show_header=True,
-            header_style="bold white on dark_blue",
-            border_style="blue",
-            title_style="bold white",
+            header_style="bold cyan",
             padding=(0, 1),
             box=box.ROUNDED,
             expand=True,
@@ -1226,7 +1269,6 @@ def _run_parallel_modes(
         summary.add_column("Elapsed", justify="right", min_width=10)
         summary.add_column("Log File")
 
-        all_passed = True
         mode_stats: Dict[str, dict] = {}
         for m in modes:
             r = mode_results.get(m, {})
@@ -1251,7 +1293,6 @@ def _run_parallel_modes(
                 result_text = "[green bold]PASSED[/green bold]"
             else:
                 result_text = "[red bold]FAILED[/red bold]"
-                all_passed = False
 
             summary.add_row(
                 label,
@@ -1267,7 +1308,6 @@ def _run_parallel_modes(
         console.print(summary)
 
         # Show failed cases per mode
-        has_failures = False
         for m in modes:
             stats = mode_stats.get(m, {})
             failing = stats.get("failing_tests", [])
@@ -1284,23 +1324,6 @@ def _run_parallel_modes(
                     border_style="red",
                     padding=(0, 1),
                 ))
-
-        console.print(f"\n  Log directory: {log_dir}")
-
-        if all_passed:
-            console.print("  [green bold]All modes passed! ✅[/green bold]\n")
-        else:
-            failed_modes = [
-                MTR_MODES[m]["label"]
-                for m in modes
-                if mode_results.get(m, {}).get("exit_code", -1) != 0
-            ]
-            console.print(
-                f"  [red bold]Failed modes: {', '.join(failed_modes)} ❌[/red bold]"
-            )
-            console.print(
-                "  [dim]Check log files for details.[/dim]\n"
-            )
 
     # --- 7. Build result ---
     any_failed = any(
@@ -1325,6 +1348,7 @@ def _run_parallel_modes(
         "record": getattr(args, "record", False),
         "optimistic": getattr(args, "optimistic", False),
         "log_dir": log_dir,
+        "total_elapsed_seconds": round(_time.monotonic() - total_start_time, 1),
         "mode_results": {
             m: {
                 "label": MTR_MODES[m]["label"],
@@ -1347,10 +1371,10 @@ def _run_parallel_modes(
             for m in modes
             if mode_results.get(m, {}).get("exit_code", -1) != 0
         ]
-        return CommandResult.failure(
-            f"MTR failed for mode(s): {', '.join(failed_names)}",
+        return CommandResult.partial(
             command="mtr",
             data=result_data,
+            warning=f"Some test cases failed in mode(s): {', '.join(failed_names)}",
         )
     return CommandResult.success("mtr", result_data)
 
@@ -1511,51 +1535,86 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
 
         # Clean counters and snapshot .gcda state
         if not is_json:
-            print(f"gcov           : ON ({gcov_detail})")
-            print(f"gcov tool      : {gcov_tool}")
-            print(f"Report tool    : {'fastcov (fast)' if has_fastcov else 'lcov (slow, consider: pip install fastcov)'}")
-            print(f"Build directory: {build_dir}")
+            from rich.console import Console as _Console
+            _gcov_setup_console = _Console(stderr=True)
+            _gcov_setup_console.print(f"gcov           : ON ({gcov_detail})")
+            _gcov_setup_console.print(f"gcov tool      : {gcov_tool}")
+            _gcov_setup_console.print(f"Report tool    : {'fastcov (fast)' if has_fastcov else 'lcov (slow, consider: pip install fastcov)'}")
+            _gcov_setup_console.print(f"Build directory: {build_dir}")
             if gcov_filter == "auto":
-                print(f"gcov filter    : auto (git diff vs origin/master)")
+                _gcov_setup_console.print(f"gcov filter    : auto (git diff vs origin/master)")
             elif gcov_filter == "all":
-                print(f"gcov filter    : all (full project)")
+                _gcov_setup_console.print(f"gcov filter    : all (full project)")
             else:
-                print(f"gcov filter    : {gcov_filter}")
+                _gcov_setup_console.print(f"gcov filter    : {gcov_filter}")
 
         gcov_clean = getattr(args, "gcov_clean", False)
         if gcov_clean:
             if not is_json:
-                print(f"Cleaning gcov counters...")
+                _gcov_setup_console.print(f"Cleaning gcov counters...")
             clean_ok, clean_msg = _gcov_clean(build_dir)
             if not is_json:
-                print(f"  {clean_msg}")
+                _gcov_setup_console.print(f"  {clean_msg}")
         else:
             if not is_json:
-                print(f"gcov mode      : accumulate (use --gcov-clean to reset)")
+                _gcov_setup_console.print(f"gcov mode      : accumulate (use --gcov-clean to reset)")
 
     # Print plan
     if not is_json:
-        print(f"Config file    : {os.path.abspath(config_path)}")
-        print(f"Test directory : {test_dir}")
-        print(f"Mode           : {'total' if total_mode else 'base'}")
-        print(f"Port base      : {port_base}")
-        print(f"Skip list      : {cfg['skip_list']}")
+        from rich.console import Console as _Console
+        from rich.panel import Panel as _Panel
+        console_plan = _Console(stderr=True)
+        info_lines = []
+        info_lines.append(f"[bold]Config [/bold]    : {os.path.abspath(config_path)}")
+        info_lines.append(f"[bold]Test dir[/bold]   : {test_dir}")
+        info_lines.append(f"[bold]Mode[/bold]       : {'total' if total_mode else 'base'}")
+        info_lines.append(f"[bold]Port base[/bold]  : {port_base}")
+        info_lines.append(f"[bold]Skip list[/bold]  : {cfg['skip_list']}")
         if cfg["suite"]:
-            print(f"Suite          : {cfg['suite']}")
+            info_lines.append(f"[bold]Suite[/bold]      : {cfg['suite']}")
         if cfg["cases"]:
-            print(f"Cases          : {' '.join(cfg['cases'])}")
+            info_lines.append(f"[bold]Cases[/bold]      : {' '.join(cfg['cases'])}")
         if cfg["record"]:
-            print(f"Record mode    : ON")
+            info_lines.append(f"[bold]Record[/bold]     : ON")
         if cfg["optimistic"]:
-            print(f"Optimistic     : ON")
+            info_lines.append(f"[bold]Optimistic[/bold] : ON")
         if cfg["vector"]:
-            print(f"Vector engine  : ON")
+            info_lines.append(f"[bold]Vector[/bold]     : ON")
         if cfg["parallel_query"]:
-            print(f"Parallel query : ON")
-        print()
+            info_lines.append(f"[bold]PQ[/bold]         : ON")
+        console_plan.print(_Panel(
+            "\n".join(info_lines),
+            title="[bold cyan]MTR Execution Plan[/bold cyan]",
+            title_align="left",
+            padding=(0, 1),
+        ))
 
     # --- 4. Execute MTR ---
     original_dir = os.getcwd()
+    mtr_start_time = _time.monotonic()
+
+    # Build mode label for progress display
+    mode_parts = []
+    if cfg["vector"]:
+        mode_parts.append("ve-protocol")
+    if cfg["parallel_query"]:
+        mode_parts.append("parallel-query")
+    if cfg["optimistic"]:
+        mode_parts.append("optimistic")
+    mode_label = "+".join(mode_parts) if mode_parts else "row (default)"
+    mode_name = _parse_mtr_mode_name(args)
+
+    # Create log directory
+    from ..paths import MTR_LOGS_DIR
+    log_dir = os.path.join(
+        MTR_LOGS_DIR,
+        _time.strftime("%Y%m%d_%H%M%S"),
+    )
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, f"{mode_name}.log")
+
+    verbose = getattr(args, "verbose", False)
+
     try:
         os.chdir(test_dir)
         proc = subprocess.Popen(
@@ -1566,8 +1625,113 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
             text=True,
             bufsize=1,
         )
-        verbose = getattr(args, "verbose", False)
-        exit_code = _filter_output(proc, verbose=verbose)
+
+        if not verbose:
+            # Use Live Table (same style as parallel mode) for non-verbose
+            from rich import box
+            from rich.console import Console
+            from rich.live import Live
+            from rich.table import Table
+            from rich.text import Text
+
+            console = Console(stderr=True)
+
+            # Track state for progress display
+            progress_pct = 0
+            last_line = ""
+            done = False
+            final_exit_code = -1
+
+            def _build_single_progress_table() -> Table:
+                nonlocal progress_pct, last_line, done, final_exit_code
+                table = Table(
+                    show_header=True,
+                    header_style="bold cyan",
+                    expand=True,
+                    padding=(0, 1),
+                    box=box.ROUNDED,
+                )
+                table.add_column("Mode", style="bold", min_width=16)
+                table.add_column("Progress", min_width=14)
+                table.add_column("Elapsed", justify="right", min_width=10)
+                table.add_column("Log File", min_width=20, no_wrap=True)
+                table.add_column("Latest Output", ratio=1, overflow="ellipsis", no_wrap=True)
+
+                label = mode_label
+                elapsed = _time.monotonic() - mtr_start_time
+                mins, secs = divmod(int(elapsed), 60)
+                hours, mins = divmod(mins, 60)
+                if hours > 0:
+                    elapsed_str = f"{hours}h{mins:02d}m{secs:02d}s"
+                else:
+                    elapsed_str = f"{mins:02d}m{secs:02d}s"
+
+                if done:
+                    if final_exit_code == 0:
+                        status = Text("✅ Passed", style="green bold")
+                    else:
+                        status = Text(f"❌ Failed({final_exit_code})", style="red bold")
+                else:
+                    bar_filled = int(progress_pct / 5)  # 20-char bar
+                    bar_empty = 20 - bar_filled
+                    bar_str = f"[yellow]{'█' * bar_filled}{'░' * bar_empty}[/yellow] {progress_pct}%"
+                    status = Text.from_markup(bar_str)
+
+                table.add_row(label, status, elapsed_str,
+                              os.path.abspath(log_path), last_line[-80:])
+                return table
+
+            with Live(
+                _build_single_progress_table(),
+                console=console,
+                refresh_per_second=2,
+                transient=is_json,
+            ) as live:
+                # Read MTR output in a background thread so the
+                # Live display can keep refreshing Elapsed even
+                # when no new output arrives.
+                read_error = None
+
+                def _reader():
+                    nonlocal progress_pct, last_line, read_error
+                    try:
+                        for raw_line in proc.stdout:
+                            line = raw_line.rstrip("\n")
+                            stripped = line.strip()
+                            if not _should_suppress(stripped):
+                                log_f.write(line + "\n")
+                                log_f.flush()
+                            pct = _parse_mtr_progress(stripped)
+                            if pct is not None:
+                                progress_pct = pct
+                            if stripped:
+                                last_line = stripped
+                    except Exception as e:
+                        read_error = e
+
+                with open(log_path, "w", encoding="utf-8") as log_f:
+                    reader_thread = threading.Thread(target=_reader, daemon=True)
+                    reader_thread.start()
+                    try:
+                        while reader_thread.is_alive():
+                            live.update(_build_single_progress_table())
+                            reader_thread.join(timeout=0.5)
+                    except KeyboardInterrupt:
+                        proc.terminate()
+                        reader_thread.join(timeout=2)
+                    # Final update after reader finishes
+                    proc.wait()
+                    final_exit_code = proc.returncode
+                    done = True
+                    progress_pct = 100
+                    live.update(_build_single_progress_table())
+
+            exit_code = final_exit_code
+        else:
+            # Verbose mode: print everything to stdout, no progress table
+            with open(log_path, "w", encoding="utf-8") as log_f:
+                exit_code = _filter_output(proc, verbose=True, log_file=log_f)
+
     except Exception as e:
         return CommandResult.failure(f"Failed to execute mtr: {str(e)}", command="mtr")
     finally:
@@ -1575,26 +1739,45 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
 
     if exit_code == -1:
         if not is_json:
-            print("\nInterrupted by user.")
+            console_err = Console(stderr=True)
+            console_err.print("\n[yellow bold]Interrupted by user.[/yellow bold]")
         return CommandResult.failure("MTR execution interrupted by user", command="mtr")
+
+    # Print elapsed time (only for verbose mode; non-verbose already shows in Live Table)
+    total_elapsed = _time.monotonic() - mtr_start_time
+    if not is_json and verbose:
+        from rich.console import Console as _Console
+        console_out = _Console(stderr=True)
+        total_mins, total_secs = divmod(int(total_elapsed), 60)
+        total_hours, total_mins = divmod(total_mins, 60)
+        if total_hours > 0:
+            elapsed_str = f"{total_hours}h{total_mins:02d}m{total_secs:02d}s"
+        else:
+            elapsed_str = f"{total_mins:02d}m{total_secs:02d}s"
+        console_out.print(f"\n  Log directory : {log_dir}")
+        console_out.print(f"  Log file      : [bold]{os.path.abspath(log_path)}[/bold]")
+        console_out.print(f"  Elapsed       : [bold]{elapsed_str}[/bold] ({round(total_elapsed, 1)}s)")
 
     # --- 5. gcov report (after MTR, regardless of exit code) ---
     coverage_data = None
     if gcov_enabled:
+        from rich.console import Console as _Console
+        _gcov_console = _Console(stderr=True)
+
         # Resolve filter mode
         if gcov_filter == "auto":
             changed = _find_changed_sources(build_dir)
             if changed:
                 if not is_json:
-                    print(f"\n  Git diff vs origin/master: "
+                    _gcov_console.print(f"\n  Git diff vs origin/master: "
                           f"{len(changed)} changed source files:")
                     for c in changed:
-                        print(f"    {c}")
+                        _gcov_console.print(f"    {c}")
                 _auto_touched = set(changed)
                 effective_filter = ""  # Capture all, filter post-parse
             else:
                 if not is_json:
-                    print("\n  Auto-filter: no changed files found "
+                    _gcov_console.print("\n  Auto-filter: no changed files found "
                           "vs origin/master, capturing full report")
                 _auto_touched = None
                 effective_filter = ""
@@ -1607,9 +1790,9 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
             effective_filter = gcov_filter
 
         if not is_json:
-            print("\nGenerating gcov coverage report...")
+            _gcov_console.print("\nGenerating gcov coverage report...")
             if effective_filter:
-                print(f"  Filter: {effective_filter}")
+                _gcov_console.print(f"  Filter: {effective_filter}")
 
         report_ok, report_result = _gcov_report(
             build_dir, gcov_tool,
@@ -1617,11 +1800,11 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
             has_fastcov=has_fastcov)
         if not report_ok:
             if not is_json:
-                print(f"  WARNING: Failed to generate coverage report")
-                print(f"  Detail: {report_result}")
+                _gcov_console.print(f"  WARNING: Failed to generate coverage report")
+                _gcov_console.print(f"  Detail: {report_result}")
         else:
             if not is_json:
-                print(f"  Info file: {report_result}")
+                _gcov_console.print(f"  Info file: {report_result}")
 
             # Parse, write to file, print summary path
             coverage_data = _parse_lcov_info(report_result)
@@ -1645,10 +1828,11 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
             cov_file = _write_coverage_report(coverage_data, build_dir)
             if not is_json:
                 _print_coverage_table(coverage_data)
-                print(f"  Report: {cov_file}")
+                _gcov_console.print(f"  Report: {cov_file}")
             coverage_data["report_file"] = cov_file
 
     # --- 6. Return result ---
+    total_elapsed = round(_time.monotonic() - mtr_start_time, 1)
     result_data = {
         "test_dir": test_dir,
         "mode": "total" if total_mode else "base",
@@ -1659,6 +1843,9 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
         "vector": cfg["vector"],
         "parallel_query": cfg["parallel_query"],
         "exit_code": exit_code,
+        "elapsed_seconds": total_elapsed,
+        "log_dir": log_dir,
+        "log_file": os.path.abspath(log_path),
     }
     if coverage_data:
         # Only include summary + file path in CommandResult (not full file details)
@@ -1670,9 +1857,10 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
     if exit_code == 0:
         return CommandResult.success("mtr", result_data)
     else:
-        # Still return coverage data even on failure
-        return CommandResult.failure(
-            f"MTR execution failed with exit code {exit_code}",
+        # MTR executed successfully but some test cases failed — this is a
+        # partial failure, not a tool execution failure.
+        return CommandResult.partial(
             command="mtr",
             data=result_data,
+            warning=f"MTR completed with exit code {exit_code} (some test cases failed)",
         )

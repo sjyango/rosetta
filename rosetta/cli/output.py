@@ -54,30 +54,24 @@ class OutputFormatter:
             console = Console()
             
             if result.ok:
-                console.print(f"[green]✓[/green] {result.command}")
                 if result.data:
                     self._print_data_human(console, result.data)
+                # Show warning for partial results (e.g. some test cases failed)
+                if result.status == "partial" and result.error:
+                    console.print(f"[yellow]Warning:[/yellow] {result.error}")
             else:
-                # Show command if meaningful, otherwise just show error
-                if result.command and result.command != "unknown":
-                    console.print(f"[red]✗[/red] {result.command}")
-                    if result.error:
-                        console.print(f"[red]Error:[/red] {result.error}")
-                else:
-                    console.print(f"[red]✗[/red] {result.error}")
+                if result.error:
+                    console.print(f"[red]Error:[/red] {result.error}")
         except ImportError:
             # Fallback to plain text if rich is not available
             if result.ok:
-                print(f"✓ {result.command}")
                 if result.data:
                     print(result.data)
+                if result.status == "partial" and result.error:
+                    print(f"Warning: {result.error}")
             else:
-                if result.command and result.command != "unknown":
-                    print(f"✗ {result.command}")
-                    if result.error:
-                        print(f"Error: {result.error}")
-                else:
-                    print(f"✗ {result.error}")
+                if result.error:
+                    print(f"Error: {result.error}")
     
     def _print_data_human(self, console, data: dict) -> None:
         """
@@ -100,9 +94,6 @@ class OutputFormatter:
                 self._print_dbms_status(console, data)
             else:  # list dbms
                 self._print_dbms_list(console, data)
-        elif "templates" in data and isinstance(data.get("templates"), list):
-            # list templates
-            self._print_templates(console, data)
         elif "runs" in data and isinstance(data.get("runs"), list):
             # result list / history
             self._print_history(console, data)
@@ -120,7 +111,8 @@ class OutputFormatter:
             self._print_config_show(console, data)
         elif all(not isinstance(v, (dict, list)) for v in data.values()):
             # Simple key-value data
-            table = Table(show_header=False)
+            from rich import box
+            table = Table(show_header=False, expand=True, box=box.ROUNDED)
             table.add_column("Key", style="cyan")
             table.add_column("Value")
             for k, v in data.items():
@@ -131,11 +123,14 @@ class OutputFormatter:
             import json
             console.print(Panel(
                 json.dumps(data, indent=2, ensure_ascii=False),
-                title="Result Data"
+                title="[bold cyan]Result Data[/bold cyan]",
+                title_align="left",
+                padding=(0, 1)
             ))
 
     def _print_dbms_status(self, console, data: dict) -> None:
         """Print DBMS connection status."""
+        from rich import box
         from rich.table import Table
         
         # Print DBMS table with summary in title
@@ -144,7 +139,11 @@ class OutputFormatter:
             total = data.get('total', 0)
             connected = data.get('connected', 0)
             disconnected = data.get('disconnected', 0)
-            table = Table(title=f"Total: {total}  Connected: {connected}  Disconnected: {disconnected}")
+            table = Table(
+                title=f"Total: {total}  Connected: {connected}  Disconnected: {disconnected}",
+                expand=True,
+                box=box.ROUNDED,
+            )
             table.add_column("Name", style="cyan", no_wrap=True)
             table.add_column("Host", no_wrap=True)
             table.add_column("Port", justify="right")
@@ -183,13 +182,18 @@ class OutputFormatter:
 
     def _print_dbms_list(self, console, data: dict) -> None:
         """Print configured DBMS list."""
+        from rich import box
         from rich.table import Table
         
         total = data.get('total', 0)
         dbms_list = data.get("dbms", [])
         
         if dbms_list:
-            table = Table(title=f"Total: {total}  Configured DBMS")
+            table = Table(
+                title=f"Total: {total}  Configured DBMS",
+                expand=True,
+                box=box.ROUNDED,
+            )
             table.add_column("Name", style="cyan", no_wrap=True)
             table.add_column("Host", no_wrap=True)
             table.add_column("Port", justify="right")
@@ -216,16 +220,21 @@ class OutputFormatter:
 
     def _print_config_show(self, console, data: dict) -> None:
         """Print configuration details."""
+        from rich import box
         from rich.table import Table
-        
+
         console.print(f"[cyan]Config Path:[/cyan] {data.get('config_path', '')}")
         console.print(f"[cyan]Total DBMS:[/cyan] {data.get('total_dbms', 0)}")
         console.print(f"[cyan]Enabled DBMS:[/cyan] {data.get('enabled_dbms', 0)}")
         console.print()
-        
+
         databases = data.get("databases", [])
         if databases:
-            table = Table(title="Database Configurations")
+            table = Table(
+                title="Database Configurations",
+                expand=True,
+                box=box.ROUNDED,
+            )
             table.add_column("Name", style="cyan", no_wrap=True)
             table.add_column("Host", no_wrap=True)
             table.add_column("Port", justify="right")
@@ -250,29 +259,9 @@ class OutputFormatter:
             
             console.print(table)
 
-    def _print_templates(self, console, data: dict) -> None:
-        """Print benchmark templates list."""
-        from rich.table import Table
-        
-        console.print(f"[cyan]Total Templates:[/cyan] {data.get('total', 0)}")
-        console.print()
-        
-        templates = data.get("templates", [])
-        if templates:
-            table = Table()
-            table.add_column("Name", style="cyan", no_wrap=True)
-            table.add_column("Description")
-            
-            for tmpl in templates:
-                table.add_row(
-                    tmpl.get("name", ""),
-                    tmpl.get("description", "")
-                )
-            
-            console.print(table)
-
     def _print_history(self, console, data: dict) -> None:
         """Print execution history (result list) with pagination."""
+        from rich import box
         from rich.table import Table
 
         total = data.get("total", 0)
@@ -290,8 +279,9 @@ class OutputFormatter:
             title=title,
             show_header=True,
             header_style="bold cyan",
-            border_style="dim",
             pad_edge=True,
+            expand=True,
+            box=box.ROUNDED,
         )
         table.add_column("#", style="dim", justify="right", no_wrap=True)
         table.add_column("Run ID", style="cyan")
@@ -305,8 +295,10 @@ class OutputFormatter:
                 type_badge = "[orange1]bench[/orange1]"
             elif rtype == "mtr":
                 type_badge = "[green]mtr[/green]"
+            elif rtype == "test":
+                type_badge = "[cyan]test[/cyan]"
             else:
-                type_badge = rtype
+                type_badge = f"[dim]{rtype or 'unknown'}[/dim]"
 
             table.add_row(
                 str(run.get("idx", "")),
@@ -331,6 +323,7 @@ class OutputFormatter:
     def _print_result_show(self, console, data: dict) -> None:
         """Print result show details."""
         import os
+        from rich import box
         from rich.table import Table
         from rich.panel import Panel
 
@@ -354,7 +347,6 @@ class OutputFormatter:
             "\n".join(info_lines),
             title="[bold cyan]Run Details[/bold cyan]",
             title_align="left",
-            border_style="cyan",
             padding=(0, 1),
         ))
 
@@ -366,7 +358,9 @@ class OutputFormatter:
                 title="[bold]Performance Summary[/bold]",
                 title_style="",
                 show_header=True, header_style="bold cyan",
-                border_style="dim", pad_edge=True,
+                pad_edge=True,
+                expand=True,
+                box=box.ROUNDED,
             )
             table.add_column("DBMS", style="bold", no_wrap=True)
             table.add_column("QPS", justify="right")
@@ -397,15 +391,12 @@ class OutputFormatter:
 
     def _print_bench_result(self, console, data: dict) -> None:
         """Print benchmark result summary."""
+        from rich import box
         from rich.table import Table
-        
-        console.print(f"[cyan]Workload:[/cyan] {data.get('workload', 'unknown')}")
-        console.print(f"[cyan]Mode:[/cyan] {data.get('mode', 'unknown')}")
-        console.print()
         
         dbms_results = data.get("dbms_results", [])
         if dbms_results:
-            table = Table(title="Benchmark Results")
+            table = Table(expand=True, box=box.ROUNDED)
             table.add_column("DBMS", style="cyan", no_wrap=True)
             table.add_column("QPS", justify="right", no_wrap=True)
             table.add_column("Duration", justify="right", no_wrap=True)
@@ -427,40 +418,143 @@ class OutputFormatter:
         console.print(f"[dim]Report directory:[/dim] {data.get('report_directory', '')}")
 
     def _print_mtr_result(self, console, data: dict) -> None:
-        """Print MTR test result summary."""
+        """Print MTR test result summary — styled like rosetta mtr output."""
+        from rich import box
         from rich.table import Table
-        
+        from rich.text import Text
+        from rich.panel import Panel
+
+        test_file = data.get('test_file', 'unknown')
         dbms_targets = ', '.join(data.get('dbms_targets', []))
-        
-        console.print(f"[cyan]Test File:[/cyan] {data.get('test_file', 'unknown')}")
-        
+        database = data.get('database', '')
+        baseline = data.get('baseline', '')
+
+        # --- Configuration panel (like rosetta mtr) ---
+        info_lines = []
+        info_lines.append(f"[bold]Test File[/bold]  : {test_file}")
+        info_lines.append(f"[bold]DBMS[/bold]       : {dbms_targets}")
+        if database:
+            info_lines.append(f"[bold]Database[/bold]   : {database}")
+        if baseline:
+            info_lines.append(f"[bold]Baseline[/bold]   : {baseline}")
+        report_dir = data.get('report_directory', '')
+        if report_dir:
+            info_lines.append(f"[bold]Report Dir[/bold] : {report_dir}")
+        console.print(Panel(
+            "\n".join(info_lines),
+            title="[bold cyan]Configuration[/bold cyan]",
+            title_align="left",
+            padding=(0, 1),
+        ))
+
+        # --- Summary table (like rosetta mtr) ---
         comparisons = data.get("comparisons", {})
         if comparisons:
-            table = Table(title=f"DBMS Targets: {dbms_targets}")
-            table.add_column("Comparison", style="cyan", no_wrap=True)
-            table.add_column("Matched", justify="right")
-            table.add_column("Mismatched", justify="right")
-            table.add_column("Pass Rate", justify="right", no_wrap=True)
-            
+            table = Table(
+                show_header=True,
+                header_style="bold cyan",
+                padding=(0, 1),
+                box=box.ROUNDED,
+                expand=True,
+            )
+            table.add_column("Comparison", style="bold", min_width=18)
+            table.add_column("Result", min_width=10)
+            table.add_column("Total", justify="center")
+            table.add_column("Matched", justify="center")
+            table.add_column("Mismatch", justify="center")
+            table.add_column("Pass Rate", justify="center")
+
+            any_error = False
             for key, cmp in comparisons.items():
+                mismatched = cmp.get("mismatched", 0)
+                pass_rate = cmp.get('pass_rate', 0)
+                total = cmp.get("total_statements", 0)
+                matched = cmp.get("matched", 0)
+                if mismatched > 0:
+                    any_error = True
+
+                # Result column
+                if pass_rate >= 100:
+                    result_text = "[green bold]PASSED[/green bold]"
+                elif mismatched > 0:
+                    result_text = "[red bold]FAILED[/red bold]"
+                else:
+                    result_text = "[green bold]PASSED[/green bold]"
+
+                # Matched column
+                matched_text = f"[green]{matched}[/green]"
+
+                # Mismatch
+                if mismatched > 0:
+                    mismatch_text = f"[red bold]{mismatched}[/red bold]"
+                else:
+                    mismatch_text = "[green]0[/green]"
+                    err_text = "[green]0[/green]"
+
+                # Pass Rate
+                if pass_rate >= 100:
+                    rate_text = f"[green bold]{pass_rate:.1f}%[/green bold]"
+                elif pass_rate >= 90:
+                    rate_text = f"[yellow bold]{pass_rate:.1f}%[/yellow bold]"
+                else:
+                    rate_text = f"[red bold]{pass_rate:.1f}%[/red bold]"
+
                 table.add_row(
                     key,
-                    str(cmp.get("matched", 0)),
-                    str(cmp.get("mismatched", 0)),
-                    f"{cmp.get('pass_rate', 0):.1f}%"
+                    result_text,
+                    str(total),
+                    matched_text,
+                    mismatch_text,
+                    rate_text,
                 )
-            
+
             console.print(table)
-        
+
+            # Show details for failed/diff comparisons (like rosetta mtr failed cases panel)
+            for key, cmp in comparisons.items():
+                mismatched = cmp.get("mismatched", 0)
+                if mismatched > 0:
+                    detail_lines = []
+                    if mismatched > 0:
+                        detail_lines.append(
+                            f"  [red]•[/red] [bold]Mismatches[/bold]: {mismatched} "
+                            f"(behavioral difference, needs investigation)"
+                        )
+                    # Add hint for report files
+                    report_files = data.get('report_files', [])
+                    if report_files:
+                        txt_reports = [f for f in report_files if f.endswith('.report.txt')]
+                        html_reports = [f for f in report_files if f.endswith('.html')]
+                        hint_parts = []
+                        if txt_reports:
+                            hint_parts.append(
+                                f"  [dim]📄 Text:[/dim] {txt_reports[0]}"
+                            )
+                        if html_reports:
+                            hint_parts.append(
+                                f"  [dim]🌐 HTML:[/dim] {html_reports[0]}"
+                            )
+                        if hint_parts:
+                            detail_lines.append("")
+                            detail_lines.append(
+                                f"  [cyan]View diff details:[/cyan]"
+                            )
+                            detail_lines.extend(hint_parts)
+                    console.print(Panel(
+                        "\n".join(detail_lines),
+                        title=f"[bold red]{key} — Issues ({effective + dbms_diff})[/bold red]",
+                        title_align="left",
+                        border_style="red" if effective > 0 else "yellow",
+                        padding=(0, 1),
+                    ))
+
         if data.get("failed_connections"):
             console.print()
             console.print(f"[red]Failed Connections:[/red] {', '.join(data['failed_connections'])}")
-        
-        console.print()
-        console.print(f"[dim]Report directory:[/dim] {data.get('report_directory', '')}")
 
     def _print_exec_result(self, console, data: dict) -> None:
         """Print SQL execution result — one column per DBMS."""
+        from rich import box
         from rich.table import Table
 
         results = data.get("results", {})
@@ -488,9 +582,9 @@ class OutputFormatter:
         table = Table(
             show_header=True,
             header_style="bold cyan",
-            border_style="dim",
             pad_edge=True,
             expand=True,
+            box=box.ROUNDED,
         )
         table.add_column("#", style="bold cyan", no_wrap=True, justify="right", width=3)
         table.add_column("SQL", style="dim", no_wrap=True, max_width=40)

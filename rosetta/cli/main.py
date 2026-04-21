@@ -105,7 +105,7 @@ def create_parser() -> argparse.ArgumentParser:
 def _add_test_arguments(parser):
     """Add cross-DBMS consistency test arguments to a parser."""
     parser.add_argument(
-        "-t", "--test",
+        "--file",
         required=True,
         help="Path to .test file",
     )
@@ -118,7 +118,7 @@ def _add_test_arguments(parser):
     parser.add_argument(
         "--dbms",
         required=True,
-        help="DBMS targets, comma-separated (e.g. tdsql,mysql,tidb)",
+        help="DBMS targets: comma-separated names (e.g. tdsql,mysql,tidb) or 'all'",
     )
     parser.add_argument(
         "--database", "-d",
@@ -221,7 +221,8 @@ def _add_mtr_arguments(parser):
         type=str,
         default=None,
         help="Run multiple MTR modes in parallel. "
-             "Comma-separated list of: row (行存), col (列存/ve-protocol), pq (并行查询). "
+             "Comma-separated list of: row (行存), col (列存/ve-protocol), pq (并行查询), "
+             "or 'all' (equivalent to row,col,pq). "
              "Example: --mode row,col,pq. "
              "When specified, --vector and --parallel-query flags are ignored.",
     )
@@ -304,16 +305,12 @@ def _add_bench_arguments(parser):
     parser.add_argument(
         "--dbms",
         required=True,
-        help="DBMS targets, comma-separated (e.g. tdsql,mysql)",
+        help="DBMS targets: comma-separated names (e.g. tdsql,mysql) or 'all'",
     )
     parser.add_argument(
         "--file",
         dest="bench_file",
         help="Benchmark definition file (.json or .sql)",
-    )
-    parser.add_argument(
-        "--template",
-        help="Use a built-in template (e.g. oltp_read_write, oltp_read_only)",
     )
     parser.add_argument(
         "--mode",
@@ -381,12 +378,6 @@ def _add_bench_arguments(parser):
         help="Run only queries matching these names (comma-separated)",
     )
     parser.add_argument(
-        "--repeat",
-        type=int,
-        default=1,
-        help="Number of benchmark rounds (default: 1)",
-    )
-    parser.add_argument(
         "--skip-setup",
         action="store_true",
         default=False,
@@ -408,14 +399,8 @@ def _add_bench_arguments(parser):
     parser.add_argument(
         "--profile",
         action="store_true",
-        default=True,
-        help="Enable flame-graph capture (default: on)",
-    )
-    parser.add_argument(
-        "--no-profile",
-        action="store_false",
-        dest="profile",
-        help="Disable flame-graph capture",
+        default=False,
+        help="Enable flame-graph capture via perf",
     )
     parser.add_argument(
         "--perf-freq",
@@ -466,15 +451,15 @@ def _add_list_subparser(subparsers):
     """Add the 'list' subcommand."""
     list_parser = subparsers.add_parser(
         "list",
-        help="List resources (configs, history, templates)",
-        description="List databases, execution history, or benchmark templates",
+        help="List resources (configs, history)",
+        description="List databases or execution history",
     )
     list_parser.add_argument(
         "resource",
         nargs="?",
         default="dbms",
-        choices=["dbms", "history", "templates"],
-        help="Resource to list: dbms (databases), history (runs), templates (benchmarks) (default: dbms)",
+        choices=["dbms", "history"],
+        help="Resource to list: dbms (databases), history (runs) (default: dbms)",
     )
     list_parser.add_argument(
         "--limit",
@@ -518,7 +503,7 @@ def _add_exec_subparser(subparsers):
     )
     exec_parser.add_argument(
         "--dbms",
-        help="DBMS targets, comma-separated (default: all from config)",
+        help="DBMS targets: comma-separated names or 'all' (default: all from config)",
     )
     exec_parser.add_argument(
         "--database", "-d",

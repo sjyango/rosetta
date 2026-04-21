@@ -34,22 +34,15 @@ def main():
     all_configs = load_config(args.config)
     configs = [c for c in all_configs if c.enabled]
 
-    # Set up whitelist/buglist
+    # Set up output directory
     output_dir = os.path.abspath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
-
-    from rosetta.whitelist import Whitelist
-    from rosetta.buglist import Buglist
-    whitelist = Whitelist(output_dir)
-    buglist = Buglist(output_dir)
 
     # Start server
     from rosetta.interactive import ReportServer
     server = ReportServer(
         directory=output_dir,
         port=args.port,
-        whitelist=whitelist,
-        buglist=buglist,
         configs=configs,
         all_configs=all_configs,
         database=args.database,

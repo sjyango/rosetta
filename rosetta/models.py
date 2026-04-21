@@ -65,30 +65,19 @@ class CompareResult:
     matched: int = 0
     mismatched: int = 0
     skipped: int = 0
-    sql_whitelisted: int = 0
     diffs: List[Dict] = field(default_factory=list)
 
     @property
-    def whitelisted(self) -> int:
-        """Count of diffs that are whitelisted."""
-        return sum(1 for d in self.diffs if d.get("whitelisted"))
-
-    @property
-    def bug_marked(self) -> int:
-        """Count of diffs that are marked as bugs."""
-        return sum(1 for d in self.diffs if d.get("bug_marked"))
-
-    @property
     def effective_mismatched(self) -> int:
-        """Mismatches excluding whitelisted, sql_whitelisted and bug_marked diffs."""
-        return self.mismatched - self.whitelisted - self.sql_whitelisted - self.bug_marked
+        """Mismatches that are real errors (all mismatched diffs count)."""
+        return self.mismatched
 
     @property
     def pass_rate(self) -> float:
         effective = self.total_stmts - self.skipped
         if effective == 0:
             return 100.0
-        return ((self.matched + self.whitelisted + self.sql_whitelisted + self.bug_marked) / effective) * 100.0
+        return (self.matched / effective) * 100.0
 
 
 # ---------------------------------------------------------------------------

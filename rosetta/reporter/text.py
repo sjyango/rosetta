@@ -27,15 +27,15 @@ def write_text_report(path: str, test_file: str,
         f.write("SUMMARY\n")
         f.write("-" * 70 + "\n")
         f.write(f"{'Comparison':<35} {'Match':>6} {'Mismatch':>9} "
-                f"{'Skip':>6} {'Total':>6} {'Pass%':>7}\n")
+                f"{'Total':>6} {'Pass%':>7}\n")
         f.write("-" * 70 + "\n")
 
         for key, cmp in comparisons.items():
             f.write(f"{key:<35} {cmp.matched:>6} "
-                    f"{cmp.mismatched:>9} {cmp.skipped:>6} "
+                    f"{cmp.mismatched:>9} "
                     f"{cmp.total_stmts:>6} "
                     f"{cmp.pass_rate:>6.1f}%\n")
-            if cmp.mismatched > 0:
+            if cmp.effective_mismatched > 0:
                 all_pass = False
 
         f.write("-" * 70 + "\n")
@@ -47,10 +47,13 @@ def write_text_report(path: str, test_file: str,
         for key, cmp in comparisons.items():
             if not cmp.diffs:
                 continue
+            real_diffs = [d for d in cmp.diffs if not d.get("skipped", False)]
+            if not real_diffs:
+                continue
             f.write("=" * 70 + "\n")
             f.write(f"DIFFS: {key}\n")
             f.write("=" * 70 + "\n")
-            for d in cmp.diffs:
+            for d in real_diffs:
                 f.write(f"\n--- Block {d['block']}: "
                         f"{d['stmt'][:80]}\n")
                 # Show surrounding context for quick orientation
@@ -76,15 +79,19 @@ def write_text_report(path: str, test_file: str,
 
 def write_diff_file(path: str,
                     comparisons: Dict[str, CompareResult]):
-    """Write a unified diff file."""
+    """Write a unified diff file (excluding skipped diffs)."""
     diff_lines = []
     for key, cmp in comparisons.items():
         if not cmp.diffs:
             continue
+        # Filter out skipped diffs
+        real_diffs = [d for d in cmp.diffs if not d.get("skipped", False)]
+        if not real_diffs:
+            continue
         diff_lines.append("=" * 70)
         diff_lines.append(f"DIFFS: {key}")
         diff_lines.append("=" * 70)
-        for d in cmp.diffs:
+        for d in real_diffs:
             diff_lines.append(
                 f"\n--- Block {d['block']}: {d['stmt'][:100]}"
             )

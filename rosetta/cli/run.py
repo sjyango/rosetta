@@ -37,8 +37,6 @@ def _handle_run_mtr(args, output: "OutputFormatter") -> CommandResult:
         CommandResult with test results
     """
     from ..config import load_config, filter_configs, DEFAULT_TEST_DB
-    from ..whitelist import Whitelist
-    from ..buglist import Buglist
     from ..runner import RosettaRunner
     import logging
     
@@ -64,23 +62,30 @@ def _handle_run_mtr(args, output: "OutputFormatter") -> CommandResult:
     if not configs:
         return CommandResult.failure("No databases selected for testing")
     
-    # Check test file
-    if not os.path.isfile(args.test):
+    if len(configs) < 2:
         return CommandResult.failure(
-            f"Test file not found: {args.test}",
+            "At least 2 DBMS targets are required for cross-DBMS comparison. "
+            f"Got: {', '.join(c.name for c in configs)}. "
+            "Use --dbms to specify multiple targets (e.g. --dbms tdsql,mysql).",
+        )
+    
+    # Check test file
+    if not os.path.isfile(args.file):
+        return CommandResult.failure(
+            f"Test file not found: {args.file}",
         )
     
     # Parse-only mode
     if args.parse_only:
         try:
             from ..mtr import MtrParser
-            mtr_parser = MtrParser(args.test)
+            mtr_parser = MtrParser(args.file)
             test = mtr_parser.parse()
             cmd_types = set(c.cmd_type.name for c in test.commands)
             return CommandResult.success(
                 "mtr parse-only",
                 {
-                    "test_file": args.test,
+                    "test_file": args.file,
                     "total_commands": len(test.commands),
                     "command_types": sorted(cmd_types),
                     "commands": [
@@ -99,7 +104,7 @@ def _handle_run_mtr(args, output: "OutputFormatter") -> CommandResult:
     # Create output directory
     output_dir = os.path.abspath(args.output_dir)
     run_stamp = _time.strftime("%Y%m%d_%H%M%S")
-    test_name = Path(args.test).stem
+    test_name = Path(args.file).stem
     run_dir = os.path.join(output_dir, f"{test_name}_{run_stamp}")
     os.makedirs(run_dir, exist_ok=True)
     
@@ -127,13 +132,9 @@ def _handle_run_mtr(args, output: "OutputFormatter") -> CommandResult:
     log.addHandler(file_handler)
     log.setLevel(logging.DEBUG)  # Ensure all levels are captured
     
-    # Load whitelist and buglist
-    whitelist = Whitelist(output_dir)
-    buglist = Buglist(output_dir)
-    
     # Use RosettaRunner for MTR execution (has progress bars)
     runner = RosettaRunner(
-        test_file=args.test,
+        test_file=args.file,
         configs=configs,
         output_dir=run_dir,
         database=args.database,
@@ -142,8 +143,6 @@ def _handle_run_mtr(args, output: "OutputFormatter") -> CommandResult:
         skip_analyze=args.skip_analyze,
         skip_show_create=args.skip_show_create,
         output_format=args.output_format,
-        whitelist=whitelist,
-        buglist=buglist,
     )
     
     comparisons = runner.run()
@@ -169,17 +168,14 @@ def _handle_run_mtr(args, output: "OutputFormatter") -> CommandResult:
             "matched": cmp.matched,
             "mismatched": cmp.mismatched,
             "effective_mismatched": cmp.effective_mismatched,
-            "whitelisted": cmp.whitelisted,
-            "sql_whitelisted": cmp.sql_whitelisted,
-            "bug_marked": cmp.bug_marked,
             "pass_rate": round(cmp.pass_rate, 2),
         }
     
     # Get report files
     report_files = []
     for f in os.listdir(run_dir):
-        if f.endswith(('.report.txt', '.diff', '.html')):
-            report_files.append(f)
+        if f.endswith(('.report.txt', '.html')):
+            report_files.append(os.path.join(run_dir, f))
     
     # Handle --serve: start HTTP server and block
     if getattr(args, 'serve', False):
@@ -190,7 +186,7 @@ def _handle_run_mtr(args, output: "OutputFormatter") -> CommandResult:
             html_file = html_files[0]
         else:
             # Fallback: use test name
-            test_name = Path(args.test).stem
+            test_name = Path(args.file).stem
             html_file = f"{test_name}.html"
         
         port = getattr(args, 'port', 19527)
@@ -200,7 +196,7 @@ def _handle_run_mtr(args, output: "OutputFormatter") -> CommandResult:
     return CommandResult.success(
         "mtr",
         {
-            "test_file": args.test,
+            "test_file": args.file,
             "dbms_targets": [c.name for c in configs],
             "database": args.database,
             "baseline": args.baseline,
@@ -264,21 +260,21 @@ def _handle_run_bench(args, output: "OutputFormatter") -> CommandResult:
 
     # Load workload & extra JSON config
     json_extra_config = {}
+    if not args.bench_file:
+        return CommandResult.failure(
+            "Missing --file. Specify a benchmark definition file (.json or .sql).",
+            command="bench",
+        )
     try:
-        if args.bench_file:
-            workload = BenchmarkLoader.from_file(args.bench_file)
-            if args.bench_file.endswith('.json'):
-                with open(args.bench_file, 'r') as f:
-                    json_data = json.load(f)
-                    json_extra_config = {
-                        'database': json_data.get('database'),
-                        'skip_setup': json_data.get('skip_setup'),
-                        'skip_teardown': json_data.get('skip_teardown'),
-                    }
-        elif args.template:
-            workload = BenchmarkLoader.from_builtin(args.template)
-        else:
-            workload = BenchmarkLoader.from_builtin("oltp_read_write")
+        workload = BenchmarkLoader.from_file(args.bench_file)
+        if args.bench_file.endswith('.json'):
+            with open(args.bench_file, 'r') as f:
+                json_data = json.load(f)
+                json_extra_config = {
+                    'database': json_data.get('database'),
+                    'skip_setup': json_data.get('skip_setup'),
+                    'skip_teardown': json_data.get('skip_teardown'),
+                }
     except (FileNotFoundError, ValueError) as e:
         return CommandResult.failure(str(e))
 
@@ -331,13 +327,13 @@ def _handle_run_bench(args, output: "OutputFormatter") -> CommandResult:
             return CommandResult.failure(str(e))
 
     parallel_dbms = getattr(args, "parallel_dbms", True)
-    repeat = max(1, getattr(args, 'repeat', 1))
     output_dir = os.path.abspath(args.output_dir)
     fmt = args.output_format
+    is_json = getattr(args, "json", False)
 
     # Determine database: JSON config overrides CLI default
     json_database = json_extra_config.get('database')
-    final_database = json_database if json_database else args.database
+    final_database = json_database if json_database is not None else args.database
 
     # ------------------------------------------------------------------
     # Setup logging: redirect to file, suppress console noise
@@ -348,44 +344,38 @@ def _handle_run_bench(args, output: "OutputFormatter") -> CommandResult:
     logging.root.handlers.clear()
 
     # ------------------------------------------------------------------
-    # Print plan (rich UI)
+    # Print plan (rich UI) — skip in JSON mode
     # ------------------------------------------------------------------
-    print_phase("Benchmark", workload.name)
-    print_info("Mode:", mode.name)
-    print_info("DBMS targets:", ", ".join(c.name for c in configs))
-    if parallel_dbms and len(configs) > 1:
-        print_info("DBMS execution:", "[bold green]parallel[/bold green]")
-    elif not parallel_dbms and len(configs) > 1:
-        print_info("DBMS execution:", "sequential")
-    print_info("Queries:", ", ".join(q.name for q in display_workload.queries))
-    if mode == WorkloadMode.SERIAL:
-        print_info("Iterations:",
-                   f"{bench_cfg.iterations}  Warmup: {bench_cfg.warmup}")
-    else:
-        print_info("Concurrency:",
-                   f"{bench_cfg.concurrency}  Duration: {bench_cfg.duration}s")
-    if filter_queries:
-        print_info("Filter:", ", ".join(filter_queries))
-    if repeat > 1:
-        print_info("Repeat:", f"{repeat} rounds")
-    if bench_cfg.profile:
-        print_info("Profiling:",
-                   f"[bold red]🔥 perf flame graph[/bold red] "
-                   f"(freq: {bench_cfg.perf_freq} Hz)")
-    if bench_cfg.skip_setup:
-        print_info("Setup:", "[bold yellow]SKIPPED[/bold yellow] (reusing existing tables)")
-    if bench_cfg.skip_teardown:
-        print_info("Teardown:", "[bold yellow]SKIPPED[/bold yellow] (keeping tables)")
+    if not is_json:
+        print_phase("Benchmark", workload.name)
+        print_info("Mode:", mode.name)
+        print_info("DBMS targets:", ", ".join(c.name for c in configs))
+        if parallel_dbms and len(configs) > 1:
+            print_info("DBMS execution:", "[bold green]parallel[/bold green]")
+        elif not parallel_dbms and len(configs) > 1:
+            print_info("DBMS execution:", "sequential")
+        print_info("Queries:", ", ".join(q.name for q in display_workload.queries))
+        if mode == WorkloadMode.SERIAL:
+            print_info("Iterations:",
+                       f"{bench_cfg.iterations}  Warmup: {bench_cfg.warmup}")
+        else:
+            print_info("Concurrency:",
+                       f"{bench_cfg.concurrency}  Duration: {bench_cfg.duration}s")
+        if filter_queries:
+            print_info("Filter:", ", ".join(filter_queries))
+        if bench_cfg.profile:
+            print_info("Profiling:",
+                       f"[bold red]🔥 perf flame graph[/bold red] "
+                       f"(freq: {bench_cfg.perf_freq} Hz)")
+        if bench_cfg.skip_setup:
+            print_info("Setup:", "[bold yellow]SKIPPED[/bold yellow] (reusing existing tables)")
+        if bench_cfg.skip_teardown:
+            print_info("Teardown:", "[bold yellow]SKIPPED[/bold yellow] (keeping tables)")
 
     # ------------------------------------------------------------------
     # Inner function: single benchmark round with progress bars
     # ------------------------------------------------------------------
-    def _run_one_round(round_num: int):
-        if repeat > 1:
-            console.print(f"\n[bold cyan]{'━' * 60}[/bold cyan]")
-            console.print(f"[bold cyan]  Round {round_num}/{repeat}[/bold cyan]")
-            console.print(f"[bold cyan]{'━' * 60}[/bold cyan]\n")
-
+    def _run_one_round():
         run_stamp = _time.strftime("%Y%m%d_%H%M%S")
         run_dir = os.path.join(output_dir, f"bench_{workload.name}_{run_stamp}")
         os.makedirs(run_dir, exist_ok=True)
@@ -400,135 +390,235 @@ def _handle_run_bench(args, output: "OutputFormatter") -> CommandResult:
         log.addHandler(file_handler)
         log.setLevel(logging.DEBUG)
 
-        print_phase("Execute")
+        if not is_json:
+            print_phase("Execute")
 
-        # Progress tracking
-        progress_bars = {}
-        _progress_lock = threading.Lock()
+        # --- Live Table progress (same style as rosetta mtr/test) ---
+        from rich import box
+        from rich.console import Console as _Console
+        from rich.live import Live as _Live
+        from rich.table import Table as _Table
+        from rich.text import Text as _Text
+
+        live_console = _Console(stderr=True)
 
         n_queries = len(display_workload.queries)
         is_concurrent = (mode == WorkloadMode.CONCURRENT)
         if is_concurrent:
             duration = bench_cfg.duration if bench_cfg.duration > 0 else 30.0
-            per_query = 100
+            total_iters = int(duration)  # time-based
         else:
             duration = 0.0
-            per_query = bench_cfg.iterations + bench_cfg.warmup
+            total_iters = n_queries * (bench_cfg.iterations + bench_cfg.warmup)
 
-        # Pre-create progress bars for parallel mode
-        if parallel_dbms and len(configs) > 1:
+        # Track state per DBMS
+        dbms_state = {
+            c.name: {
+                "status": "waiting",
+                "progress": 0,
+                "total": total_iters,
+                "completed": 0,
+                "elapsed": 0.0,
+                "start_time": None,
+                "last_status": "",
+                "is_concurrent": is_concurrent,
+                "duration": duration,
+            }
+            for c in configs
+        }
+        _state_lock = threading.Lock()
+
+        def _build_bench_progress_table() -> _Table:
+            table = _Table(
+                show_header=True,
+                header_style="bold cyan",
+                expand=True,
+                padding=(0, 1),
+                box=box.ROUNDED,
+            )
+            table.add_column("DBMS", style="bold", min_width=12)
+            table.add_column("Progress", min_width=14)
+            table.add_column("Elapsed", justify="right", min_width=10)
+            table.add_column("Status", ratio=1, overflow="ellipsis", no_wrap=True)
+
             for c in configs:
-                bp = BenchProgress(
-                    c.name, n_queries, per_query,
-                    is_concurrent=is_concurrent, duration=duration)
-                bp.__enter__()
-                bp.set_status("[yellow]正在setup...[/yellow]")
-                progress_bars[c.name] = bp
+                st = dbms_state[c.name]
+                # Elapsed time
+                if st["status"] == "done" and st["elapsed"] > 0:
+                    elapsed = st["elapsed"]
+                elif st["start_time"] is not None:
+                    elapsed = _time.monotonic() - st["start_time"]
+                else:
+                    elapsed = 0
+                mins, secs = divmod(int(elapsed), 60)
+                hours, mins = divmod(mins, 60)
+                if hours > 0:
+                    elapsed_str = f"{hours}h{mins:02d}m{secs:02d}s"
+                else:
+                    elapsed_str = f"{mins:02d}m{secs:02d}s"
+
+                # Progress display
+                pct = st.get("progress", 0)
+                if st["status"] == "waiting":
+                    progress = _Text("⏳ Waiting", style="dim")
+                elif st["status"] == "running":
+                    bar_filled = int(pct / 5)  # 20-char bar
+                    bar_empty = 20 - bar_filled
+                    if is_concurrent and duration > 0:
+                        elapsed_int = int(elapsed)
+                        bar_str = (f"[yellow]{'█' * bar_filled}{'░' * bar_empty}"
+                                   f"[/yellow] {elapsed_int}s/{int(duration)}s")
+                    else:
+                        bar_str = (f"[yellow]{'█' * bar_filled}{'░' * bar_empty}"
+                                   f"[/yellow] {pct}%")
+                    progress = _Text.from_markup(bar_str)
+                elif st["status"] == "done":
+                    if st.get("failed"):
+                        progress = _Text("❌ Failed", style="red bold")
+                    else:
+                        progress = _Text("✅ Done", style="green bold")
+                else:
+                    progress = _Text(st["status"])
+
+                # Status text
+                status_text = st.get("last_status", "")
+
+                table.add_row(c.name, progress, elapsed_str, status_text)
+
+            return table
 
         def on_setup_start(dbms_name):
-            with _progress_lock:
-                if dbms_name not in progress_bars:
-                    bp = BenchProgress(
-                        dbms_name, n_queries, per_query,
-                        is_concurrent=is_concurrent, duration=duration)
-                    bp.__enter__()
-                    bp.set_status("[yellow]正在setup...[/yellow]")
-                    progress_bars[dbms_name] = bp
+            with _state_lock:
+                st = dbms_state[dbms_name]
+                st["status"] = "running"
+                st["start_time"] = _time.monotonic()
+                st["last_status"] = "setup..."
 
         def on_setup_done(dbms_name, success):
-            bp = progress_bars.get(dbms_name)
-            if bp:
+            with _state_lock:
+                st = dbms_state[dbms_name]
                 if success:
-                    bp.set_status("[green]setup完毕[/green]")
+                    st["last_status"] = "setup done"
                 else:
-                    bp.set_status("[red]setup失败 — 跳过该DBMS[/red]")
-                    # Close progress bar for failed DBMS
-                    bp.__exit__(None, None, None)
-                    bp.write_summary_to_buffer()
+                    st["status"] = "done"
+                    st["elapsed"] = _time.monotonic() - (st["start_time"] or _time.monotonic())
+                    st["failed"] = True
+                    st["last_status"] = "setup failed"
 
         def on_dbms_start(dbms_name):
-            with _progress_lock:
-                if dbms_name not in progress_bars:
-                    bp = BenchProgress(
-                        dbms_name, n_queries, per_query,
-                        is_concurrent=is_concurrent, duration=duration)
-                    bp.__enter__()
-                    progress_bars[dbms_name] = bp
+            with _state_lock:
+                st = dbms_state[dbms_name]
+                if st["status"] != "done":  # not failed during setup
+                    st["status"] = "running"
+                    if st["start_time"] is None:
+                        st["start_time"] = _time.monotonic()
 
         def on_progress(dbms_name, query_name, iteration, total,
                         is_warmup=False):
-            bp = progress_bars.get(dbms_name)
-            if bp and not is_concurrent:
-                bp.advance(query_name=query_name, is_warmup=is_warmup)
+            with _state_lock:
+                st = dbms_state[dbms_name]
+                st["completed"] += 1
+                if st["total"] > 0 and not is_concurrent:
+                    st["progress"] = int(st["completed"] / st["total"] * 100)
+                status_prefix = "warmup" if is_warmup else ""
+                if is_concurrent and duration > 0:
+                    elapsed = _time.monotonic() - (st["start_time"] or _time.monotonic())
+                    st["progress"] = min(int(elapsed / duration * 100), 100)
+                    st["last_status"] = f"{status_prefix}{query_name}" if is_warmup else query_name
+                else:
+                    st["last_status"] = f"{status_prefix}{query_name} {iteration}/{total}" if is_warmup else f"{query_name} {iteration}/{total}"
 
         def on_dbms_done(dbms_name, dbms_result):
-            bp = progress_bars.get(dbms_name)
-            if bp:
-                bp.set_status(
-                    f"[green]{dbms_result.total_queries} queries, "
-                    f"{dbms_result.overall_qps:.1f} QPS[/green]")
-                bp.__exit__(None, None, None)
-                bp.write_summary_to_buffer()
+            with _state_lock:
+                st = dbms_state[dbms_name]
+                st["status"] = "done"
+                st["progress"] = 100
+                st["elapsed"] = _time.monotonic() - (st["start_time"] or _time.monotonic())
+                st["last_status"] = (
+                    f"{dbms_result.total_queries} queries, "
+                    f"{dbms_result.overall_qps:.1f} QPS"
+                )
 
         def on_profile_start(dbms_name, query_name):
-            bp = progress_bars.get(dbms_name)
-            if bp:
-                bp.set_status(f"[red]🔥 profiling {query_name}[/red]")
+            with _state_lock:
+                st = dbms_state[dbms_name]
+                st["last_status"] = f"🔥 profiling {query_name}"
 
         def on_profile_done(dbms_name, query_name, sample_count):
-            bp = progress_bars.get(dbms_name)
-            if bp:
-                bp.set_status(
-                    f"[dim]🔥 {query_name}: {sample_count} samples[/dim]")
+            with _state_lock:
+                st = dbms_state[dbms_name]
+                st["last_status"] = f"🔥 {query_name}: {sample_count} samples"
 
-        # Timer thread for concurrent mode
+        def on_run_start():
+            with _state_lock:
+                for c in configs:
+                    st = dbms_state[c.name]
+                    if st["status"] != "done":
+                        st["start_time"] = _time.monotonic()
+
+        # Timer thread for concurrent mode (updates progress periodically)
         timer_stop_event = None
         timer_thread = None
-        query_phase_started = threading.Event()
-        timer_start_time = [None]
 
         if is_concurrent:
             timer_stop_event = threading.Event()
 
             def _timer_update():
-                query_phase_started.wait()
                 while not timer_stop_event.is_set():
-                    if timer_start_time[0] is not None:
-                        elapsed = _time.monotonic() - timer_start_time[0]
-                        if elapsed >= duration:
-                            break
-                    for _, bp in list(progress_bars.items()):
-                        bp.update_time(status="")
+                    with _state_lock:
+                        for c in configs:
+                            st = dbms_state[c.name]
+                            if st["status"] == "running" and st["start_time"] is not None:
+                                elapsed = _time.monotonic() - st["start_time"]
+                                if duration > 0:
+                                    st["progress"] = min(int(elapsed / duration * 100), 100)
                     _time.sleep(0.5)
 
             timer_thread = threading.Thread(target=_timer_update, daemon=True)
             timer_thread.start()
 
-        def on_run_start():
-            with _progress_lock:
-                for bp in progress_bars.values():
-                    bp.reset_timer()
-            timer_start_time[0] = _time.monotonic()
-            query_phase_started.set()
-
         try:
-            result = run_benchmark(
-                configs=configs,
-                workload=workload,
-                bench_cfg=bench_cfg,
-                database=final_database,
-                on_progress=on_progress,
-                on_dbms_start=on_dbms_start,
-                on_dbms_done=on_dbms_done,
-                on_profile_start=on_profile_start if bench_cfg.profile else None,
-                on_profile_done=on_profile_done if bench_cfg.profile else None,
-                on_run_start=on_run_start,
-                on_setup_start=on_setup_start,
-                on_setup_done=on_setup_done,
-                parallel_dbms=parallel_dbms,
-            )
-            # Set run_id for the result
-            result.run_id = os.path.basename(run_dir)
+            with _Live(
+                _build_bench_progress_table(),
+                console=live_console,
+                refresh_per_second=2,
+                transient=is_json,
+            ) as live:
+                # Background thread to refresh the Live table periodically
+                # (callbacks update dbms_state but don't call live.update)
+                _live_stop_event = threading.Event()
+
+                def _live_refresher():
+                    while not _live_stop_event.is_set():
+                        live.update(_build_bench_progress_table())
+                        _live_stop_event.wait(0.5)
+
+                _refresher_thread = threading.Thread(target=_live_refresher, daemon=True)
+                _refresher_thread.start()
+
+                try:
+                    result = run_benchmark(
+                        configs=configs,
+                        workload=workload,
+                        bench_cfg=bench_cfg,
+                        database=final_database,
+                        on_progress=on_progress,
+                        on_dbms_start=on_dbms_start,
+                        on_dbms_done=on_dbms_done,
+                        on_profile_start=on_profile_start if bench_cfg.profile else None,
+                        on_profile_done=on_profile_done if bench_cfg.profile else None,
+                        on_run_start=on_run_start,
+                        on_setup_start=on_setup_start,
+                        on_setup_done=on_setup_done,
+                        parallel_dbms=parallel_dbms,
+                    )
+                    # Set run_id for the result
+                    result.run_id = os.path.basename(run_dir)
+                finally:
+                    # Stop the live refresher and do one final update
+                    _live_stop_event.set()
+                    _refresher_thread.join(timeout=1.0)
+                    live.update(_build_bench_progress_table())
         finally:
             if timer_stop_event is not None:
                 timer_stop_event.set()
@@ -536,21 +626,25 @@ def _handle_run_bench(args, output: "OutputFormatter") -> CommandResult:
                     timer_thread.join(timeout=1.0)
 
         # Generate reports
-        print_phase("Reports")
+        if not is_json:
+            print_phase("Reports")
 
         if fmt in ("text", "all"):
             text_path = os.path.join(run_dir, f"bench_{workload.name}.report.txt")
             write_bench_text_report(text_path, result)
-            print_report_file(text_path, label="text")
+            if not is_json:
+                print_report_file(text_path, label="text")
 
         if fmt in ("html", "all"):
             html_path = os.path.join(run_dir, f"bench_{workload.name}.html")
             write_bench_html_report(html_path, result)
-            print_report_file(html_path, label="html")
+            if not is_json:
+                print_report_file(html_path, label="html")
 
         json_path = os.path.join(run_dir, "bench_result.json")
         _save_bench_json(json_path, result, bench_file=args.bench_file or "", database=final_database)
-        print_report_file(json_path, label="json")
+        if not is_json:
+            print_report_file(json_path, label="json")
 
         # Update latest symlink
         latest_link = os.path.join(output_dir, "latest")
@@ -562,8 +656,9 @@ def _handle_run_bench(args, output: "OutputFormatter") -> CommandResult:
             pass
 
         generate_index_html(output_dir)
-        print_bench_summary(result)
-        flush_all()
+        if not is_json:
+            print_bench_summary(result)
+            flush_all()
 
         # Remove file handler after round
         log.removeHandler(file_handler)
@@ -575,21 +670,10 @@ def _handle_run_bench(args, output: "OutputFormatter") -> CommandResult:
     # ------------------------------------------------------------------
     last_run_dir = None
     last_result = None
-    for rnd in range(1, repeat + 1):
-        try:
-            last_run_dir, last_result = _run_one_round(rnd)
-        except KeyboardInterrupt:
-            console.print(
-                f"\n[yellow]Interrupted at round {rnd}/{repeat}. "
-                f"Stopping.[/yellow]")
-            flush_all()
-            break
-        if rnd < repeat:
-            _time.sleep(1)
-
-    if repeat > 1:
-        console.print(
-            f"\n[bold green]All {repeat} rounds completed.[/bold green]")
+    try:
+        last_run_dir, last_result = _run_one_round()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted. Stopping.[/yellow]")
         flush_all()
 
     if last_result is None:
@@ -602,7 +686,7 @@ def _handle_run_bench(args, output: "OutputFormatter") -> CommandResult:
     if last_run_dir:
         for f in os.listdir(last_run_dir):
             if f.endswith(('.report.txt', '.html', '.json')):
-                report_files.append(f)
+                report_files.append(os.path.join(last_run_dir, f))
 
     return CommandResult.success(
         "bench",

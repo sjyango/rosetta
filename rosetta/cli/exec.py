@@ -67,12 +67,23 @@ def handle_exec(args, output: "OutputFormatter") -> CommandResult:
             sql_text = f.read()
     else:
         return CommandResult.failure(
-            "Either --sql or --file is required",
+            "Either --sql or --file is required. "
+            "Use --sql 'SELECT ...' or --file /path/to/script.sql",
         )
     
     # Parse SQL statements
+    # For --sql mode, split on semicolons first so that
+    # "SELECT 1; SELECT 2" is treated as two statements.
+    # The MTR parser is line-based and won't split in-line semicolons.
     try:
-        parsed = TestFileParser.parse_text(sql_text)
+        if args.sql and ";" in sql_text:
+            # Split by semicolons, filter empty, and re-join with newlines
+            # so the MTR parser treats each as a separate statement.
+            parts = [p.strip() for p in sql_text.split(";") if p.strip()]
+            sql_text_for_parse = ";\n".join(parts) + ";\n"
+            parsed = TestFileParser.parse_text(sql_text_for_parse)
+        else:
+            parsed = TestFileParser.parse_text(sql_text)
         statements = [s.text for s in parsed]
     except Exception as e:
         return CommandResult.failure(f"Parse error: {str(e)}")

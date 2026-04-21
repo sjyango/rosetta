@@ -26,8 +26,6 @@ def handle_list(args, output: "OutputFormatter") -> CommandResult:
         return _handle_list_dbms(args, output)
     elif args.resource == "history":
         return _handle_list_history(args, output)
-    elif args.resource == "templates":
-        return _handle_list_templates(args, output)
     else:
         return CommandResult.failure(
             f"Unknown list resource: {args.resource}",
@@ -176,43 +174,4 @@ def _handle_list_history(args, output: "OutputFormatter") -> CommandResult:
     )
 
 
-def _handle_list_templates(args, output: "OutputFormatter") -> CommandResult:
-    """
-    List built-in benchmark templates.
-    
-    Args:
-        args: Parsed arguments
-        output: Output formatter
-    
-    Returns:
-        CommandResult with template list
-    """
-    from ..benchmark import BenchmarkLoader
-    
-    templates = BenchmarkLoader.list_builtin_templates()
-    
-    template_info = []
-    for name in templates:
-        info = {
-            "name": name,
-            "description": _get_template_description(name),
-        }
-        template_info.append(info)
-    
-    return CommandResult.success(
-        "list templates",
-        {
-            "total": len(templates),
-            "templates": template_info,
-        },
-    )
 
-
-def _get_template_description(name: str) -> str:
-    """Get description for a built-in template."""
-    descriptions = {
-        "oltp_read_write": "OLTP Read-Write mixed workload with point selects, updates, inserts, and aggregates",
-        "oltp_read_only": "OLTP Read-Only workload with point selects, range scans, and aggregates",
-        "oltp_write_only": "OLTP Write-Only workload with inserts, updates, replaces, and deletes",
-    }
-    return descriptions.get(name, "Built-in benchmark template")

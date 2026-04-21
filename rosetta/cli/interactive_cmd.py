@@ -105,21 +105,10 @@ def handle_interactive(args, output: "OutputFormatter") -> CommandResult:
         # Launch interactive session
         exit_code = _enter_interactive(legacy_args)
         
-        return CommandResult.success(
-            "interactive",
-            {
-                "exit_code": exit_code,
-                "message": "Interactive session ended",
-            },
-        )
+        return CommandResult.success("interactive")
     
     except KeyboardInterrupt:
-        return CommandResult.success(
-            "interactive",
-            {
-                "message": "Interactive session interrupted",
-            },
-        )
+        return CommandResult.success("interactive")
     except Exception as e:
         return CommandResult.failure(
             f"Interactive session failed: {str(e)}",

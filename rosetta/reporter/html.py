@@ -31,9 +31,7 @@ def _build_summary_data(comparisons: Dict[str, CompareResult]) -> List[dict]:
             "dbms_b": cmp.dbms_b,
             "matched": cmp.matched,
             "mismatched": cmp.mismatched,
-            "whitelisted": cmp.whitelisted,
-            "sql_whitelisted": cmp.sql_whitelisted,
-            "bug_marked": cmp.bug_marked,
+            "effective_mismatched": cmp.effective_mismatched,
             "skipped": cmp.skipped,
             "total": cmp.total_stmts,
             "pass_rate": round(cmp.pass_rate, 1),
@@ -42,7 +40,7 @@ def _build_summary_data(comparisons: Dict[str, CompareResult]) -> List[dict]:
 
 
 def _build_diff_data(comparisons: Dict[str, CompareResult]) -> List[dict]:
-    """Build diff data for the template."""
+    """Build diff data for the template (includes all diffs, front-end filters)."""
     sections = []
     for key, cmp in comparisons.items():
         if not cmp.diffs:
@@ -56,12 +54,8 @@ def _build_diff_data(comparisons: Dict[str, CompareResult]) -> List[dict]:
                 "lines_b": d.get("lines_b", []),
                 "context_before": d.get("context_before", []),
                 "context_after": d.get("context_after", []),
-                "fingerprint": d.get("fingerprint", ""),
-                "whitelisted": d.get("whitelisted", False),
-                "sql_whitelisted": d.get("sql_whitelisted", False),
                 "skipped": d.get("skipped", False),
                 "skip_reason": d.get("skip_reason", ""),
-                "bug_marked": d.get("bug_marked", False),
             })
         sections.append({
             "key": key,
@@ -165,25 +159,14 @@ tr:hover { background: var(--bg3); }
 .filter-btn-all.active { background: var(--bg3); border-color: var(--fg2); box-shadow: none; }
 .filter-btn-diff { color: var(--red); }
 .filter-btn-diff.active { background: var(--red-bg); border-color: var(--red); box-shadow: none; }
-.filter-btn-wl { color: var(--orange); }
-.filter-btn-wl.active { background: var(--orange-bg); border-color: var(--orange); box-shadow: none; }
-.filter-btn-sqlwl { color: #e6a817; }
-.filter-btn-sqlwl.active { background: #2d2009; border-color: #e6a817; box-shadow: none; }
-.filter-btn-bug { color: var(--red); }
-.filter-btn-bug.active { background: var(--red-bg); border-color: var(--red); box-shadow: none; }
 .filter-btn-skip { color: var(--fg2); }
 .filter-btn-skip.active { background: var(--bg3); border-color: var(--fg2); box-shadow: none; }
-.filter-btn-unmarked { color: var(--blue); }
-.filter-btn-unmarked.active { background: rgba(31,111,235,0.12); border-color: var(--accent); box-shadow: none; }
 .filter-sep { width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
 
 /* Diff sections */
 .diff-section { background: var(--bg2); border: 1px solid var(--border);
   border-radius: 8px; margin-bottom: 16px; overflow: hidden; }
-.diff-section.whitelisted { opacity: 0.55; }
-.diff-section.sql-whitelisted { opacity: 0.65; }
 .diff-section.skipped-block { opacity: 0.5; border-left: none; }
-.diff-section.bug-marked { border-left: 3px solid var(--red); }
 .diff-header { padding: 12px 16px; cursor: pointer; display: flex;
   align-items: center; gap: 12px; user-select: none; }
 .diff-header:hover { background: var(--bg3); }
@@ -195,34 +178,6 @@ tr:hover { background: var(--bg3); }
   white-space: nowrap; flex: 1; }
 .diff-body { display: block; border-top: 1px solid var(--border); }
 .diff-body.collapsed { display: none; }
-
-/* Whitelist badge on diff header */
-.wl-badge { display: inline-block; padding: 2px 8px; border-radius: 12px;
-  font-size: 11px; font-weight: 600; background: var(--orange-bg);
-  color: var(--orange); white-space: nowrap; }
-
-/* Bug badge on diff header */
-.bug-badge { display: inline-block; padding: 2px 8px; border-radius: 12px;
-  font-size: 11px; font-weight: 600; background: var(--red-bg);
-  color: var(--red); white-space: nowrap; }
-
-/* Whitelist button in diff body */
-.wl-bar { padding: 8px 16px; display: flex; align-items: center; gap: 12px;
-  border-bottom: 1px solid var(--border); background: var(--bg); }
-.btn-wl { padding: 4px 14px; border-radius: 6px; font-size: 12px;
-  font-weight: 600; cursor: pointer; border: 1px solid var(--border);
-  transition: all 0.15s; min-width: 160px; height: 32px; line-height: 22px;
-  display: inline-flex; align-items: center; justify-content: center;
-  box-sizing: border-box; }
-.btn-wl-add { background: var(--orange-bg); color: var(--orange); border-color: var(--orange); }
-.btn-wl-add:hover { opacity: 0.85; }
-.btn-wl-remove { background: var(--bg3); color: var(--fg2); }
-.btn-wl-remove:hover { color: var(--red); border-color: var(--red); }
-.btn-bug-add { background: var(--red-bg); color: var(--red); border-color: var(--red); }
-.btn-bug-add:hover { opacity: 0.85; }
-.btn-bug-remove { background: var(--bg3); color: var(--fg2); }
-.btn-bug-remove:hover { color: var(--red); border-color: var(--red); }
-.wl-status { font-size: 12px; color: var(--fg2); }
 
 /* Side-by-side diff */
 .side-by-side { display: grid; grid-template-columns: 1fr 1fr; }
@@ -307,8 +262,6 @@ tr:hover { background: var(--bg3); }
     <h1><svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 3C6 1.9 6.9 1 8 1H24C25.1 1 26 1.9 26 3V28C26 29.1 25.1 30 24 30H8C6.9 30 6 29.1 6 28V3Z" stroke="#58a6ff" stroke-width="2" fill="none"/><line x1="16" y1="5" x2="16" y2="27" stroke="#30363d" stroke-width="1" stroke-dasharray="2 2"/><line x1="9" y1="8" x2="14" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="8" x2="23" y2="8" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="12" x2="14" y2="12" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="12" x2="23" y2="12" stroke="#f85149" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="16" x2="14" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="16" x2="23" y2="16" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="20" x2="14" y2="20" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="20" x2="23" y2="20" stroke="#d29922" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="24" x2="14" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="24" x2="23" y2="24" stroke="#3fb950" stroke-width="2" stroke-linecap="round"/></svg> <span class="brand">Rosetta</span> <span class="title-rest">Report</span></h1>
     <a href="../index.html" class="btn-nav">&#9664; History</a>
     <a href="../playground.html" class="btn-nav">&#9654; Playground</a>
-    <a href="../whitelist.html" class="btn-nav">&#9782; Whitelist</a>
-    <a href="../buglist.html" class="btn-nav">&#128027; Buglist</a>
   </div>
   <div class="meta">
     <span>Test: <strong>{{TEST_NAME}}</strong></span>
@@ -330,8 +283,8 @@ tr:hover { background: var(--bg3); }
     <table>
       <thead>
         <tr>
-          <th>Comparison</th><th>Status</th><th>Match</th><th>Mismatch</th>
-          <th>Whitelist</th><th>SQL-WL</th><th>Bug</th><th>Skip</th><th>Total</th><th>Pass Rate</th>
+          <th>Comparison</th><th>Status</th><th>Match</th>
+          <th>Mismatch</th><th>Total</th><th>Pass Rate</th>
         </tr>
       </thead>
       <tbody id="summary-body"></tbody>
@@ -343,11 +296,7 @@ tr:hover { background: var(--bg3); }
     <div class="filter-bar" id="filter-bar">
       <button class="filter-btn filter-btn-all active" data-filter="all">All</button>
       <button class="filter-btn filter-btn-diff" data-filter="active">Diff</button>
-      <button class="filter-btn filter-btn-wl" data-filter="whitelisted">WL</button>
-      <button class="filter-btn filter-btn-sqlwl" data-filter="sql_whitelisted">SQL-WL</button>
-      <button class="filter-btn filter-btn-bug" data-filter="bug">Bug</button>
       <button class="filter-btn filter-btn-skip" data-filter="skipped">Skip</button>
-      <button class="filter-btn filter-btn-unmarked" data-filter="unmarked">Unmarked</button>
       <span class="filter-sep"></span>
       <input type="text" id="search-input" placeholder="Search SQL...">
     </div>
@@ -393,30 +342,10 @@ function showToast(msg, type) {
   setTimeout(() => { t.style.opacity = '0'; }, 2500);
 }
 
-function callWhitelistAPI(action, body) {
-  const port = location.port || '80';
-  const base = location.protocol + '//' + location.hostname + ':' + port;
-  return fetch(base + '/api/whitelist/' + action, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(body),
-  }).then(r => r.json());
-}
-
-function callBuglistAPI(action, body) {
-  const port = location.port || '80';
-  const base = location.protocol + '//' + location.hostname + ':' + port;
-  return fetch(base + '/api/buglist/' + action, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(body),
-  }).then(r => r.json());
-}
-
 // Render summary table
 const tbody = document.getElementById('summary-body');
 SUMMARY.forEach(r => {
-  const effectiveMismatch = r.mismatched - (r.whitelisted || 0) - (r.sql_whitelisted || 0) - (r.bug_marked || 0);
+  const effectiveMismatch = r.effective_mismatched || 0;
   const status = effectiveMismatch <= 0;
   const pct = r.pass_rate;
   const row = document.createElement('tr');
@@ -425,10 +354,6 @@ SUMMARY.forEach(r => {
     <td><span class="badge ${status ? 'badge-pass' : 'badge-fail'}">${status ? 'PASS' : 'FAIL'}</span></td>
     <td class="num-match">${r.matched}</td>
     <td class="${effectiveMismatch > 0 ? 'num-mismatch' : ''}">${effectiveMismatch > 0 ? effectiveMismatch : 0}</td>
-    <td class="num-wl">${r.whitelisted || 0}</td>
-    <td class="num-sql-wl">${r.sql_whitelisted || 0}</td>
-    <td class="num-bug">${r.bug_marked || 0}</td>
-    <td>${r.skipped}</td>
     <td>${r.total}</td>
     <td>
       <span class="bar-bg"><span class="bar-fill" style="width:${pct}%;background:${pct>=100?'var(--green)':pct>=90?'var(--yellow)':'var(--red)'}"></span></span>
@@ -450,16 +375,12 @@ function renderTabs() {
     return;
   }
   DIFFS.forEach(sec => {
-    const active = sec.diffs.filter(d => !d.whitelisted && !d.sql_whitelisted && !d.skipped).length;
-    const wl = sec.diffs.filter(d => d.whitelisted).length;
-    const swl = sec.diffs.filter(d => d.sql_whitelisted).length;
+    const active = sec.diffs.filter(d => !d.skipped).length;
     const skips = sec.diffs.filter(d => d.skipped).length;
-    const bugs = sec.diffs.filter(d => d.bug_marked).length;
     const tab = document.createElement('div');
     tab.className = 'comp-tab' + (sec.key === activeTab ? ' active' : '');
     let label = `${esc(sec.key)}<span class="tab-count">(${active}`;
-    if (wl > 0) label += ` +${wl} wl`;
-    if (bugs > 0) label += ` +${bugs} bug`;
+    if (skips > 0) label += ` +${skips} skip`;
     label += ')</span>';
     tab.innerHTML = label;
     tab.onclick = () => { activeTab = sec.key; renderTabs(); renderDiffs(); };
@@ -505,35 +426,22 @@ function renderDiffs() {
   const frag = document.createDocumentFragment();
   sec.diffs.forEach(d => {
     if (query && !d.stmt.toLowerCase().includes(query)) return;
-    if (wlFilter === 'active' && (d.whitelisted || d.sql_whitelisted || d.skipped)) return;
-    if (wlFilter === 'whitelisted' && !d.whitelisted) return;
-    if (wlFilter === 'sql_whitelisted' && !d.sql_whitelisted) return;
+    if (wlFilter === 'active' && d.skipped) return;
     if (wlFilter === 'skipped' && !d.skipped) return;
-    if (wlFilter === 'bug' && !d.bug_marked) return;
-    if (wlFilter === 'unmarked' && (d.whitelisted || d.sql_whitelisted || d.skipped || d.bug_marked)) return;
 
     const section = document.createElement('div');
     let sectionCls = 'diff-section';
-    if (d.whitelisted) sectionCls += ' whitelisted';
-    if (d.sql_whitelisted) sectionCls += ' sql-whitelisted';
     if (d.skipped) sectionCls += ' skipped-block';
-    if (d.bug_marked) sectionCls += ' bug-marked';
     section.className = sectionCls;
 
     const header = document.createElement('div');
-    header.className = 'diff-header' + (d.whitelisted || d.sql_whitelisted || d.skipped ? '' : ' open');
-    const wlTag = d.whitelisted ? '<span class="wl-badge">whitelisted</span>' : '';
-    const sqlWlTag = d.sql_whitelisted ? '<span class="wl-badge" style="background:#e6a817;color:#000">sql-wl</span>' : '';
-    const skipTag = d.skipped ? '<span class="wl-badge" style="background:#888;color:#fff">skipped</span>' : '';
-    const bugTag = d.bug_marked ? '<span class="bug-badge">bug</span>' : '';
-    header.innerHTML = `<span class="arrow">&#9654;</span><span class="block-num">Block ${d.block}</span>${wlTag}${sqlWlTag}${skipTag}${bugTag}<span class="sql-preview">${esc(d.stmt)}</span>`;
+    header.className = 'diff-header' + (d.skipped ? '' : ' open');
+    const skipTag = d.skipped ? '<span class="badge" style="display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600;background:#888;color:#fff;white-space:nowrap">skipped</span>' : '';
+    header.innerHTML = `<span class="arrow">&#9654;</span><span class="block-num">Block ${d.block}</span>${skipTag}<span class="sql-preview">${esc(d.stmt)}</span>`;
 
     const body = document.createElement('div');
-    body.className = 'diff-body' + (d.whitelisted || d.sql_whitelisted || d.skipped ? ' collapsed' : '');
+    body.className = 'diff-body' + (d.skipped ? ' collapsed' : '');
 
-    // Whitelist action bar
-    const wlBar = document.createElement('div');
-    wlBar.className = 'wl-bar';
     if (d.skipped) {
       // Skipped block: show reason and single-side output
       const skipInfo = document.createElement('div');
@@ -554,55 +462,11 @@ function renderDiffs() {
         pre.textContent = d.lines_b.join('\\n');
         body.appendChild(pre);
       }
-      body.appendChild(wlBar);
       section.appendChild(header);
       section.appendChild(body);
-      container.appendChild(section);
+      frag.appendChild(section);
       return;
     }
-    if (d.whitelisted) {
-      const span = document.createElement('span');
-      span.className = 'wl-status';
-      span.textContent = '\u2713 This diff is whitelisted';
-      wlBar.appendChild(span);
-      const btn = document.createElement('button');
-      btn.className = 'btn-wl btn-wl-remove';
-      btn.textContent = 'Remove from whitelist';
-      btn.addEventListener('click', () => removeFromWL(btn, d.fingerprint));
-      wlBar.appendChild(btn);
-    } else {
-      const btn = document.createElement('button');
-      btn.className = 'btn-wl btn-wl-add';
-      btn.textContent = '+ Add to whitelist';
-      btn.addEventListener('click', () => addToWL(btn, d.fingerprint, sec.dbms_a, sec.dbms_b, d.block, d.stmt.substring(0,200)));
-      wlBar.appendChild(btn);
-    }
-    // Bug mark buttons
-    if (d.bug_marked) {
-      const span = document.createElement('span');
-      span.className = 'wl-status';
-      span.style.color = 'var(--red)';
-      span.textContent = '\u2713 Marked as bug';
-      wlBar.appendChild(span);
-      const btn = document.createElement('button');
-      btn.className = 'btn-wl btn-bug-remove';
-      btn.textContent = 'Unmark bug';
-      btn.addEventListener('click', () => removeFromBug(btn, d.fingerprint));
-      wlBar.appendChild(btn);
-    } else {
-      const btn = document.createElement('button');
-      btn.className = 'btn-wl btn-bug-add';
-      btn.textContent = '\uD83D\uDC1B Mark as bug';
-      btn.addEventListener('click', () => addToBug(btn, d.fingerprint, sec.dbms_a, sec.dbms_b, d.block, d.stmt.substring(0,200)));
-      wlBar.appendChild(btn);
-    }
-    const fpSpan = document.createElement('span');
-    fpSpan.className = 'wl-status';
-    fpSpan.style.cssText = 'color:var(--fg2);font-size:12px';
-    fpSpan.textContent = 'fp: ' + d.fingerprint.substring(0,8) + '\u2026';
-    wlBar.appendChild(fpSpan);
-    body.appendChild(wlBar);
-
     // Render context bar
     const ctxBefore = d.context_before || [];
     const ctxAfter = d.context_after || [];
@@ -641,87 +505,6 @@ function renderDiffs() {
   }
 }
 
-function addToWL(btn, fp, dbmsA, dbmsB, block, stmt) {
-  btn.disabled = true;
-  btn.textContent = 'Adding...';
-  callWhitelistAPI('add', {fingerprint: fp, dbms_a: dbmsA, dbms_b: dbmsB, block: block, stmt: stmt})
-    .then(r => {
-      if (r.ok) {
-        // Update local data
-        DIFFS.forEach(sec => { sec.diffs.forEach(d => { if (d.fingerprint === fp) d.whitelisted = true; }); });
-        renderTabs(); renderDiffs();
-        showToast('Added to whitelist', 'success');
-      } else {
-        showToast('Failed: ' + (r.error || 'unknown'), 'error');
-        btn.disabled = false; btn.textContent = '+ Add to whitelist';
-      }
-    })
-    .catch(e => {
-      showToast('API error: ' + e.message, 'error');
-      btn.disabled = false; btn.textContent = '+ Add to whitelist';
-    });
-}
-
-function removeFromWL(btn, fp) {
-  btn.disabled = true;
-  btn.textContent = 'Removing...';
-  callWhitelistAPI('remove', {fingerprint: fp})
-    .then(r => {
-      if (r.ok) {
-        DIFFS.forEach(sec => { sec.diffs.forEach(d => { if (d.fingerprint === fp) d.whitelisted = false; }); });
-        renderTabs(); renderDiffs();
-        showToast('Removed from whitelist', 'success');
-      } else {
-        showToast('Failed: ' + (r.error || 'unknown'), 'error');
-        btn.disabled = false; btn.textContent = 'Remove from whitelist';
-      }
-    })
-    .catch(e => {
-      showToast('API error: ' + e.message, 'error');
-      btn.disabled = false; btn.textContent = 'Remove from whitelist';
-    });
-}
-
-function addToBug(btn, fp, dbmsA, dbmsB, block, stmt) {
-  btn.disabled = true;
-  btn.textContent = 'Marking...';
-  callBuglistAPI('add', {fingerprint: fp, dbms_a: dbmsA, dbms_b: dbmsB, block: block, stmt: stmt})
-    .then(r => {
-      if (r.ok) {
-        DIFFS.forEach(sec => { sec.diffs.forEach(d => { if (d.fingerprint === fp) d.bug_marked = true; }); });
-        renderTabs(); renderDiffs();
-        showToast('Marked as bug', 'success');
-      } else {
-        showToast('Failed: ' + (r.error || 'unknown'), 'error');
-        btn.disabled = false; btn.textContent = '\uD83D\uDC1B Mark as bug';
-      }
-    })
-    .catch(e => {
-      showToast('API error: ' + e.message, 'error');
-      btn.disabled = false; btn.textContent = '\uD83D\uDC1B Mark as bug';
-    });
-}
-
-function removeFromBug(btn, fp) {
-  btn.disabled = true;
-  btn.textContent = 'Unmarking...';
-  callBuglistAPI('remove', {fingerprint: fp})
-    .then(r => {
-      if (r.ok) {
-        DIFFS.forEach(sec => { sec.diffs.forEach(d => { if (d.fingerprint === fp) d.bug_marked = false; }); });
-        renderTabs(); renderDiffs();
-        showToast('Bug mark removed', 'success');
-      } else {
-        showToast('Failed: ' + (r.error || 'unknown'), 'error');
-        btn.disabled = false; btn.textContent = 'Unmark bug';
-      }
-    })
-    .catch(e => {
-      showToast('API error: ' + e.message, 'error');
-      btn.disabled = false; btn.textContent = 'Unmark bug';
-    });
-}
-
 document.getElementById('search-input').addEventListener('input', renderDiffs);
 document.querySelectorAll('#filter-bar .filter-btn').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -731,36 +514,8 @@ document.querySelectorAll('#filter-bar .filter-btn').forEach(btn => {
   });
 });
 
-// Sync whitelisted/bug_marked state from API on page load.
-// The static HTML embeds a snapshot; if the user later added/removed entries
-// via the API, we need to refresh the flags before rendering.
-function syncFromAPI() {
-  const wlReq = callWhitelistAPI('list', {}).then(r => (r && r.ok) ? r.entries || {} : null).catch(() => null);
-  const blReq = callBuglistAPI('list', {}).then(r => (r && r.ok) ? r.entries || {} : null).catch(() => null);
-  Promise.all([wlReq, blReq]).then(([wlData, blData]) => {
-    if (wlData === null && blData === null) {
-      // API unavailable (e.g. viewing static file) — keep embedded data as-is
-      return;
-    }
-    let changed = false;
-    DIFFS.forEach(sec => {
-      sec.diffs.forEach(d => {
-        const newWl = wlData ? !!wlData[d.fingerprint] : d.whitelisted;
-        const newBug = blData ? !!blData[d.fingerprint] : d.bug_marked;
-        if (d.whitelisted !== newWl || d.bug_marked !== newBug) {
-          d.whitelisted = newWl;
-          d.bug_marked = newBug;
-          changed = true;
-        }
-      });
-    });
-    if (changed) { renderTabs(); renderDiffs(); }
-  });
-}
-
 renderTabs();
 renderDiffs();
-syncFromAPI();
 </script>
 </body>
 </html>"""

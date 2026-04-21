@@ -147,10 +147,16 @@ class DBConnection:
             self.conn.autocommit = True  # mysql.connector style
         self.cursor = self.conn.cursor()
 
-        # Ensure the database exists, then switch to it
-        self.cursor.execute(
-            f"CREATE DATABASE IF NOT EXISTS `{self.database}`")
-        self.cursor.execute(f"USE `{self.database}`")
+        # Switch to the target database.
+        # Try USE first — only fall back to CREATE DATABASE if it doesn't
+        # exist.  This avoids DDL overhead (TiDB DDL locks can block even
+        # when the database already exists).
+        try:
+            self.cursor.execute(f"USE `{self.database}`")
+        except Exception:
+            self.cursor.execute(
+                f"CREATE DATABASE IF NOT EXISTS `{self.database}`")
+            self.cursor.execute(f"USE `{self.database}`")
 
         # Set query timeout at database level
         if qt > 0:

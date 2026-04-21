@@ -231,19 +231,25 @@ def _handle_config_init(args, output: "OutputFormatter") -> CommandResult:
     
     # Check if file already exists
     if os.path.isfile(output_path):
+        # Preserve the original command name: "init" when called via
+        # ``rosetta init``, "config init" when called via ``rosetta config init``
+        command = getattr(args, 'command', None)
+        cmd_name = "init" if command == "init" else "config init"
         return CommandResult.failure(
             f"Config already exists: {output_path}. "
             f"Edit it directly or use --output to specify a different path.",
-            command="config init",
+            command=cmd_name,
         )
     
     # Generate sample config
     try:
         generate_sample_config(output_path)
     except Exception as e:
+        command = getattr(args, 'command', None)
+        cmd_name = "init" if command == "init" else "config init"
         return CommandResult.failure(
             f"Failed to generate config: {str(e)}",
-            command="config init",
+            command=cmd_name,
         )
     
     return CommandResult.success(
