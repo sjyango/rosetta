@@ -250,8 +250,7 @@ def run_mtr_test(test_file_path: str, config: DBMSConfig,
 
 
 def parse_mtr_to_statements(test_file_path: str,
-                             mysql_test_dir: Optional[str] = None,
-                             prefer_result: bool = False) -> list:
+                             mysql_test_dir: Optional[str] = None) -> list:
     """Parse an MTR .test file and convert to Rosetta Statement objects.
 
     This provides backward compatibility with Rosetta's existing
@@ -262,7 +261,6 @@ def parse_mtr_to_statements(test_file_path: str,
     Args:
         test_file_path: Path to the .test file.
         mysql_test_dir: Root mysql-test directory.
-        prefer_result: If True, try to use the .result file instead.
 
     Returns:
         List of Statement objects compatible with Rosetta's executor.

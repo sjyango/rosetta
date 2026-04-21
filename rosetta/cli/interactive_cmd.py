@@ -77,7 +77,7 @@ def handle_interactive(args, output: "OutputFormatter") -> CommandResult:
                 "dbms_targets": [c.name for c in configs],
                 "database": args.database,
                 "output_dir": os.path.abspath(args.output_dir),
-                "serve": args.serve,
+                "serve": True,
                 "port": args.port,
             },
         )
@@ -97,10 +97,11 @@ def handle_interactive(args, output: "OutputFormatter") -> CommandResult:
         
         # Use filtered configs (either user-specified or auto-detected reachable)
         legacy_args.dbms = ",".join(c.name for c in configs)
-        if args.serve:
-            legacy_args.serve = args.serve
         if args.port:
             legacy_args.port = args.port
+        
+        # serve is always on for interactive mode
+        legacy_args.serve = True
         
         # Launch interactive session
         exit_code = _enter_interactive(legacy_args)

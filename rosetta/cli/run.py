@@ -142,7 +142,7 @@ def _handle_run_mtr(args, output: "OutputFormatter") -> CommandResult:
         skip_explain=args.skip_explain,
         skip_analyze=args.skip_analyze,
         skip_show_create=args.skip_show_create,
-        output_format=args.output_format,
+        output_format="all",
     )
     
     comparisons = runner.run()
@@ -328,7 +328,7 @@ def _handle_run_bench(args, output: "OutputFormatter") -> CommandResult:
 
     parallel_dbms = getattr(args, "parallel_dbms", True)
     output_dir = os.path.abspath(args.output_dir)
-    fmt = args.output_format
+    fmt = "all"
     is_json = getattr(args, "json", False)
 
     # Determine database: JSON config overrides CLI default

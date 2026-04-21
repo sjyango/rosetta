@@ -613,10 +613,6 @@ Examples:
         "--baseline", "-b", default="tdsql",
         help="Baseline DBMS name for diff (default: tdsql)")
     mtr.add_argument(
-        "--format", "-f", default="all",
-        choices=["text", "html", "all"],
-        help="Output format (default: all)")
-    mtr.add_argument(
         "--skip-explain", action="store_true", default=True,
         help="Skip EXPLAIN statements (default: on)")
     mtr.add_argument(
@@ -756,8 +752,7 @@ def main(argv=None):
     if args.parse_only:
         flush_all()
         parser = TestFileParser(args.file)
-        prefer_result = getattr(args, 'result', False)
-        stmts = parser.parse(prefer_result=prefer_result)
+        stmts = parser.parse()
         for s in stmts:
             tag = s.stmt_type.name
             err = (f" [expect error: {s.expected_error}]"
@@ -817,7 +812,7 @@ def main(argv=None):
         skip_explain=args.skip_explain,
         skip_analyze=args.skip_analyze,
         skip_show_create=args.skip_show_create,
-        output_format=args.format,
+        output_format="all",
     )
 
     if args.diff_only:
@@ -859,7 +854,7 @@ def main(argv=None):
     flush_all()
 
     # Serve HTML report if requested
-    if args.serve and args.format in ("html", "all"):
+    if args.serve:
         html_file = f"{test_name}.html"
         html_path = os.path.join(run_dir, html_file)
 
@@ -990,7 +985,7 @@ def _run_benchmark(args) -> int:
     # Display plan
     parallel_dbms = getattr(args, 'parallel_dbms', False)
     output_dir = os.path.abspath(args.output_dir)
-    fmt = args.format
+    fmt = "all"
 
     print_phase("Benchmark", workload.name)
     print_info("Mode:", mode.name)
@@ -2980,7 +2975,7 @@ def _enter_interactive(args) -> int:
                 skip_explain=args.skip_explain,
                 skip_analyze=args.skip_analyze,
                 skip_show_create=args.skip_show_create,
-                output_format=args.format,
+                output_format="all",
                 serve=args.serve,
                 port=args.port,
                 all_configs=all_configs,
@@ -3154,7 +3149,7 @@ def _enter_interactive(args) -> int:
                             ramp_up=0.0,
                             bench_filter=rr_filter,
                             parallel_dbms=True,
-                            output_format=args.format,
+                            output_format="all",
                             serve=args.serve,
                             port=args.port,
                             profile=False,
@@ -3207,7 +3202,7 @@ def _enter_interactive(args) -> int:
                     ramp_up=bench_ramp_up,
                     bench_filter=args.bench_filter,
                     parallel_dbms=getattr(args, 'parallel_dbms', True),
-                    output_format=args.format,
+                    output_format="all",
                     serve=args.serve,
                     port=args.port,
                     profile=bench_profile,

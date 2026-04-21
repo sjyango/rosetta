@@ -110,12 +110,6 @@ def _add_test_arguments(parser):
         help="Path to .test file",
     )
     parser.add_argument(
-        "--result",
-        action="store_true",
-        default=False,
-        help="Use .result file instead of .test (MTR variables pre-expanded)",
-    )
-    parser.add_argument(
         "--dbms",
         required=True,
         help="DBMS targets: comma-separated names (e.g. tdsql,mysql,tidb) or 'all'",
@@ -134,12 +128,6 @@ def _add_test_arguments(parser):
         "--output-dir", "-o",
         default=RESULTS_DIR,
         help="Output directory for reports (default: ~/.rosetta/results)",
-    )
-    parser.add_argument(
-        "--output-format", "-f",
-        default="all",
-        choices=["text", "html", "all"],
-        help="Report format (default: all)",
     )
     parser.add_argument(
         "--skip-explain",
@@ -279,25 +267,6 @@ def _add_mtr_arguments(parser):
         nargs="*",
         help="Specific test cases to run",
     )
-    parser.add_argument(
-        "--gcov",
-        action="store_true",
-        default=False,
-        help="Enable gcov coverage collection (report after MTR run)",
-    )
-    parser.add_argument(
-        "--gcov-clean",
-        action="store_true",
-        default=False,
-        help="Clean gcov counters before running (reset to zero; default: accumulate)",
-    )
-    parser.add_argument(
-        "--gcov-filter",
-        type=str,
-        default="auto",
-        help="Source filter for coverage: 'auto' (default, only test-touched files), "
-             "'all' (full project), or a glob pattern (e.g. '*/ha_rocksdb.cc')",
-    )
 
 
 def _add_bench_arguments(parser):
@@ -327,12 +296,6 @@ def _add_bench_arguments(parser):
         "--output-dir", "-o",
         default=RESULTS_DIR,
         help="Output directory for reports (default: ~/.rosetta/results)",
-    )
-    parser.add_argument(
-        "--output-format", "-f",
-        default="all",
-        choices=["text", "html", "all"],
-        help="Report format (default: all)",
     )
     # Serial mode options
     parser.add_argument(
@@ -618,18 +581,6 @@ def _add_interactive_subparser(subparsers):
             help="Output directory for reports (default: ~/.rosetta/results)",
         )
         interp_parser.add_argument(
-            "--serve", "-s",
-            action="store_true",
-            default=True,
-            help="Start a local HTTP server to view HTML reports (default: on)",
-        )
-        interp_parser.add_argument(
-            "--no-serve",
-            action="store_false",
-            dest="serve",
-            help="Do not start HTTP server",
-        )
-        interp_parser.add_argument(
             "--port", "-p",
             type=int,
             default=19527,
@@ -700,7 +651,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.dbms = getattr(args, 'dbms', None)
         args.database = getattr(args, 'database', 'cross_dbms_test_db')
         args.output_dir = getattr(args, 'output_dir', RESULTS_DIR)
-        args.serve = getattr(args, 'serve', True)
+        args.serve = True
         args.port = getattr(args, 'port', 19527)
         result = handle_interactive(args, output)
         output.print(result)
