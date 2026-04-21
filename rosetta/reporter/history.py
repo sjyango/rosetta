@@ -208,10 +208,10 @@ h1 .title-rest { background: linear-gradient(135deg, #1f6feb 0%, #58a6ff 50%, #7
   display: flex; align-items: center; gap: 20px; transition: border-color 0.15s; }
 .run-card:hover { border-color: var(--accent); }
 .run-time { color: var(--fg2); font-size: 13px; width: 155px; flex-shrink: 0; font-family: 'SF Mono', Consolas, monospace; }
-.run-id { font-size: 12px; width: 320px; flex-shrink: 0; font-family: 'SF Mono', Consolas, monospace;
-  color: var(--fg2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.run-workload { font-weight: 600; font-size: 14px; width: 200px; flex-shrink: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-id { font-size: 12px; min-width: 200px; flex-shrink: 1; font-family: 'SF Mono', Consolas, monospace;
+  color: var(--fg2); word-break: break-all; }
+.run-workload { font-weight: 600; font-size: 14px; min-width: 120px; flex-shrink: 1;
+  word-break: break-all; }
 .run-dbms { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; align-items: center; }
 .dbms-tag { background: var(--bg3); border: 1px solid var(--border);
   border-radius: 4px; padding: 2px 8px; font-size: 12px; color: var(--fg2); }
@@ -628,31 +628,32 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 
 /* Progress bar */
 .progress-container { background: var(--bg2); border: 1px solid var(--border);
-  border-radius: 10px; padding: 24px; margin-bottom: 16px; }
+  border-radius: 10px; padding: 20px 24px; margin-bottom: 16px; }
 .progress-header { display: flex; align-items: center; justify-content: space-between;
   margin-bottom: 16px; }
-.progress-title { font-size: 14px; font-weight: 600; color: var(--fg);
+.progress-title { font-size: 15px; font-weight: 600; color: var(--fg);
   display: flex; align-items: center; gap: 10px; }
 .progress-title .spinner { width: 18px; height: 18px; border: 2px solid var(--border);
   border-top-color: var(--accent); border-radius: 50%;
   animation: spin 0.8s linear infinite; }
 .progress-stats { font-size: 13px; color: var(--fg2); }
-.progress-bar-track { width: 100%; height: 6px; background: var(--bg3);
-  border-radius: 3px; overflow: hidden; }
-.progress-bar-fill { height: 100%; background: linear-gradient(90deg, var(--accent), #388bfd);
-  border-radius: 3px; transition: width 0.3s ease; width: 0%; }
-.progress-dbms-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
-.progress-dbms-item { display: inline-flex; align-items: center; gap: 6px;
-  font-size: 12px; padding: 4px 10px; border-radius: 6px;
-  background: var(--bg3); color: var(--fg2); border: 1px solid var(--border);
-  transition: all 0.2s; }
-.progress-dbms-item.done { background: rgba(63,185,80,0.12);
-  border-color: var(--green); color: var(--green); }
-.progress-dbms-item.error { background: rgba(248,81,73,0.12);
-  border-color: var(--red); color: var(--red); }
-.progress-dbms-item.running { background: rgba(31,111,235,0.12);
-  border-color: var(--accent); color: var(--blue); }
-.progress-dbms-item .dbms-status-icon { font-size: 11px; }
+.progress-dbms-list { display: flex; flex-direction: column; gap: 4px; }
+.progress-dbms-item { display: flex; align-items: center; gap: 12px;
+  padding: 4px 0; transition: all 0.2s; }
+.progress-dbms-item .dbms-label { font-size: 13px; font-weight: 600;
+  color: var(--fg); width: 90px; flex-shrink: 0; }
+.progress-dbms-item .bar-track { flex: 1; height: 8px; background: var(--bg3);
+  border-radius: 4px; overflow: hidden; position: relative; }
+.progress-dbms-item .bar-fill { height: 100%; border-radius: 4px;
+  background: linear-gradient(90deg, var(--accent), #388bfd);
+  transition: width 0.3s ease; width: 0%; }
+.progress-dbms-item .bar-pct { font-size: 14px; font-weight: 600;
+  color: var(--fg2); width: 42px; text-align: right; flex-shrink: 0;
+  font-variant-numeric: tabular-nums; }
+.progress-dbms-item.done .bar-fill { background: linear-gradient(90deg, var(--green), #56d364); }
+.progress-dbms-item.done .bar-pct { color: var(--green); }
+.progress-dbms-item.error .bar-fill { background: linear-gradient(90deg, var(--red), #f87171); }
+.progress-dbms-item.error .bar-pct { color: var(--red); }
 
 /* Empty state */
 .empty-state { text-align: center; padding: 100px 20px; color: var(--fg2); }
@@ -852,15 +853,17 @@ function executeSql() {
   // Create progress UI
   const progressContainer = document.createElement('div');
   progressContainer.className = 'progress-container';
+
   progressContainer.innerHTML =
     '<div class="progress-header">' +
       '<div class="progress-title"><span class="spinner"></span>Executing SQL...</div>' +
       '<div class="progress-stats"><span id="progress-completed">0</span>/' + total + ' completed</div>' +
     '</div>' +
-    '<div class="progress-bar-track"><div class="progress-bar-fill" id="progress-fill"></div></div>' +
     '<div class="progress-dbms-list" id="progress-dbms-list">' +
-      dbmsList.map(n => '<div class="progress-dbms-item" id="progress-item-' + esc(n) + '">' +
-        '<span class="dbms-status-icon">&#9679;</span>' + esc(n) + '</div>').join('') +
+      dbmsList.map(n => '<div class="progress-dbms-item running" id="progress-item-' + esc(n) + '">' +
+        '<span class="dbms-label">' + esc(n) + '</span>' +
+        '<div class="bar-track"><div class="bar-fill" id="progress-bar-' + esc(n) + '"></div></div>' +
+        '<span class="bar-pct" id="progress-pct-' + esc(n) + '">0%</span></div>').join('') +
     '</div>';
   area.appendChild(progressContainer);
 
@@ -919,21 +922,31 @@ function executeSql() {
               completed++;
               results[parsed.name] = parsed.result;
 
-              // Update progress bar
-              const pct = Math.round((completed / total) * 100);
-              document.getElementById('progress-fill').style.width = pct + '%';
+              // Update overall stats
               document.getElementById('progress-completed').textContent = completed;
 
-              // Update DBMS item status
+              // Update DBMS item — mark as done with 100%
               const item = document.getElementById('progress-item-' + parsed.name);
               if (item) {
                 if (parsed.result.error) {
                   item.className = 'progress-dbms-item error';
-                  item.querySelector('.dbms-status-icon').innerHTML = '&#10007;';
                 } else {
                   item.className = 'progress-dbms-item done';
-                  item.querySelector('.dbms-status-icon').innerHTML = '&#10003;';
                 }
+                const bar = document.getElementById('progress-bar-' + parsed.name);
+                if (bar) bar.style.width = '100%';
+                const pctLabel = document.getElementById('progress-pct-' + parsed.name);
+                if (pctLabel) pctLabel.textContent = parsed.result.error ? 'Error' : 'Done';
+              }
+            } else if (event === 'stmt_progress') {
+              // Per-statement progress update for a single DBMS
+              const pct = Math.round((parsed.stmt_index / parsed.stmt_total) * 100);
+              const item = document.getElementById('progress-item-' + parsed.name);
+              if (item) {
+                const bar = document.getElementById('progress-bar-' + parsed.name);
+                if (bar) bar.style.width = pct + '%';
+                const pctLabel = document.getElementById('progress-pct-' + parsed.name);
+                if (pctLabel) pctLabel.textContent = pct + '%';
               }
             } else if (event === 'done') {
               finalizeExecution();
@@ -1041,7 +1054,7 @@ function renderResults(results, originalSql) {
   const maxStmts = Math.max(...dbmsNames.map(n => (results[n].statements || []).length), 0);
 
   // Build statement display list from the reference DBMS's actual SQL
-  // (backend TestFileParser already filtered out --echo, --error, comments, etc.)
+  // (backend MtrParser already filtered out --echo, --error, comments, etc.)
   const stmtDisplayList = refName && results[refName] && results[refName].statements
     ? results[refName].statements.map(s => s.sql || '')
     : [];

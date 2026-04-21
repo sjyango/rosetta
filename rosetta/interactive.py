@@ -484,6 +484,7 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
 
         Request body: {"sql": "...", "dbms": ["tdsql", "mysql"]}
         SSE events:
+          - event: stmt_progress  data: {"name": "...", "index": N, "total": N, "stmt_index": N, "stmt_total": N}
           - event: progress  data: {"name": "...", "index": N, "total": N, "result": {...}}
           - event: done      data: {"ok": true}
           - event: cancelled data: {"ok": false, "message": "Execution cancelled by user"}
@@ -643,7 +644,8 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
                 return result
 
             try:
-                for sql in stmts:
+                total_stmts = len(stmts)
+                for si, sql in enumerate(stmts):
                     if cancel.is_set():
                         result["cancelled"] = True
                         break
@@ -687,6 +689,14 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
                             (t1 - t0) * 1000, 3)
 
                     result["statements"].append(stmt_result)
+                    # Send per-statement progress update
+                    _send_sse("stmt_progress", {
+                        "name": config.name,
+                        "index": index,
+                        "total": total,
+                        "stmt_index": si + 1,
+                        "stmt_total": total_stmts,
+                    })
             finally:
                 # Unregister and close
                 with self._active_connections_lock:

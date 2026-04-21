@@ -20,7 +20,7 @@ from .config import (DEFAULT_TEST_DB, filter_configs, generate_sample_config,
                      load_config)
 from .executor import run_on_dbms
 from .models import CompareResult, DBMSConfig, Statement, StmtType, WorkloadMode
-from .parser import TestFileParser
+from .mtr.parser import MtrParser
 from .paths import CONFIG_FILE, RESULTS_DIR
 from .reporter.html import write_html_report
 from .reporter.history import generate_index_html
@@ -442,25 +442,6 @@ class RosettaRunner:
         """
         return self._run_mtr_native()
 
-        # Write result files
-        print_phase("Reports")
-        test_name = Path(self.test_file).stem
-        for name, lines in self.results.items():
-            result_path = os.path.join(
-                self.output_dir, f"{test_name}.{name}.result"
-            )
-            with open(result_path, "w", encoding="utf-8") as f:
-                f.write("\n".join(lines) + "\n")
-            print_report_file(result_path, label="result")
-
-        # Compare
-        comparisons = self._compare_all()
-
-        # Generate reports
-        self._generate_reports(test_name, comparisons)
-
-        return comparisons
-
     def run_diff_only(self) -> Dict[str, CompareResult]:
         """Re-generate reports from existing .result files (no execution)."""
         os.makedirs(self.output_dir, exist_ok=True)
@@ -751,16 +732,13 @@ def main(argv=None):
     # Parse-only mode
     if args.parse_only:
         flush_all()
-        parser = TestFileParser(args.file)
-        stmts = parser.parse()
-        for s in stmts:
-            tag = s.stmt_type.name
-            err = (f" [expect error: {s.expected_error}]"
-                   if s.expected_error else "")
-            sort = " [sorted]" if s.sort_result else ""
-            print(f"L{s.line_no:4d} [{tag:5s}]{err}{sort}: "
-                  f"{s.text[:100]}")
-        print(f"\nTotal: {len(stmts)} statements")
+        parser = MtrParser(args.file)
+        test = parser.parse()
+        for cmd in test.commands:
+            tag = cmd.cmd_type.name
+            text = cmd.argument or cmd.raw_text
+            print(f"L{cmd.line_no:4d} [{tag:12s}]: {text[:100]}")
+        print(f"\nTotal: {len(test.commands)} commands")
         return 0
 
     if not os.path.isfile(args.config):

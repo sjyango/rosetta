@@ -542,9 +542,9 @@ class OutputFormatter:
                             detail_lines.extend(hint_parts)
                     console.print(Panel(
                         "\n".join(detail_lines),
-                        title=f"[bold red]{key} — Issues ({effective + dbms_diff})[/bold red]",
+                        title=f"[bold red]{key} — Issues ({mismatched} mismatched)[/bold red]",
                         title_align="left",
-                        border_style="red" if effective > 0 else "yellow",
+                        border_style="red",
                         padding=(0, 1),
                     ))
 

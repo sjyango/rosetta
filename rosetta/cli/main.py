@@ -111,8 +111,8 @@ def _add_test_arguments(parser):
     )
     parser.add_argument(
         "--dbms",
-        required=True,
-        help="DBMS targets: comma-separated names (e.g. tdsql,mysql,tidb) or 'all'",
+        default="all",
+        help="DBMS targets: comma-separated names (e.g. tdsql,mysql,tidb) or 'all' (default: all)",
     )
     parser.add_argument(
         "--database", "-d",
@@ -273,8 +273,8 @@ def _add_bench_arguments(parser):
     """Add benchmark-specific arguments to a parser."""
     parser.add_argument(
         "--dbms",
-        required=True,
-        help="DBMS targets: comma-separated names (e.g. tdsql,mysql) or 'all'",
+        default="all",
+        help="DBMS targets: comma-separated names (e.g. tdsql,mysql) or 'all' (default: all)",
     )
     parser.add_argument(
         "--file",

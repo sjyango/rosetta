@@ -734,6 +734,7 @@ def _run_parallel_modes(
         console.print(summary)
 
         # Show failed cases per mode
+        has_failures = False
         for m in modes:
             stats = mode_stats.get(m, {})
             failing = stats.get("failing_tests", [])
@@ -791,6 +792,9 @@ def _run_parallel_modes(
         },
     }
 
+    # Only include data for JSON output; human-readable summary already printed above
+    out_data = result_data if is_json else None
+
     if any_failed:
         failed_names = [
             MTR_MODES[m]["label"]
@@ -799,10 +803,10 @@ def _run_parallel_modes(
         ]
         return CommandResult.partial(
             command="mtr",
-            data=result_data,
+            data=out_data,
             warning=f"Some test cases failed in mode(s): {', '.join(failed_names)}",
         )
-    return CommandResult.success("mtr", result_data)
+    return CommandResult.success("mtr", out_data)
 
 
 def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
@@ -1141,13 +1145,16 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
         "log_file": os.path.abspath(log_path),
     }
 
+    # Only include data for JSON output; human-readable summary already printed above
+    out_data = result_data if is_json else None
+
     if exit_code == 0:
-        return CommandResult.success("mtr", result_data)
+        return CommandResult.success("mtr", out_data)
     else:
         # MTR executed successfully but some test cases failed — this is a
         # partial failure, not a tool execution failure.
         return CommandResult.partial(
             command="mtr",
-            data=result_data,
+            data=out_data,
             warning=f"MTR completed with exit code {exit_code} (some test cases failed)",
         )

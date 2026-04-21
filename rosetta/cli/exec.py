@@ -26,7 +26,8 @@ def handle_exec(args, output: "OutputFormatter") -> CommandResult:
     import time as _time
     from ..config import load_config, filter_configs
     from ..executor import DBConnection, check_port
-    from ..parser import TestFileParser
+    from ..mtr.parser import MtrParser
+    from ..mtr.nodes import MtrCommandType
     
     # Load config
     if not os.path.isfile(args.config):
@@ -81,10 +82,13 @@ def handle_exec(args, output: "OutputFormatter") -> CommandResult:
             # so the MTR parser treats each as a separate statement.
             parts = [p.strip() for p in sql_text.split(";") if p.strip()]
             sql_text_for_parse = ";\n".join(parts) + ";\n"
-            parsed = TestFileParser.parse_text(sql_text_for_parse)
+            mtr_parser = MtrParser()
+            parsed = mtr_parser.parse_text(sql_text_for_parse)
         else:
-            parsed = TestFileParser.parse_text(sql_text)
-        statements = [s.text for s in parsed]
+            mtr_parser = MtrParser()
+            parsed = mtr_parser.parse_text(sql_text)
+        statements = [cmd.argument for cmd in parsed.commands
+                      if cmd.cmd_type == MtrCommandType.SQL]
     except Exception as e:
         return CommandResult.failure(f"Parse error: {str(e)}")
     
