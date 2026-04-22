@@ -180,6 +180,7 @@ class MtrExecutor:
         start_time = time.time()
         self._output = []
         self._commands_executed = 0
+        self._sql_seq = 0  # Global sequence for unique [#nnn] tags
 
         try:
             self._execute_commands(test_file.commands)
@@ -468,15 +469,12 @@ class MtrExecutor:
 
     def _output_result(self, sql: str, result: QueryResult,
                        line_no: int = 0) -> None:
-        """Output the formatted result of a SQL query.
+        """Output the formatted result of a SQL query."""
+        # Use global sequence for unique [#nnn] tag
+        self._sql_seq += 1
+        seq = self._sql_seq
 
-        Args:
-            sql: The SQL statement text.
-            result: The QueryResult from execution.
-            line_no: Source line number for [Lnnn] tag (cross-DBMS compare).
-        """
-        # Output the query itself (if query log enabled)
-        query_log = self._result_processor.format_query_log(sql, line_no)
+        query_log = self._result_processor.format_query_log(sql, seq)
         if query_log:
             self._output.append(query_log)
 
@@ -531,11 +529,8 @@ class MtrExecutor:
     def _handle_echo(self, cmd: MtrCommand) -> None:
         """Handle --echo: print text to result file."""
         text = self._variables.substitute(cmd.argument)
-        # Prepend [Lnnn] tag for cross-DBMS block alignment
-        if cmd.line_no > 0:
-            self._output.append(f"[L{cmd.line_no}] {text}")
-        else:
-            self._output.append(text)
+        self._sql_seq += 1
+        self._output.append(f"[#{self._sql_seq}] {text}")
 
     def _handle_error(self, cmd: MtrCommand) -> None:
         """Handle --error: set expected error for next statement."""

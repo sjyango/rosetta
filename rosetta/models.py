@@ -49,9 +49,6 @@ class DBMSConfig:
     driver: str = "pymysql"
     skip_patterns: List[str] = field(default_factory=list)
     init_sql: List[str] = field(default_factory=list)
-    skip_explain: bool = False
-    skip_analyze: bool = False
-    skip_show_create: bool = False
     enabled: bool = True
     restart_cmd: str = ""
 

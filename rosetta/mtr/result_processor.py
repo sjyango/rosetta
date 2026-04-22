@@ -122,13 +122,13 @@ class ResultProcessor:
         In MTR, the SQL statement is printed before its result,
         unless query logging is disabled.
 
-        When line_no > 0, a [Lnnn] tag is prepended for cross-DBMS
+        When line_no > 0, a [#nnn] tag is prepended for cross-DBMS
         block alignment in the comparator.
         """
         if self.disable_query_log:
             return ""
         if line_no > 0:
-            return f"[L{line_no}] {sql};\n"
+            return f"[#{line_no}] {sql};\n"
         return sql + ";\n"
 
     def reset_one_shot(self) -> None:

@@ -27,9 +27,6 @@ def load_config(config_path: str) -> List[DBMSConfig]:
             driver=entry.get("driver", "pymysql"),
             skip_patterns=entry.get("skip_patterns", []),
             init_sql=entry.get("init_sql", []),
-            skip_explain=entry.get("skip_explain", False),
-            skip_analyze=entry.get("skip_analyze", False),
-            skip_show_create=entry.get("skip_show_create", False),
             enabled=entry.get("enabled", True),
             restart_cmd=entry.get("restart_cmd", ""),
         ))
@@ -114,9 +111,6 @@ def generate_sample_config(path: str):
                 "init_sql": [
                     "SET sql_mode='STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'"
                 ],
-                "skip_explain": False,
-                "skip_analyze": False,
-                "skip_show_create": False,
                 "restart_cmd": "mysqld_safe &",
             },
             {
@@ -128,9 +122,6 @@ def generate_sample_config(path: str):
                 "driver": "pymysql",
                 "skip_patterns": [],
                 "init_sql": [],
-                "skip_explain": False,
-                "skip_analyze": False,
-                "skip_show_create": False,
             },
             {
                 "name": "tidb",
@@ -141,9 +132,6 @@ def generate_sample_config(path: str):
                 "driver": "pymysql",
                 "skip_patterns": ["tdsql_", "ddl_recovery"],
                 "init_sql": [],
-                "skip_explain": True,
-                "skip_analyze": True,
-                "skip_show_create": True,
             },
             {
                 "name": "oceanbase",
@@ -154,9 +142,6 @@ def generate_sample_config(path: str):
                 "driver": "pymysql",
                 "skip_patterns": ["tdsql_", "ddl_recovery"],
                 "init_sql": [],
-                "skip_explain": True,
-                "skip_analyze": True,
-                "skip_show_create": True,
             },
         ]
     }

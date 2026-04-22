@@ -861,9 +861,9 @@ class InteractiveSession:
     def __init__(self, configs: List[DBMSConfig], output_dir: str,
                  database: str = DEFAULT_TEST_DB,
                  baseline: Optional[str] = None,
-                 skip_explain: bool = False,
-                 skip_analyze: bool = False,
-                 skip_show_create: bool = False,
+                 skip_explain: bool = True,
+                 skip_analyze: bool = True,
+                 skip_show_create: bool = True,
                  output_format: str = "all",
                  serve: bool = False, port: int = 19527,
                  all_configs: Optional[List[DBMSConfig]] = None):

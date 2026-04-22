@@ -278,11 +278,21 @@ class MtrParser:
     # -----------------------------------------------------------------------
 
     def _parse_file(self, filepath: str) -> None:
-        """Parse a single file, handling --source recursion."""
+        """Parse a single file, handling --source recursion.
+
+        The same file may be sourced multiple times (e.g. running an .inc
+        with different variable settings).  We use a recursion depth counter
+        instead of a path set to prevent infinite recursion while allowing
+        legitimate re-includes.
+        """
         abs_path = os.path.abspath(filepath)
-        if abs_path in self._included:
+
+        # Guard against infinite recursion (max depth 64)
+        depth = getattr(self, '_source_depth', 0)
+        if depth > 64:
+            log.warning("Source recursion depth exceeded for: %s", filepath)
             return
-        self._included.add(abs_path)
+        self._source_depth = depth + 1
 
         try:
             with open(filepath, "r", encoding="utf-8", errors="replace") as f:
@@ -291,6 +301,7 @@ class MtrParser:
             raise ParseError(f"File not found: {filepath}")
 
         self._parse_lines(lines, filepath)
+        self._source_depth = depth  # restore depth after returning
 
     def _parse_lines(self, lines: List[str], filepath: str) -> None:
         """Core line-by-line parsing logic."""

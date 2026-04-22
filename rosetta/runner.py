@@ -82,9 +82,9 @@ class RosettaRunner:
     def __init__(self, test_file: str, configs: List[DBMSConfig],
                  output_dir: str, database: str = DEFAULT_TEST_DB,
                  baseline: Optional[str] = None,
-                 skip_explain: bool = False,
-                 skip_analyze: bool = False,
-                 skip_show_create: bool = False,
+                 skip_explain: bool = True,
+                 skip_analyze: bool = True,
+                 skip_show_create: bool = True,
                  output_format: str = "all"):
         self.test_file = test_file
         self.configs = configs
@@ -99,7 +99,12 @@ class RosettaRunner:
         self.failed_connections: set = set()
 
     def _should_skip_stmt_global(self, stmt: Statement) -> bool:
-        """Check if a statement should be skipped globally."""
+        """Check if a statement should be skipped globally.
+
+        Only uses global CLI flags (--skip-explain, --skip-analyze,
+        --skip-show-create).  Per-DBMS skip settings are NOT supported
+        because all DBMS must execute the same SQL list for fair comparison.
+        """
         if stmt.stmt_type != StmtType.SQL:
             return False
 
@@ -112,14 +117,6 @@ class RosettaRunner:
         if (self.skip_show_create_global
                 and sql_upper.startswith("SHOW CREATE")):
             return True
-
-        for c in self.configs:
-            if c.skip_explain and sql_upper.startswith("EXPLAIN"):
-                return True
-            if c.skip_analyze and sql_upper.startswith("ANALYZE"):
-                return True
-            if c.skip_show_create and sql_upper.startswith("SHOW CREATE"):
-                return True
 
         return False
 
@@ -142,6 +139,15 @@ class RosettaRunner:
         names = [n for n in self.results if n not in self.failed_connections]
         comparisons = {}
 
+        # Build list of SQL types to skip from diff comparison
+        skip_sql_types = []
+        if self.skip_explain_global:
+            skip_sql_types.append("EXPLAIN")
+        if self.skip_analyze_global:
+            skip_sql_types.append("ANALYZE")
+        if self.skip_show_create_global:
+            skip_sql_types.append("SHOW CREATE")
+
         if self.baseline and self.baseline in self.results:
             for name in names:
                 if name == self.baseline:
@@ -152,6 +158,7 @@ class RosettaRunner:
                     self.results[name],
                     self.baseline, name,
                     baseline_name=self.baseline,
+                    skip_sql_types=skip_sql_types or None,
                 )
         else:
             for i in range(len(names)):
@@ -161,6 +168,7 @@ class RosettaRunner:
                         self.results[names[i]],
                         self.results[names[j]],
                         names[i], names[j],
+                        skip_sql_types=skip_sql_types or None,
                     )
 
         return comparisons
@@ -494,6 +502,7 @@ class RosettaRunner:
                 html_path, self.test_file, comparisons,
                 baseline=self.baseline or "",
                 sql_list=sql_list,
+                raw_results=self.results,
             )
             print_report_file(html_path, label="html")
 
@@ -594,14 +603,17 @@ Examples:
         "--baseline", "-b", default="tdsql",
         help="Baseline DBMS name for diff (default: tdsql)")
     mtr.add_argument(
-        "--skip-explain", action="store_true", default=True,
-        help="Skip EXPLAIN statements (default: on)")
+        "--include-explain", dest="skip_explain",
+        action="store_false", default=True,
+        help="Include EXPLAIN statements in comparison (default: skipped)")
     mtr.add_argument(
-        "--skip-analyze", action="store_true",
-        help="Skip ANALYZE TABLE statements")
+        "--include-analyze", dest="skip_analyze",
+        action="store_false", default=True,
+        help="Include ANALYZE TABLE statements in comparison (default: skipped)")
     mtr.add_argument(
-        "--skip-show-create", action="store_true",
-        help="Skip SHOW CREATE TABLE statements")
+        "--include-show-create", dest="skip_show_create",
+        action="store_false", default=True,
+        help="Include SHOW CREATE TABLE statements in comparison (default: skipped)")
     mtr.add_argument(
         "--parse-only", action="store_true",
         help="Only parse .test file and print statements (no execution)")

@@ -1325,21 +1325,32 @@ function buildTable(sr, refSr) {
 
   // Body
   const tbody = document.createElement('tbody');
-  (sr.rows || []).forEach((row, ri) => {
+  const rows = sr.rows || [];
+  if (rows.length === 0) {
     const tr = document.createElement('tr');
-    row.forEach((cell, ci) => {
-      const td = document.createElement('td');
-      const refRow = refSr && refSr.rows ? refSr.rows[ri] : null;
-      const refCell = refRow ? refRow[ci] : cell;
-      if (refSr && String(cell) !== String(refCell)) {
-        td.innerHTML = '<span class="cell-diff">' + esc(cell) + '</span>';
-      } else {
-        td.textContent = cell;
-      }
-      tr.appendChild(td);
-    });
+    const td = document.createElement('td');
+    td.colSpan = (sr.columns || []).length || 1;
+    td.style.cssText = 'text-align:center;color:var(--fg2);font-style:italic;padding:12px';
+    td.textContent = 'Empty set';
+    tr.appendChild(td);
     tbody.appendChild(tr);
-  });
+  } else {
+    rows.forEach((row, ri) => {
+      const tr = document.createElement('tr');
+      row.forEach((cell, ci) => {
+        const td = document.createElement('td');
+        const refRow = refSr && refSr.rows ? refSr.rows[ri] : null;
+        const refCell = refRow ? refRow[ci] : cell;
+        if (refSr && String(cell) !== String(refCell)) {
+          td.innerHTML = '<span class="cell-diff">' + esc(cell) + '</span>';
+        } else {
+          td.textContent = cell;
+        }
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+  }
   table.appendChild(tbody);
   return table;
 }

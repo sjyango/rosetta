@@ -23,16 +23,6 @@ _RE_TDSQL_TAIL = re.compile(
 _RE_DEFINER = re.compile(r"DEFINER=`[^`]*`@`[^`]*`")
 _RE_WARNING_LINE = re.compile(r"^Warning\s+\d+\s+")
 
-# SQL statement start pattern for block splitting.
-# Lines may optionally carry a "[Lnnn] " prefix emitted by the executor.
-_RE_SQL_START = re.compile(
-    r"^(\[L\d+\]\s+)?"
-    r"(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|SHOW|EXPLAIN|"
-    r"ANALYZE|TRUNCATE|SET|BEGIN|COMMIT|ROLLBACK|CALL|GRANT|REVOKE|"
-    r"FLUSH|RENAME|LOCK|UNLOCK|USE|DESCRIBE|DESC)\b",
-    re.IGNORECASE,
-)
-
 # ---------------------------------------------------------------------------
 # Line normalization
 # ---------------------------------------------------------------------------
@@ -84,16 +74,29 @@ def filter_warnings(block: List[str]) -> List[str]:
 def split_into_blocks(lines: List[str]) -> List[List[str]]:
     """Split output lines into logical blocks.
 
-    A new block starts at SQL statements or echo comment lines (# ...).
+    A new block starts when a line:
+      - has a [Lnnn] tag prefix (SQL executed by rosetta executor), or
+      - starts with '#' (echo comment line).
+
+    Lines that start with SQL keywords but lack [Lnnn] tags are treated
+    as output content of the previous block (e.g. EXPLAIN tree output
+    that starts with "EXPLAIN -> Filter: ...").
     """
+    # Flatten: each element may contain multiple lines separated by \n
+    flat = []
+    for line in lines:
+        flat.extend(line.split("\n"))
+
     blocks: List[List[str]] = []
     current: List[str] = []
 
-    for line in lines:
+    for line in flat:
         stripped = line.strip()
         if not stripped:
             continue
-        if _RE_SQL_START.match(stripped) or stripped.startswith("#"):
+        # Check if line has [Lnnn] tag → always starts a new block
+        has_tag = bool(_RE_LINE_TAG.match(stripped))
+        if has_tag or stripped.startswith("#"):
             if current:
                 blocks.append(current)
             current = [line]
@@ -109,7 +112,7 @@ def split_into_blocks(lines: List[str]) -> List[List[str]]:
 # ---------------------------------------------------------------------------
 # Block alignment helpers
 # ---------------------------------------------------------------------------
-_RE_LINE_TAG = re.compile(r"^\[L(\d+)\]\s+")
+_RE_LINE_TAG = re.compile(r"^\[#(\d+)\]\s+")
 
 
 def _block_line_tag(block: List[str]) -> Optional[int]:
@@ -189,7 +192,9 @@ def block_has_unexpected_error(block: List[str]) -> bool:
 
 def compare_outputs(lines_a: List[str], lines_b: List[str],
                     name_a: str, name_b: str,
-                    baseline_name: Optional[str] = None) -> CompareResult:
+                    baseline_name: Optional[str] = None,
+                    skip_sql_types: Optional[List[str]] = None,
+                    ) -> CompareResult:
     """Compare two result outputs block-by-block.
 
     Blocks are aligned by their ``[Lnnn]`` line-number tag so that
@@ -198,6 +203,10 @@ def compare_outputs(lines_a: List[str], lines_b: List[str],
 
     If baseline_name is set, blocks where the baseline has an unexpected
     error are skipped.
+
+    If skip_sql_types is set, blocks whose SQL starts with any of the
+    given prefixes (e.g. ["EXPLAIN", "ANALYZE"]) are counted as skipped
+    rather than mismatched when they differ.
     """
     result = CompareResult(dbms_a=name_a, dbms_b=name_b)
 
@@ -266,6 +275,27 @@ def compare_outputs(lines_a: List[str], lines_b: List[str],
 
         na = normalize_block(ba)
         nb = normalize_block(bb)
+
+        # Check if this block's SQL type should be skipped from diff
+        if skip_sql_types and na != nb:
+            first_line = ba[0] if ba else ""
+            m = _RE_LINE_TAG.match(first_line.strip())
+            sql_text = first_line.strip()[m.end():].strip().upper() if m else first_line.strip().upper()
+            if any(sql_text.startswith(prefix.upper()) for prefix in skip_sql_types):
+                result.skipped += 1
+                stmt = ba[0] if ba else (bb[0] if bb else "???")
+                result.diffs.append({
+                    "block": idx + 1,
+                    "stmt": stmt,
+                    "lines_a": filter_warnings(ba),
+                    "lines_b": filter_warnings(bb),
+                    "diff": [],
+                    "context_before": [],
+                    "context_after": [],
+                    "skipped": True,
+                    "skip_reason": "SQL type skipped from comparison",
+                })
+                continue
 
         if na == nb:
             result.matched += 1
