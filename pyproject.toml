@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rosetta-sql"
-version = "1.0.2"
+version = "1.0.3"
 description = "Cross-DBMS SQL behavioral consistency verification tool"
 readme = "README.md"
 license = {text = "MIT"}

@@ -609,7 +609,7 @@ def _run_parallel_modes(
                 status = Text.from_markup(bar_str)
             elif st["status"] == "done":
                 if st["exit_code"] == 0:
-                    status = Text("✅ Passed", style="green bold")
+                    status = Text("✅ Finished", style="green bold")
                 else:
                     status = Text(f"❌ Failed({st['exit_code']})", style="red bold")
             else:
@@ -1038,7 +1038,7 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
 
                 if done:
                     if final_exit_code == 0:
-                        status = Text("✅ Passed", style="green bold")
+                        status = Text("✅ Finished", style="green bold")
                     else:
                         status = Text(f"❌ Failed({final_exit_code})", style="red bold")
                 else:

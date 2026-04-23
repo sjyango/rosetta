@@ -271,7 +271,7 @@ class RosettaRunner:
                     if st["errors"] > 0:
                         progress = Text(f"✅ {st['executed']}/{st['total']} ({st['errors']} err)", style="yellow bold")
                     else:
-                        progress = Text("✅ Passed", style="green bold")
+                        progress = Text("✅ Finished", style="green bold")
                 else:
                     progress = Text(st["status"])
 

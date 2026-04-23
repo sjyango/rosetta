@@ -494,7 +494,14 @@ class MtrParser:
                 cmd.numeric_round_precision = -1
 
         elif cmd.cmd_type == MtrCommandType.DELIMITER:
-            cmd.new_delimiter = argument.strip().rstrip(';').strip()
+            # MTR syntax: DELIMITER <new_delim><old_delim>
+            # e.g. "DELIMITER //;" sets new_delim to "//" (old_delim is ";")
+            #      "DELIMITER ;//" sets new_delim to ";" (old_delim is "//")
+            raw = argument.strip()
+            # Strip the current (old) delimiter from the end
+            if self._delimiter and raw.endswith(self._delimiter):
+                raw = raw[:-len(self._delimiter)].strip()
+            cmd.new_delimiter = raw
             if cmd.new_delimiter:
                 self._delimiter = cmd.new_delimiter
 
