@@ -1,8 +1,6 @@
-"""Allow running rosetta as: python -m rosetta"""
+"""Allow running as: python -m rosetta"""
 
-import sys
-
-# Use new CLI module
 from .cli.main import main
 
-sys.exit(main())
+if __name__ == "__main__":
+    main()

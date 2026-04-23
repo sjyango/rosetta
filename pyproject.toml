@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rosetta-sql"
-version = "1.0.3"
+version = "1.1.0"
 description = "Cross-DBMS SQL behavioral consistency verification tool"
 readme = "README.md"
 license = {text = "MIT"}
@@ -34,7 +34,6 @@ dependencies = [
 
 [project.optional-dependencies]
 mysql-connector = ["mysql-connector-python>=8.0"]
-gcov = ["fastcov>=1.13"]
 
 [project.scripts]
 rosetta = "rosetta.cli:main"
