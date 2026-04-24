@@ -858,8 +858,6 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
         "suite_timeout": file_cfg["suite_timeout"],
         "optimistic": False,
         "record": False,
-        "vector": False,
-        "parallel_query": False,
         "suite": None,
         "cases": [],
     }
@@ -900,8 +898,6 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
 
     cfg["optimistic"] = getattr(args, "optimistic", False)
     cfg["record"] = getattr(args, "record", False)
-    cfg["vector"] = getattr(args, "vector", False)
-    cfg["parallel_query"] = getattr(args, "parallel_query", False)
     cfg["suite"] = getattr(args, "suite", None)
     cfg["cases"] = getattr(args, "cases", [])
 
@@ -948,10 +944,6 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
             info_lines.append(f"[bold]Record[/bold]     : ON")
         if cfg["optimistic"]:
             info_lines.append(f"[bold]Optimistic[/bold] : ON")
-        if cfg["vector"]:
-            info_lines.append(f"[bold]Vector[/bold]     : ON")
-        if cfg["parallel_query"]:
-            info_lines.append(f"[bold]PQ[/bold]         : ON")
         console_plan.print(_Panel(
             "\n".join(info_lines),
             title="[bold cyan]MTR Execution Plan[/bold cyan]",
@@ -965,10 +957,6 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
 
     # Build mode label for progress display
     mode_parts = []
-    if cfg["vector"]:
-        mode_parts.append("ve-protocol")
-    if cfg["parallel_query"]:
-        mode_parts.append("parallel-query")
     if cfg["optimistic"]:
         mode_parts.append("optimistic")
     mode_label = "+".join(mode_parts) if mode_parts else "row (default)"
@@ -1137,8 +1125,6 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
         "cases": cfg["cases"],
         "record": cfg["record"],
         "optimistic": cfg["optimistic"],
-        "vector": cfg["vector"],
-        "parallel_query": cfg["parallel_query"],
         "exit_code": exit_code,
         "elapsed_seconds": total_elapsed,
         "log_dir": log_dir,

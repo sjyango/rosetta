@@ -13,7 +13,12 @@ _RE_ENGINE = re.compile(r"ENGINE\s*=\s*\w+")
 _RE_CHARSET_COLLATE = re.compile(
     r"DEFAULT CHARSET=\w+(\s+COLLATE=\w+)?"
 )
-_RE_ERROR_LINE = re.compile(r"^ERROR\b[^(]*\((\d+),")
+_RE_ERROR_LINE = re.compile(r"^ERROR\b(?:\s*(\d+)|\D*\((\d+)[,:\)])")
+# OceanBase appends trace_id lines after errors like [IP:PORT] [timestamp] or [YB4Z...]
+_RE_OB_TRACE = re.compile(
+    r"^\[\d+\.\d+\.\d+\.\d+:\d+\]"       # [IP:PORT]
+    r"|\[[A-Z0-9]{8,}(-[\w]+){2,}\]"      # [OB-trace-id]
+)
 _RE_AUTO_INCREMENT = re.compile(r"\s*AUTO_INCREMENT=\d+")
 _RE_ROW_FORMAT = re.compile(r"\s*ROW_FORMAT=\w+")
 _RE_STATS_PERSISTENT = re.compile(r"\s*STATS_PERSISTENT=\d+")
@@ -30,14 +35,16 @@ def normalize_line(line: str) -> str:
     """Normalize a single output line to ignore known non-functional diffs.
 
     Handled cases:
-      - ERROR lines: only keep error code
+      - ERROR lines: only keep error code (supports both MTR "ERROR(code,"
+        and MySQL-style "ERROR 1662:" formats)
       - TDSQL tail (txid, sql-node, error-store-node)
       - ENGINE=, CHARSET=, AUTO_INCREMENT=, ROW_FORMAT=, DEFINER=, etc.
     """
     s = line
     m = _RE_ERROR_LINE.match(s)
     if m:
-        return f"ERROR: ({m.group(1)})"
+        code = m.group(1) or m.group(2)
+        return f"ERROR: ({code})"
     if s.startswith("ERROR"):
         return "ERROR: (unknown)"
     s = _RE_TDSQL_TAIL.sub("", s)
@@ -53,12 +60,14 @@ def normalize_line(line: str) -> str:
 def normalize_block(block: List[str]) -> List[str]:
     """Normalize all lines in a block for comparison.
 
-    Filters out Warning lines and the "Warnings:" header.
+    Filters out Warning lines, the "Warnings:" header, and OceanBase
+    trace_id appendages that appear after error messages.
     """
     lines = [normalize_line(l) for l in block]
     return [l for l in lines
             if l.strip() != "Warnings:"
-            and not _RE_WARNING_LINE.match(l.strip())]
+            and not _RE_WARNING_LINE.match(l.strip())
+            and not _RE_OB_TRACE.match(l.strip())]
 
 
 def filter_warnings(block: List[str]) -> List[str]:

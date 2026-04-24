@@ -82,10 +82,10 @@ def handle_exec(args, output: "OutputFormatter") -> CommandResult:
             # so the MTR parser treats each as a separate statement.
             parts = [p.strip() for p in sql_text.split(";") if p.strip()]
             sql_text_for_parse = ";\n".join(parts) + ";\n"
-            mtr_parser = MtrParser()
+            mtr_parser = MtrParser("<inline>")
             parsed = mtr_parser.parse_text(sql_text_for_parse)
         else:
-            mtr_parser = MtrParser()
+            mtr_parser = MtrParser("<inline>")
             parsed = mtr_parser.parse_text(sql_text)
         statements = [cmd.argument for cmd in parsed.commands
                       if cmd.cmd_type == MtrCommandType.SQL]

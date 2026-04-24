@@ -27,6 +27,27 @@ from prompt_toolkit.styles import Style
 from .config import DEFAULT_TEST_DB
 from .models import DBMSConfig
 from .reporter.history import generate_index_html
+
+
+# ---------------------------------------------------------------------------
+# Filtered file history – skip built-in commands (help, quit, back, …)
+# ---------------------------------------------------------------------------
+
+_SKIP_COMMANDS = frozenset({
+    "help", "h", "back", "b", "quit", "q",
+    "status", "s", "history", "clear", "retry", "r",
+})
+
+
+class _FilteredFileHistory(FileHistory):
+    """FileHistory that ignores REPL built-in commands."""
+
+    def append_string(self, string: str) -> None:
+        if string.strip().lower() not in _SKIP_COMMANDS:
+            super().append_string(string)
+
+
+# ---------------------------------------------------------------------------
 from .ui import (console, flush_all, print_error, print_info,
                  print_summary, print_warning)
 
@@ -1059,7 +1080,7 @@ class InteractiveSession:
         """
         os.makedirs(self.output_dir, exist_ok=True)
         session: PromptSession = PromptSession(
-            history=FileHistory(os.path.join(self.output_dir, ".rosetta_history")),
+            history=_FilteredFileHistory(os.path.join(self.output_dir, ".rosetta_history")),
             completer=TestFileCompleter(),
             style=_PROMPT_STYLE,
             complete_while_typing=True,
@@ -1077,7 +1098,7 @@ class InteractiveSession:
             console.print(f"  [bold cyan]{logo_line}[/bold cyan]")
         console.print()
         console.print(f"  [dim]{LOGO_SUBTITLE}[/dim]")
-        console.print(f"  [dim]v{__version__}[/dim]  [bold white]MTR Mode[/bold white]")
+        console.print(f"  [dim]v{__version__}[/dim]  [bold white]Test Mode[/bold white]")
         console.print()
 
         # Show status
@@ -1770,7 +1791,7 @@ class BenchInteractiveSession:
         """
         os.makedirs(self.output_dir, exist_ok=True)
         session: PromptSession = PromptSession(
-            history=FileHistory(os.path.join(self.output_dir, ".rosetta_bench_history")),
+            history=_FilteredFileHistory(os.path.join(self.output_dir, ".rosetta_bench_history")),
             completer=BenchFileCompleter(),
             style=_PROMPT_STYLE,
             complete_while_typing=True,
@@ -1917,7 +1938,784 @@ class BenchInteractiveSession:
                     f"executed.[/dim]")
             if self._report_server:
                 self._report_server.stop()
-                console.print("  [dim]Report server stopped.[/dim]")
+            console.print("  [dim]Report server stopped.[/dim]")
             console.print("  [bold cyan]Goodbye! 👋[/bold cyan]\n")
 
         return exit_reason
+
+
+# ---------------------------------------------------------------------------
+# MTR interactive session
+# ---------------------------------------------------------------------------
+
+class MtrCaseCompleter(Completer):
+    """Auto-complete test case names (basic path completion)."""
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor.strip()
+        if not text:
+            text = ""
+        expanded = os.path.expanduser(text)
+        pattern = expanded + "*"
+
+        for path in sorted(glob.glob(pattern)):
+            if os.path.isdir(path):
+                yield Completion(path + "/", start_position=-len(text),
+                                 display=os.path.basename(path) + "/",
+                                 display_meta="dir")
+            else:
+                yield Completion(path, start_position=-len(text),
+                                 display=os.path.basename(path),
+                                 display_meta="case")
+
+
+class MtrInteractiveSession:
+    """Interactive REPL for native MTR mode.
+
+    Base parameters (mode, parallel, vector, etc.) are fixed at launch;
+    only the test case/suite name changes between runs.
+    """
+
+    COMMANDS = {
+        "help":    "Show available commands",
+        "status":  "Show current MTR configuration",
+        "history": "Show executed MTR runs in this session",
+        "clear":   "Clear the screen",
+        "back":    "Back to parameter selection (also: b)",
+        "quit":    "Exit (also: exit, q)",
+    }
+
+    _MTR_MODES = {
+        "row":    {"label": "Row",    "vector": False, "parallel_query": False},
+        "col":    {"label": "Column", "vector": True,  "parallel_query": False},
+        "pq":     {"label": "Parallel Query", "vector": False, "parallel_query": True},
+    }
+    _MODE_PORT_OFFSETS = {"row": 0, "col": 1000, "pq": 2000}
+
+    def __init__(self, configs, output_dir,
+                 mtr_mode="row", parallel=8,
+                 optimistic=False, record=False,
+                 retry=3, suite_mode=False, suite=None, all_configs=None):
+        self.configs = configs
+        self.output_dir = os.path.abspath(output_dir)
+        self.mtr_mode = mtr_mode
+        self.parallel = parallel
+        self.optimistic = optimistic
+        self.record = record
+        self.retry = retry
+        self.suite_mode = suite_mode
+        self.suite = suite
+        self.all_configs = all_configs or []
+        self._run_history = []
+
+    def run(self):
+        from .ui import LOGO_LINES, LOGO_SUBTITLE
+
+        _hist_path = os.path.join(os.path.expanduser("~/.rosetta"), "mtr_history")
+        os.makedirs(os.path.dirname(_hist_path), exist_ok=True)
+        session = PromptSession(
+            history=_FilteredFileHistory(_hist_path),
+            style=_PROMPT_STYLE,
+            multiline=False,
+            completer=MtrCaseCompleter(),
+            key_bindings=_make_repl_bindings(),
+        )
+
+        _mode_hint = "suite" if self.suite_mode else "case"
+        _placeholder = HTML(
+            f'<placeholder>Type a test {_mode_hint} name, \'help\', '
+            f'← back, or \'quit\'</placeholder>')
+
+        console.print()
+        for logo_line in LOGO_LINES:
+            console.print(f"  [bold cyan]{logo_line}[/bold cyan]")
+        console.print()
+        console.print(f"  [dim]{LOGO_SUBTITLE}[/dim]")
+        from . import __version__
+        console.print(f"  [dim]v{__version__}[/dim]  "
+                      f"[bold white]MTR Mode[/bold white]")
+
+        mode_label = self._get_mode_label()
+        parts = [f"Mode={mode_label}", f"Parallel={self.parallel}", f"Retry={self.retry}"]
+        if self.optimistic:
+            parts.append("Optimistic=ON")
+        if self.record:
+            parts.append("Record=ON")
+        if self.suite:
+            parts.append(f"Suite={self.suite}")
+
+        console.print()
+        console.print(
+            f"  [dim]{'  '.join(parts)}[/dim]")
+        console.print()
+
+        exit_reason = "quit"
+
+        while True:
+            try:
+                prompt_msg = HTML(
+                    '<prompt>rosetta</prompt> <path>▶</path> ')
+                user_input = session.prompt(
+                    prompt_msg, placeholder=_placeholder)
+            except (EOFError, KeyboardInterrupt):
+                break
+
+            if isinstance(user_input, _BackSignal):
+                exit_reason = "back"
+                break
+
+            user_input = user_input.strip()
+            if not user_input:
+                continue
+
+            cmd = user_input.lower()
+
+            if cmd in ("back", "b"):
+                exit_reason = "back"
+                break
+            if cmd in ("quit", "exit", "q"):
+                break
+            if cmd == "help":
+                self._cmd_help()
+                continue
+            if cmd == "status":
+                self._cmd_status()
+                continue
+            if cmd == "history":
+                self._cmd_history()
+                continue
+            if cmd == "clear":
+                console.clear()
+                continue
+
+            self._run_mtr(user_input)
+
+            _mode_hint = "suite" if self.suite_mode else "case"
+            console.print(
+                f"  [dim]Ready. Type a test {_mode_hint} name, 'help', "
+                f"'back', or 'quit'.[/dim]\n")
+
+        if exit_reason == "back":
+            pass
+        else:
+            console.print()
+            if self._run_history:
+                console.print(
+                    f"  [dim]Session complete: "
+                    f"{len(self._run_history)} MTR run(s) executed.[/dim]")
+            console.print("  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+
+        return exit_reason
+
+    # -- helpers -------------------------------------------------------------
+
+    def _get_mode_label(self):
+        from rosetta.cli.mtr_cmd import _MODE_ALIASES
+        mode = self.mtr_mode
+        if mode == "all":
+            return "All (row + col + pq)"
+        # Handle multi-mode string like "row,pq"
+        if "," in mode:
+            parts = [m.strip() for m in mode.split(",")]
+            resolved = [_MODE_ALIASES.get(m, m) for m in parts]
+            return ",".join(resolved)
+        return self._MTR_MODES.get(mode, {}).get("label", mode)
+
+    def _build_config_for_mode(self, mode_name):
+        from rosetta.paths import CONFIG_FILE
+        from rosetta.cli.mtr_cmd import (
+            _load_mtr_config, MTR_MODES,
+            _MODE_PORT_OFFSETS, _build_mysqld_opts,
+        )
+
+        file_cfg = _load_mtr_config(CONFIG_FILE)
+
+        required_keys = [
+            "test_dir", "skip_list", "base_port", "total_port",
+            "parallel", "retry", "retry_failure", "max_test_fail",
+            "testcase_timeout", "suite_timeout", "mysqld_opts",
+        ]
+        missing = [k for k in required_keys if k not in file_cfg]
+        if missing:
+            print_error(
+                f"Missing required mtr config in {CONFIG_FILE}: "
+                f"{', '.join(missing)}")
+            print_info("Run 'rosetta config --sample' for a template.")
+            flush_all()
+            return None
+
+        test_dir = file_cfg["test_dir"]
+        if not os.path.isdir(test_dir):
+            print_error(f"MySQL test directory not found: {test_dir}")
+            flush_all()
+            return None
+
+        mode_def = MTR_MODES.get(mode_name, {})
+        cfg = {
+            "test_dir": test_dir,
+            "skip_list": file_cfg["skip_list"],
+            "parallel": self.parallel,
+            "retry": self.retry,
+            "retry_failure": file_cfg["retry_failure"],
+            "max_test_fail": file_cfg["max_test_fail"],
+            "testcase_timeout": file_cfg["testcase_timeout"],
+            "suite_timeout": file_cfg["suite_timeout"],
+            "port_base": file_cfg["base_port"]
+                       + _MODE_PORT_OFFSETS.get(mode_name, 0),
+            "optimistic": self.optimistic,
+            "record": self.record,
+            "vector": mode_def.get("vector", False),
+            "parallel_query": mode_def.get("parallel_query", False),
+            "suite": self.suite,
+            "vardir": os.path.join(test_dir, f"var_{mode_name}"),
+            "tmpdir": os.path.join(test_dir, f"tmp_{mode_name}"),
+        }
+
+        opts = file_cfg["mysqld_opts"]
+        if isinstance(opts, list):
+            cfg["mysqld_opts"] = _build_mysqld_opts(opts)
+        elif isinstance(opts, str):
+            cfg["mysqld_opts"] = opts
+        else:
+            cfg["mysqld_opts"] = ""
+        return cfg
+
+    def _run_mtr(self, cases_input):
+        """Execute MTR with the given test case names or suite."""
+        import concurrent.futures as _cf
+        import threading as _threading
+        from rich import box as _box
+        from rich.console import Console as _RichConsole
+        from rich.live import Live
+        from rich.table import Table
+        from rich.panel import Panel
+        from rich.text import Text
+        from rosetta.paths import MTR_LOGS_DIR
+        from rosetta.cli.mtr_cmd import (
+            _build_command, MTR_MODES, _MODE_PORT_OFFSETS,
+            _should_suppress, _parse_mtr_progress, _parse_mtr_log_stats,
+        )
+
+        from rosetta.cli.mtr_cmd import _MODE_ALIASES
+
+        # Expand multi-mode string (e.g. "row,pq" -> ["row", "pq"])
+        if self.mtr_mode == "all":
+            modes_to_run = list(MTR_MODES.keys())
+        else:
+            _requested = [m.strip().lower() for m in self.mtr_mode.split(",") if m.strip()]
+            _expanded = []
+            for m in _requested:
+                if m == "all":
+                    _expanded.extend(list(MTR_MODES.keys()))
+                else:
+                    _expanded.append(_MODE_ALIASES.get(m, m))
+            # Deduplicate preserving order
+            _seen = set()
+            modes_to_run = []
+            for m in _expanded:
+                if m not in _seen:
+                    _seen.add(m)
+                    modes_to_run.append(m)
+
+        mode_cfgs = {}
+        valid = True
+
+        # Parse input: support both comma and space separators
+        _items = [c.strip() for c in cases_input.replace(",", " ").split() if c.strip()]
+
+        # If Suite Mode is ON, treat all items as suite names (comma/space separated)
+        if self.suite_mode:
+            _suite_names = ",".join(_items)  # e.g. "tdsql,json"
+            _cases = []
+        else:
+            _suite_names = None
+            _cases = _items
+
+        for mn in modes_to_run:
+            cfg = self._build_config_for_mode(mn)
+            if cfg is None:
+                valid = False
+                break
+            cfg["cases"] = _cases
+            cfg["suite"] = _suite_names
+            mode_cfgs[mn] = cfg
+
+        if not mode_cfgs or not valid:
+            return
+
+        test_dir = mode_cfgs[modes_to_run[0]]["test_dir"]
+
+        log_dir = os.path.join(MTR_LOGS_DIR,
+                               _time.strftime("%Y%m%d_%H%M%S"))
+        os.makedirs(log_dir, exist_ok=True)
+
+        # --- Plan table (same layout as CLI mode) ---
+        from rosetta.paths import CONFIG_FILE
+        _config_path = CONFIG_FILE
+
+        plan_table = Table(
+            show_header=True, header_style="bold cyan",
+            expand=True, box=_box.ROUNDED,
+        )
+        plan_table.add_column("Mode", style="bold", min_width=16)
+        plan_table.add_column("Port Base", justify="right")
+        plan_table.add_column("Vardir")
+        plan_table.add_column("Flags")
+        plan_table.add_column("Log File")
+
+        for mn in modes_to_run:
+            md = MTR_MODES.get(mn, {})
+            cfg = mode_cfgs[mn]
+            flags = []
+            if cfg["vector"]:
+                flags.append("--ve-protocol")
+            if cfg["parallel_query"]:
+                flags.append("--parallel-query")
+            if cfg["optimistic"]:
+                flags.append("optimistic")
+            if cfg["record"]:
+                flags.append("--record")
+            log_file = os.path.join(log_dir, f"{mn}.log")
+            plan_table.add_row(
+                md.get("label", mn),
+                str(cfg["port_base"]),
+                os.path.basename(cfg["vardir"]),
+                " ".join(flags) if flags else "(default)",
+                os.path.abspath(log_file),
+            )
+
+        console.print(plan_table)
+
+        # Configuration panel (same as CLI mode)
+        info_lines = [
+            f"[bold]Config [/bold]   : {os.path.abspath(_config_path)}",
+            f"[bold]Test dir[/bold]  : {test_dir}",
+            f"[bold]Log dir[/bold]   : {os.path.abspath(log_dir)}",
+        ]
+        if _suite_names:
+            info_lines.append(f"[bold]Suite[/bold]     : {_suite_names}")
+        if _cases:
+            info_lines.append(f"[bold]Cases[/bold]     : {' '.join(_cases)}")
+        console.print(Panel(
+            "\n".join(info_lines),
+            title="[bold cyan]Configuration[/bold cyan]",
+            title_align="left",
+            padding=(0, 1),
+        ))
+
+        # Actual command panels per mode (same as CLI mode)
+        for mn in modes_to_run:
+            cfg = mode_cfgs[mn]
+            cmd = _build_command(cfg)
+            label = MTR_MODES[mn]["label"]
+            console.print(Panel(
+                f"[dim]{cmd}[/dim]",
+                title=f"[bold cyan]{label}[/bold cyan]",
+                title_align="left",
+                padding=(0, 1),
+            ))
+
+        # Live progress
+        live_console = _RichConsole(stderr=True)
+        results_lock = _threading.Lock()
+        mode_results = {}
+        total_start = _time.monotonic()
+
+        mode_state = {
+            m: {"status": "waiting", "elapsed": 0.0, "exit_code": None,
+                 "last_line": "", "start_time": None, "progress": 0}
+            for m in modes_to_run
+        }
+
+        def _run_single(mn):
+            cfg = mode_cfgs[mn]
+            cmd = _build_command(cfg)
+            log_path = os.path.join(log_dir, f"{mn}.log")
+
+            with results_lock:
+                mode_state[mn]["status"] = "running"
+                mode_state[mn]["start_time"] = _time.monotonic()
+
+            ec = -1
+            _proc_ref = [None]  # hold ref so _kill_all_children can access it
+            try:
+                proc = subprocess.Popen(
+                    cmd, shell=True, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, text=True, bufsize=1,
+                    cwd=test_dir, start_new_session=True)
+                _proc_ref[0] = proc
+                with results_lock:
+                    mode_state[mn]["_proc"] = proc
+                with open(log_path, "w", encoding="utf-8") as lf:
+                    try:
+                        for raw_line in proc.stdout:
+                            if _cancel.is_set():
+                                break
+                            line = raw_line.rstrip("\n")
+                            stripped = line.strip()
+                            if not _should_suppress(stripped):
+                                lf.write(line + "\n")
+                                lf.flush()
+                            pct = _parse_mtr_progress(stripped)
+                            if pct is not None:
+                                with results_lock:
+                                    mode_state[mn]["progress"] = pct
+                            if stripped:
+                                with results_lock:
+                                    mode_state[mn]["last_line"] = stripped[-80:]
+                    except (ValueError, OSError):
+                        pass  # pipe closed by kill
+
+                    # Wait with aggressive timeout
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+                            proc.wait(timeout=2)
+                        except Exception:
+                            try:
+                                proc.kill()
+                            except Exception:
+                                pass
+                    try:
+                        ec = proc.returncode
+                    except Exception:
+                        ec = -1
+            except Exception as e:
+                with open(log_path, "a") as lf:
+                    lf.write(f"\n[ERROR] {e}\n")
+            finally:
+                # Ensure proc is always cleaned up
+                try:
+                    p = _proc_ref[0]
+                    if p and p.stdout and not p.stdout.closed:
+                        p.stdout.close()
+                except Exception:
+                    pass
+
+            elapsed = _time.monotonic() - \
+                (mode_state[mn].get("start_time") or _time.monotonic())
+            with results_lock:
+                mode_state[mn]["status"] = "done"
+                mode_state[mn]["exit_code"] = ec
+                mode_state[mn]["elapsed"] = elapsed
+            return {"mode": mn, "exit_code": ec, "elapsed": elapsed,
+                    "log_file": log_path}
+
+        def _build_progress():
+            table = Table(show_header=True, header_style="bold cyan",
+                          expand=True, padding=(0, 1), box=_box.ROUNDED)
+            table.add_column("Mode", style="bold", min_width=16)
+            table.add_column("Progress", min_width=14)
+            table.add_column("Elapsed", justify="right", min_width=10)
+            table.add_column("Log File", min_width=20, no_wrap=True)
+            table.add_column("Latest Output", ratio=1, overflow="ellipsis", no_wrap=True)
+
+            for mn in modes_to_run:
+                st = mode_state[mn]
+                label = MTR_MODES.get(mn, {}).get("label", mn)
+
+                elapsed = st["elapsed"]
+                if st["status"] == "running" and st.get("start_time"):
+                    elapsed = _time.monotonic() - st["start_time"]
+                mins, secs = divmod(int(elapsed), 60)
+                hours, mins = divmod(mins, 60)
+                es = f"{hours}h{mins:02d}m{secs:02d}s" \
+                    if hours > 0 else f"{mins:02d}m{secs:02d}s"
+
+                pct = st.get("progress", 0)
+                if st["status"] == "waiting":
+                    status = Text("Waiting", style="dim")
+                elif st["status"] == "running":
+                    bar_filled = int(pct / 5)
+                    bar_empty = 20 - bar_filled
+                    status = Text.from_markup(
+                        f"[yellow]{'█' * bar_filled}"
+                        f"{'░' * bar_empty}[/yellow] {pct}%")
+                elif st["status"] == "done":
+                    if st["exit_code"] == 0:
+                        status = Text("PASSED", style="green bold")
+                    else:
+                        status = Text(
+                            f"FAILED({st['exit_code']})", style="red bold")
+                else:
+                    status = Text(st["status"])
+                _log_file = os.path.join(log_dir, f"{mn}.log")
+                table.add_row(label, status, es, _log_file, st.get("last_line", ""))
+            return table
+
+        interrupted = False
+        _cancel = _threading.Event()
+
+        import signal as _signal
+
+        # --- Cancel file (most reliable: works from any terminal) ---
+        _CANCEL_FILE = "/tmp/.rosetta_mtr_cancel"
+        try:
+            os.remove(_CANCEL_FILE)
+        except FileNotFoundError:
+            pass
+
+        def _check_cancel_file():
+            """Check if cancel signal file exists."""
+            return os.path.exists(_CANCEL_FILE)
+
+        def _cleanup_cancel_file():
+            """Remove cancel signal file after handling."""
+            try:
+                os.remove(_CANCEL_FILE)
+            except FileNotFoundError:
+                pass
+
+        def _kill_all_children(force=False):
+            """Force-kill all running MTR subprocesses."""
+            for mn in modes_to_run:
+                st = mode_state[mn]
+                if st.get("status") != "running":
+                    continue
+                proc = st.get("_proc")
+                if not proc:
+                    continue
+                # Try multiple strategies to ensure death
+                for _attempt in range(3):
+                    try:
+                        if proc.poll() is not None:
+                            break  # already dead
+                        if force or _attempt >= 1:
+                            os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+                        else:
+                            os.killpg(os.getpgid(proc.pid), _signal.SIGTERM)
+                        _time.sleep(0.2)
+                    except (ProcessLookupError, OSError):
+                        break  # already gone
+                    except Exception:
+                        pass
+                # Also close stdout pipe to unblock any reader threads
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
+
+        # Layer 1: Signal handler (may or may not work in prompt_toolkit)
+        def _handle_sigint(signum, frame):
+            if not _cancel.is_set():
+                _cancel.set()
+                with open(_CANCEL_FILE, "w") as _f:
+                    _f.write(str(os.getpid()))
+                console.print(
+                    "\n[yellow bold]^C received, stopping... "
+                    "(open another terminal: touch /tmp/.rosetta_mtr_cancel)[/yellow bold]\n")
+                _kill_all_children()
+            else:
+                raise KeyboardInterrupt
+
+        _orig_sig = _signal.signal(_signal.SIGINT, _handle_sigint)
+
+        # Layer 2: Background cancel-file watcher thread
+        def _watch_cancel_file():
+            while not _cancel.is_set():
+                if _check_cancel_file():
+                    _cancel.set()
+                    console.print(
+                        "\n[yellow bold]Cancel signal received, "
+                        "stopping MTR...[/yellow bold]\n")
+                    _kill_all_children(force=True)
+                    break
+                _time.sleep(0.5)
+
+        _file_watcher = _threading.Thread(target=_watch_cancel_file, daemon=True)
+        _file_watcher.start()
+
+        # Layer 3: TTY watcher (best-effort)
+        def _watch_tty():
+            try:
+                tty_fd = os.open("/dev/tty", os.O_RDONLY | os.O_NONBLOCK)
+                while not _cancel.is_set():
+                    try:
+                        rl, _, _ = _select.select([tty_fd], [], [], 0.5)
+                        if rl:
+                            ch = os.read(tty_fd, 1)
+                            if ch in (b'\x03', b'q', b'Q'):
+                                _cancel.set()
+                                with open(_CANCEL_FILE, "w") as _f:
+                                    _f.write(str(os.getpid()))
+                                console.print("\n[yellow bold]Stopping..."
+                                              "[/yellow bold]\n")
+                                _kill_all_children(force=True)
+                                break
+                    except (OSError, BlockingIOError):
+                        continue
+                    except Exception:
+                        break
+            except Exception:
+                pass
+            finally:
+                try:
+                    os.close(tty_fd)
+                except Exception:
+                    pass
+
+        import select as _select
+        _tty_watcher = _threading.Thread(target=_watch_tty, daemon=True)
+        _tty_watcher.start()
+
+        console.print(
+            f"  [dim](To stop: ^C / q)[/dim]")
+
+        with Live(_build_progress(), console=live_console,
+                  refresh_per_second=2, transient=False) as live:
+            try:
+                with _cf.ThreadPoolExecutor(max_workers=len(modes_to_run)) as pool:
+                    futures = {pool.submit(_run_single, m): m
+                              for m in modes_to_run}
+                    while True:
+                        # Check ALL cancellation sources
+                        if _cancel.is_set() or _check_cancel_file():
+                            _cancel.set()
+                            break
+                        done = {f for f in futures if f.done()}
+                        live.update(_build_progress())
+                        if len(done) == len(futures):
+                            break
+                        _time.sleep(0.3)
+
+                # Wait briefly then collect results
+                _time.sleep(0.5)
+                for fut in futures:
+                    try:
+                        r = fut.result(timeout=2)
+                        mode_results[r["mode"]] = r
+                    except Exception as _e:
+                        m = futures[fut]
+                        st = mode_state.get(m, {})
+                        mode_results[m] = {
+                            "mode": m,
+                            "exit_code": -1,
+                            "elapsed": st.get("elapsed", 0),
+                            "log_file": os.path.join(log_dir, f"{m}.log"),
+                            "error": "cancelled",
+                        }
+            finally:
+                _kill_all_children(force=True)
+                _cleanup_cancel_file()
+                try:
+                    _signal.signal(_signal.SIGINT, _orig_sig)
+                except Exception:
+                    pass
+
+        if interrupted or _cancel.is_set():
+            console.print("\n[yellow bold]MTR execution cancelled by user.[/yellow bold]\n")
+            return
+
+        # Summary table (same format as CLI)
+        summary = Table(
+            show_header=True, header_style="bold cyan",
+            padding=(0, 1), box=_box.ROUNDED, expand=True)
+        summary.add_column("Mode", style="bold", min_width=16)
+        summary.add_column("Result", min_width=10)
+        summary.add_column("Total", justify="center")
+        summary.add_column("Pass", justify="center")
+        summary.add_column("Fail", justify="center")
+        summary.add_column("Pass Rate", justify="center")
+        summary.add_column("Elapsed", justify="right", min_width=10)
+
+        has_failures = False
+        for mn in modes_to_run:
+            r = mode_results.get(mn, {})
+            label = MTR_MODES.get(mn, {}).get("label", mn)
+            ec = r.get("exit_code", -1)
+            elapsed = r.get("elapsed", 0)
+            log_file = r.get("log_file", "")
+            stats = _parse_mtr_log_stats(log_file)
+
+            mins, secs = divmod(int(elapsed), 60)
+            hours, mins = divmod(mins, 60)
+            es = f"{hours}h{mins:02d}m{secs:02d}s" \
+                if hours > 0 else f"{mins:02d}m{secs:02d}s"
+
+            result_text = "[green bold]PASSED[/green bold]" \
+                if ec == 0 else "[red bold]FAILED[/red bold]"
+
+            fail_count = stats.get("fail", 0)
+            if fail_count > 0:
+                has_failures = True
+
+            summary.add_row(
+                label, result_text,
+                str(stats.get("total", "-")),
+                f"[green]{stats.get('pass', '-')}[/green]",
+                f"[red]{fail_count}[/red]" if fail_count > 0
+                else str(stats.get("fail", "-")),
+                stats.get("pass_ratio", "-"), es)
+
+        console.print(summary)
+
+        # Failed cases detail
+        for mn in modes_to_run:
+            r = mode_results.get(mn, {})
+            log_file = r.get("log_file", "")
+            stats = _parse_mtr_log_stats(log_file)
+            failing = stats.get("failing_tests", [])
+            if failing:
+                label = MTR_MODES.get(mn, {}).get("label", mn)
+                cases_text = "\n".join(
+                    f"  [red]*[/red] {c}" for c in failing)
+                console.print(Panel(
+                    cases_text,
+                    title=f"[bold red]{label} — "
+                           f"Failed Cases ({len(failing)})[/bold red]",
+                    title_align="left", border_style="red",
+                    padding=(0, 1)))
+
+        total_elapsed = round(_time.monotonic() - total_start, 1)
+        console.print(f"\n  [dim]Log dir:[/dim] {log_dir}")
+        console.print(f"  [dim]Elapsed:[/dim] {total_elapsed}s\n")
+
+        self._run_history.append({
+            "cases": cases_input, "modes": modes_to_run,
+            "time": _time.strftime("%H:%M:%S"),
+            "status": "PASS" if not has_failures else "FAIL",
+            "log_dir": log_dir,
+        })
+
+    # -- command handlers ---------------------------------------------------
+
+    def _cmd_help(self):
+        console.print("\n  [bold cyan]Available commands:[/bold cyan]")
+        for cmd, desc in self.COMMANDS.items():
+            console.print(f"    [bold]{cmd:10s}[/bold] {desc}")
+        console.print(
+            "\n  Or enter a [bold]test case name[/bold] to execute an MTR run.\n"
+            "  During execution, press [bold]^C[/bold] or [bold]q[/bold],\n"
+            "  or from another terminal: [bold]touch /tmp/.rosetta_mtr_cancel[/bold]\n")
+
+    def _cmd_status(self):
+        mode_label = self._get_mode_label()
+        console.print(f"\n  [cyan]MTR Config:[/cyan]")
+        console.print(f"    Mode:       [bold]{mode_label}[/bold]")
+        console.print(f"    Parallel:   [bold]{self.parallel}[/bold]")
+        console.print(f"    Optimistic: {'On' if self.optimistic else 'Off'}")
+        console.print(f"    Record (-r): {'On' if self.record else 'Off'}")
+        console.print(f"    Retry:      [bold]{self.retry}[/bold]")
+        if self.suite:
+            console.print(f"    Suite:      [bold]{self.suite}[/bold]")
+        console.print(f"    Runs:       [bold]{len(self._run_history)}[/bold]")
+        console.print()
+
+    def _cmd_history(self):
+        if not self._run_history:
+            console.print("\n  [dim]No MTR runs yet.[/dim]\n")
+            return
+        console.print(
+            f"\n  [bold cyan]MTR History "
+            f"({len(self._run_history)} runs):[/bold cyan]\n")
+        for i, entry in enumerate(self._run_history, 1):
+            s = "green" if entry["status"] == "PASS" else "red"
+            modes_str = ",".join(entry["modes"])
+            console.print(
+                f"    {i:3d}. [{s}]{entry['status']:4s}[/{s}]  "
+                f"[dim]{entry['time']}[/dim]  "
+                f"{entry['cases']}  "
+                f"[cyan]({modes_str})[/cyan]")
+        console.print()

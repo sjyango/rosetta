@@ -2285,7 +2285,8 @@ def _select_mode(configs, database: str) -> Optional[str]:
     from prompt_toolkit.layout.controls import FormattedTextControl
 
     MODES = [
-        ("mtr",        "MTR mode",        "run .test compatibility tests"),
+        ("mtr",        "MTR mode",        "run native MySQL MTR tests"),
+        ("test",       "Test mode",       "run .test compatibility tests"),
         ("playground", "Playground mode",  "run SQL Playground in browser"),
         ("bench",      "Benchmark mode",   "run JSON performance benchmarks"),
         ("history",    "History mode",     "view historical test runs"),
@@ -2373,10 +2374,11 @@ def _select_mode(configs, database: str) -> Optional[str]:
 
         lines.append(("", "\n"))
         lines.append(("dim", "  ────────────────────────────────────────────────────────\n"))
-        lines.append(("dim", "  MTR          Run .test files against multiple DBs and diff results\n"))
-        lines.append(("dim", "  Playground   Launch an interactive SQL playground in the browser\n"))
-        lines.append(("dim", "  Benchmark    Compare query performance with latency/QPS reports\n"))
-        lines.append(("dim", "  History      Browse and view historical test/benchmark runs\n"))
+        lines.append(("dim",  "  MTR          Run native MySQL MTR test suites (row/col/pq)\n"))
+        lines.append(("dim",  "  Test         Run .test files against multiple DBs and diff results\n"))
+        lines.append(("dim",  "  Playground   Launch an interactive SQL playground in the browser\n"))
+        lines.append(("dim",  "  Benchmark    Compare query performance with latency/QPS reports\n"))
+        lines.append(("dim",  "  History      Browse and view historical test/benchmark runs\n"))
 
         return lines
 
@@ -2392,6 +2394,343 @@ def _select_mode(configs, database: str) -> Optional[str]:
     )
 
     # Save cursor, run, then restore and clear via /dev/tty
+    _tty_write("\033[s")
+    app.run()
+    _tty_write("\033[u\033[J")
+
+    return result[0]
+
+
+def _select_mtr_params(
+    mode: str = "row",
+    parallel: int = 8,
+    optimistic: bool = False,
+    record: bool = False,
+    retry: int = 3,
+) -> Optional[dict]:
+    """Show parameter configuration for MTR native test mode.
+
+    Provides an interactive panel for configuring MTR execution parameters:
+      - Mode multi-select (row / col / pq / all) as checkboxes
+      - Parallel workers
+      - Feature toggles (-o, -r)
+
+    Returns a dict with resolved parameters, or None if cancelled.
+    """
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.keys import Keys
+    from prompt_toolkit.filters import Condition
+
+    # --- Mode multi-select state ---
+    MODE_OPTIONS = ["row", "col", "pq", "all"]
+    MODE_DESCS = {
+        "row": "Row-store (default)",
+        "col":  "Column-store (ve-protocol)",
+        "pq":   "Parallel-query mode",
+        "all":  "All modes above",
+    }
+    # Parse initial mode string into checkbox states
+    if mode == "all":
+        _initial = {"row": True, "col": True, "pq": True, "all": True}
+    else:
+        _initial = {"row": False, "col": False, "pq": False, "all": False}
+        if mode in _initial:
+            _initial[mode] = True
+    mode_checks = [_initial.copy()]   # {name: bool} per option
+    mode_cursor = [0]                 # which sub-option is highlighted (0-3)
+
+    # --- Other presets ---
+    PARALLEL_PRESETS = [1, 2, 4, 8, 16, 32]
+    RETRY_PRESETS = [0, 1, 3, 5, 10]
+    TOGGLE_LABELS = {False: "Off", True: "On"}
+
+    result = [None]
+    sel = [0]
+
+    # State
+    p_idx = [PARALLEL_PRESETS.index(parallel)
+             if parallel in PARALLEL_PRESETS else 3]
+    r_idx = [RETRY_PRESETS.index(retry)
+             if retry in RETRY_PRESETS else 2]
+    opt = [optimistic]
+    rec = [record]
+    sm = [False]
+
+    FIELDS = [
+        {"label": "Mode",                    "type": "multiselect"},
+        {"label": "Parallel Workers",         "type": "choice"},
+        {"label": "Suite Mode",              "type": "toggle", "var": "sm"},
+        {"label": "Optimistic Transaction (-o)", "type": "toggle", "var": "opt"},
+        {"label": "Record Mode (-r)",         "type": "toggle", "var": "rec"},
+        {"label": "OK",                       "type": "action"},
+        {"label": "Back",                     "type": "action"},
+        {"label": "Quit",                     "type": "action"},
+    ]
+
+    ACTION_OK = len(FIELDS) - 3
+    ACTION_BACK = len(FIELDS) - 2
+    ACTION_QUIT = len(FIELDS) - 1
+
+    def _parallel_val():
+        return PARALLEL_PRESETS[p_idx[0]]
+
+    def _retry_val():
+        return RETRY_PRESETS[r_idx[0]]
+
+    def _field_val(i):
+        if i == 1:
+            return str(_parallel_val())
+        elif i == 2:
+            return TOGGLE_LABELS[sm[0]]
+        elif i == 3:
+            return TOGGLE_LABELS[opt[0]]
+        elif i == 4:
+            return TOGGLE_LABELS[rec[0]]
+        elif i == 5:
+            return str(_retry_val())
+        return ""
+
+    def _get_toggle_var(i):
+        if i == 2: return sm
+        if i == 3: return opt
+        if i == 4: return rec
+        return None
+
+    def _resolve_mode():
+        """Return the mode string from checkbox state."""
+        mc = mode_checks[0]
+        if mc.get("all"):
+            return "all"
+        selected = [m for m in MODE_OPTIONS if mc.get(m)]
+        if len(selected) == 1:
+            return selected[0]
+        if len(selected) > 1:
+            # Multiple but not all → return comma-separated
+            return ",".join(selected)
+        return "row"  # fallback
+
+    def _toggle_mode_option():
+        """Toggle the sub-option under the cursor."""
+        key = MODE_OPTIONS[mode_cursor[0]]
+        mc = mode_checks[0]
+        if key == "all":
+            # Toggling "all" selects/deselects everything
+            new_val = not mc.get("all", False)
+            mc["all"] = new_val
+            mc["row"] = new_val
+            mc["col"] = new_val
+            mc["pq"] = new_val
+        else:
+            # Toggle individual option
+            mc[key] = not mc.get(key, False)
+            # If all three individual options are on, auto-set "all"
+            if mc.get("row") and mc.get("col") and mc.get("pq"):
+                mc["all"] = True
+            else:
+                mc["all"] = False
+                # If unchecking one while "all" was on, turn off "all"
+                # (already handled above since we set all=True only when
+                #  all three are on)
+
+    def _toggle_right(i):
+        if i == 0:
+            # Move cursor right among mode sub-options
+            mode_cursor[0] = (mode_cursor[0] + 1) % len(MODE_OPTIONS)
+        elif i == 1:
+            p_idx[0] = (p_idx[0] + 1) % len(PARALLEL_PRESETS)
+        elif i == 4:
+            r_idx[0] = (r_idx[0] + 1) % len(RETRY_PRESETS)
+        else:
+            var = _get_toggle_var(i)
+            if var is not None:
+                var[0] = not var[0]
+
+    def _toggle_left(i):
+        if i == 0:
+            mode_cursor[0] = (mode_cursor[0] - 1) % len(MODE_OPTIONS)
+        elif i == 1:
+            p_idx[0] = (p_idx[0] - 1) % len(PARALLEL_PRESETS)
+        elif i == 4:
+            r_idx[0] = (r_idx[0] - 1) % len(RETRY_PRESETS)
+        else:
+            var = _get_toggle_var(i)
+            if var is not None:
+                var[0] = not var[0]
+
+    def _get_text():
+        lines = []
+
+        lines.append(("", "\n"))
+        for logo_line in LOGO_LINES:
+            lines.append(("bold cyan", f"  {logo_line}\n"))
+        lines.append(("", "\n"))
+        lines.append(("dim", f"  {LOGO_SUBTITLE}\n"))
+        from . import __version__
+        lines.append(("dim", f"  v{__version__}"))
+        lines.append(("bold white", "  MTR Parameters\n"))
+        lines.append(("", "\n"))
+
+        lines.append(("dim",
+                      "  up/down navigate   left/right change"
+                      "   space/enter toggle   Esc/q quit\n\n"))
+
+        label_width = max(len(f["label"]) for f in FIELDS[:ACTION_OK])
+        prefix_sel = "  \u276f "
+        prefix_nonsel = "    "
+
+        for i, field in enumerate(FIELDS):
+            is_sel = (i == sel[0])
+            is_action = field["type"] == "action"
+
+            if is_action:
+                if is_sel:
+                    lines.append(("bold cyan",
+                                  f"{prefix_sel}{field['label']}\n"))
+                else:
+                    lines.append(("dim",
+                                  f"{prefix_nonsel}{field['label']}\n"))
+            elif field["type"] == "multiselect":
+                # ---- Mode multi-select (single-line inline) ----
+                mc = mode_checks[0]
+                cur = mode_cursor[0]
+                padded_label = f"{field['label']:<{label_width}s}"
+
+                tokens = []
+                for idx, mkey in enumerate(MODE_OPTIONS):
+                    checked = mc.get(mkey, False)
+                    mark = "[ \u2713 ]" if checked else "[   ]"
+                    is_cur_opt = (idx == cur)
+                    if is_sel:
+                        # Field is active – show full contrast
+                        if is_cur_opt:
+                            # Current option: always bright
+                            tokens.append(("bold cyan", f"{mark}{mkey}"))
+                        elif checked:
+                            # Selected but not cursor: bold to stand out
+                            tokens.append(("bold", f"{mark}{mkey}"))
+                        else:
+                            # Unselected & not cursor: dim
+                            tokens.append(("dim", f"{mark}{mkey}"))
+                    else:
+                        # Field inactive: all dim
+                        tokens.append(("dim", f"{mark}{mkey}"))
+                    if idx < len(MODE_OPTIONS) - 1:
+                        tokens.append(("", " "))
+
+                # Render single line: label + tokens
+                if is_sel:
+                    lines.append(("bold cyan", prefix_sel))
+                    lines.append(("bold cyan", f"{padded_label}  "))
+                    for style, text in tokens:
+                        lines.append((style, text))
+                    lines.append(("", "\n"))
+                else:
+                    lines.append(("dim", prefix_nonsel))
+                    lines.append(("", f"{padded_label}  "))
+                    for style, text in tokens:
+                        gray_style = ("gray" if style else "")
+                        lines.append((gray_style, text))
+                    lines[-1] = (lines[-1][0], lines[-1][1] + "\n")
+            else:
+                val = _field_val(i)
+                padded_label = f"{field['label']:<{label_width}s}"
+                if is_sel:
+                    lines.append(("bold cyan", prefix_sel))
+                    lines.append(("bold cyan", f"{padded_label}  "))
+                    lines.append(("cyan", f"[ {val} ]\n"))
+                else:
+                    lines.append(("dim", prefix_nonsel))
+                    lines.append(("", f"{padded_label}  "))
+                    lines.append(("gray", f"[ {val} ]\n"))
+
+        lines.append(("", "\n"))
+        lines.append(("dim", "  ────────────────────────────────────────\n"))
+        lines.append(("dim", "  Mode:   row=Row-store, col=Column-store,"
+                          " pq=Parallel-query\n"))
+        lines.append(("dim", "  Flags:  -o=Optimistic-tx,"
+                          " -r=Record-mode\n"))
+        lines.append(("dim", "  Stop:   ^C / q during run, or\n"
+                          "          touch /tmp/.rosetta_mtr_cancel\n"))
+
+        return lines
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("k")
+    def _up(event):
+        sel[0] = (sel[0] - 1) % len(FIELDS)
+
+    @kb.add("down")
+    @kb.add("j")
+    def _down(event):
+        sel[0] = (sel[0] + 1) % len(FIELDS)
+
+    @kb.add("left")
+    @kb.add("h")
+    def _left(event):
+        _toggle_left(sel[0])
+
+    @kb.add("right")
+    @kb.add("l")
+    def _right(event):
+        _toggle_right(sel[0])
+
+    @kb.add("space")
+    def _space(event):
+        if sel[0] == 0:
+            # Mode multiselect: toggle the highlighted option
+            _toggle_mode_option()
+        else:
+            var = _get_toggle_var(sel[0])
+            if var is not None:
+                var[0] = not var[0]
+
+    @kb.add("enter")
+    def _confirm(event):
+        if sel[0] == 0:
+            # On mode multiselect: also toggle on Enter
+            _toggle_mode_option()
+            return
+        if sel[0] == ACTION_OK:
+            result[0] = {
+                "mode": _resolve_mode(),
+                "parallel": _parallel_val(),
+                "suite_mode": sm[0],
+                "optimistic": opt[0],
+                "record": rec[0],
+                "retry": _retry_val(),
+            }
+            event.app.exit()
+        elif sel[0] == ACTION_BACK:
+            result[0] = {"action": "back"}
+            event.app.exit()
+        elif sel[0] == ACTION_QUIT:
+            result[0] = None
+            event.app.exit()
+
+    @kb.add("c-c")
+    @kb.add("escape")
+    @kb.add("q")
+    def _cancel(event):
+        result[0] = None
+        event.app.exit()
+
+    menu = Window(
+        content=FormattedTextControl(_get_text),
+        dont_extend_height=True,
+    )
+
+    app: Application = Application(
+        layout=Layout(HSplit([menu])),
+        key_bindings=kb,
+        full_screen=False,
+    )
+
     _tty_write("\033[s")
     app.run()
     _tty_write("\033[u\033[J")
@@ -2956,7 +3295,7 @@ def _enter_interactive(args) -> int:
                 return 0
             continue
 
-        elif mode == "mtr":
+        elif mode == "test":
             session = InteractiveSession(
                 configs=configs,
                 output_dir=output_dir,
@@ -2983,6 +3322,45 @@ def _enter_interactive(args) -> int:
                 console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
                 return 0
             continue
+
+        elif mode == "mtr":
+            # --- MTR mode: params → repl (loop params ↔ repl) ---
+            while True:
+                params = _select_mtr_params()
+                if params is None:
+                    console.print(
+                        "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                    return 0
+                if params.get("action") == "back":
+                    # Back to mode selection
+                    console.clear()
+                    mode = _select_mode(configs, args.database)
+                    if mode is None:
+                        console.print(
+                            "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                        return 0
+                    break  # exit inner loop, re-enter while True with new mode
+
+                from .interactive import MtrInteractiveSession
+                session = MtrInteractiveSession(
+                    configs=configs,
+                    output_dir=output_dir,
+                    mtr_mode=params["mode"],
+                    parallel=params["parallel"],
+                    optimistic=params["optimistic"],
+                    record=params["record"],
+                    retry=params["retry"],
+                    suite_mode=params.get("suite_mode", False),
+                    suite=params.get("suite"),
+                    all_configs=all_configs,
+                )
+                reason = session.run()
+                if reason != "back":
+                    return 0 if reason == "quit" else 0
+                # User typed 'back' — re-show param selection
+                console.clear()
+            continue  # re-select mode after break
+
         else:
             # --- benchmark: mode → params → repl (loop params ↔ repl) ---
             back_to_mode = False

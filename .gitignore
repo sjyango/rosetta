@@ -10,3 +10,4 @@ dbms_config.json
 benchmark/
 rosetta-skill.zip
 docs/
+.codebuddy/

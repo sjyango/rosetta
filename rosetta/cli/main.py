@@ -193,26 +193,13 @@ def _add_mtr_arguments(parser):
         help="Enable optimistic transaction mode (--mysqld=--tdsql_trans_type=1)",
     )
     parser.add_argument(
-        "-v", "--vector",
-        action="store_true",
-        default=False,
-        help="Enable vector engine mode (--ve-protocol)",
-    )
-    parser.add_argument(
-        "-pq", "--parallel-query",
-        action="store_true",
-        default=False,
-        help="Enable parallel query mode (--parallel-query)",
-    )
-    parser.add_argument(
         "-m", "--mode",
         type=str,
         default=None,
         help="Run multiple MTR modes in parallel. "
-             "Comma-separated list of: row (行存), col (列存/ve-protocol), pq (并行查询), "
+             "Comma-separated list of: row, col, pq, "
              "or 'all' (equivalent to row,col,pq). "
-             "Example: --mode row,col,pq. "
-             "When specified, --vector and --parallel-query flags are ignored.",
+             "Example: --mode row,col,pq",
     )
     parser.add_argument(
         "-r", "--record",
