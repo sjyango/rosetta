@@ -385,6 +385,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJjdXJyZW50Q29sb3IiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxlbGxpcHNlIGN4PSIxMiIgY3k9IjYiIHJ4PSI4IiByeT0iMyIvPjxwYXRoIGQ9Ik0NIDYdjEyYzAgMS42NiAzLjU4IDMgOCAzczgtMS4zNCA4LTNWNiIvPjxlbGxpcHNlIGN4PSIxMiIgY3k9IjEyIiByeD0iOCIgcnk9IjMiIHN0cm9rZS1kYXNoYXJyYXk9IMyAyIi8+PHRleHQgeD0iMTIiIHk9IjE2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZpbGw9ImN1cnJlbnRDb2xvciIgc3Ryb2tlPSJub25lIj5TUUw8L3RleHQ+PC9zdmc+" type="image/svg+xml">
 <title>Rosetta Report — {{TEST_NAME}}</title>
 <style>
 :root {

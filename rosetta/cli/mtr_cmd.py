@@ -950,6 +950,13 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
             title_align="left",
             padding=(0, 1),
         ))
+        # Print actual MTR command
+        console_plan.print(_Panel(
+            f"[dim]{cmd}[/dim]",
+            title="[bold cyan]Command[/bold cyan]",
+            title_align="left",
+            padding=(0, 1),
+        ))
 
     # --- 4. Execute MTR ---
     original_dir = os.getcwd()

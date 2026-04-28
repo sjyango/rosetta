@@ -94,7 +94,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_config_subparser(subparsers)
     _add_result_subparser(subparsers)
     _add_interactive_subparser(subparsers)
-    
+    _add_update_subparser(subparsers)
+
     return parser
 
 
@@ -575,6 +576,16 @@ def _add_interactive_subparser(subparsers):
         )
 
 
+def _add_update_subparser(subparsers):
+    """Add the 'update' subcommand."""
+    update_parser = subparsers.add_parser(
+        "update",
+        help="Update rosetta to the latest version",
+        description="Pull latest code from git and reinstall",
+    )
+    _add_global_options(update_parser)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """
     Main entry point for the rosetta CLI.
@@ -674,6 +685,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif args.command in ["interactive", "repl", "i"]:
             from .interactive_cmd import handle_interactive
             result = handle_interactive(args, output)
+        elif args.command == "update":
+            from .update_cmd import handle_update
+            result = handle_update(args, output)
         else:
             result = CommandResult.failure(
                 f"Unknown command: {args.command}",
