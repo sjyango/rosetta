@@ -141,16 +141,17 @@ class OutputFormatter:
             disconnected = data.get('disconnected', 0)
             table = Table(
                 title=f"Total: {total}  Connected: {connected}  Disconnected: {disconnected}",
-                expand=True,
+                expand=False,
                 box=box.ROUNDED,
+                show_edge=True,
             )
-            table.add_column("Name", style="cyan", no_wrap=True)
-            table.add_column("Host", no_wrap=True)
-            table.add_column("Port", justify="right")
-            table.add_column("Driver", no_wrap=True)
-            table.add_column("Status", justify="center")
-            table.add_column("Version")
-            table.add_column("Latency", justify="right")
+            table.add_column("Name", style="cyan", no_wrap=True, width=16)
+            table.add_column("Host", no_wrap=True, width=22)
+            table.add_column("Port", justify="right", width=6)
+            table.add_column("Driver", no_wrap=True, width=9)
+            table.add_column("Status", justify="center", width=15)
+            table.add_column("Version", width=40, overflow="ellipsis")
+            table.add_column("Latency", justify="right", width=10)
             
             for db in dbms_list:
                 # Status with color
@@ -559,6 +560,7 @@ class OutputFormatter:
 
         results = data.get("results", {})
         dbms_names = list(results.keys())
+        max_rows = data.get("max_rows", 0)  # 0 = show all (no folding)
 
         # Print connection-level errors first
         has_conn_err = False
@@ -615,15 +617,16 @@ class OutputFormatter:
                     cols = sd["columns"]
                     if rows:
                         lines = []
-                        for row in rows[:5]:
+                        display_rows = rows if max_rows == 0 else rows[:max_rows]
+                        for row in display_rows:
                             if len(cols) == 1:
                                 lines.append(str(row[0]))
                             else:
                                 lines.append(", ".join(
                                     f"{cols[ci]}={row[ci]}" for ci in range(len(cols))
-                                ))
-                        if len(rows) > 5:
-                            lines.append(f"[dim]... +{len(rows) - 5} rows[/dim]")
+                                    ))
+                        if max_rows > 0 and len(rows) > max_rows:
+                            lines.append(f"[dim]... +{len(rows) - max_rows} rows[/dim]")
                         lines.append(f"[dim]{elapsed}[/dim]")
                         cells.append("\n".join(lines))
                     else:

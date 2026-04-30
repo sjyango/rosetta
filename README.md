@@ -242,7 +242,7 @@ rosetta config validate
 
 | Action | Description |
 |--------|-------------|
-| `init` | Generate a sample `rosetta_config.sample.json` |
+| `init` | Generate a sample `config.sample.json` |
 | `show` | Display current config details |
 | `validate` | Validate JSON structure and test connectivity |
 

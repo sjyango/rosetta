@@ -19,7 +19,9 @@
       "tdstore_mod_log_flags=SPECIAL_FLAG=off",
       "tdstore_delete_job_ctx_delay_s=3",
       "tdstore_safely_destroy_region_delay_time_s=3",
-      "tdsql_check_task_status_retry_interval_ms=1"
+      "tdsql_check_task_status_retry_interval_ms=1",
+      "tdsql_mtr_mode=1",
+      "logservice_no_use_history_table=on"
     ]
   },
   "databases": [
@@ -33,7 +35,9 @@
       "skip_patterns": ["tdsql_", "ddl_recovery"],
       "init_sql": [
         "SET sql_mode='STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'"
-      ]
+      ],
+      "enabled": true,
+      "restart_cmd": "mysqld_safe &"
     },
     {
       "name": "tdsql",
@@ -43,7 +47,8 @@
       "password": "",
       "driver": "pymysql",
       "skip_patterns": [],
-      "init_sql": []
+      "init_sql": [],
+      "enabled": true
     },
     {
       "name": "tidb",
@@ -53,7 +58,8 @@
       "password": "",
       "driver": "pymysql",
       "skip_patterns": ["tdsql_", "ddl_recovery"],
-      "init_sql": []
+      "init_sql": [],
+      "enabled": false
     },
     {
       "name": "oceanbase",
@@ -63,7 +69,8 @@
       "password": "",
       "driver": "pymysql",
       "skip_patterns": ["tdsql_", "ddl_recovery"],
-      "init_sql": []
+      "init_sql": [],
+      "enabled": false
     }
   ]
 }

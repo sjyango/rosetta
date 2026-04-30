@@ -233,14 +233,17 @@ class RosettaRunner:
             table = Table(
                 show_header=True,
                 header_style="bold cyan",
-                expand=True,
+                expand=False,
                 padding=(0, 1),
                 box=box.ROUNDED,
+                width=None,
+                show_edge=True,
+                show_lines=False,
             )
-            table.add_column("DBMS", style="bold", min_width=12)
-            table.add_column("Progress", min_width=14)
-            table.add_column("Elapsed", justify="right", min_width=10)
-            table.add_column("Status", ratio=1, overflow="ellipsis", no_wrap=True)
+            table.add_column("DBMS", style="bold", min_width=10)
+            table.add_column("Progress", min_width=42)
+            table.add_column("Elapsed", justify="right", min_width=7)
+            table.add_column("Status", max_width=25, overflow="ellipsis")
 
             for c in configs:
                 st = dbms_state[c.name]
@@ -347,34 +350,63 @@ class RosettaRunner:
 
             return config.name, output
 
-        with Live(
-            _build_progress_table(),
-            console=live_console,
-            refresh_per_second=2,
-            transient=False,
-        ) as live:
-            with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=len(configs)) as pool:
-                futures = {pool.submit(_run_single, c): c for c in configs}
+        # --- Suppress ALL stderr output during Live progress display ---
+        # Live renders to stderr; any stray write (logging, warnings,
+        # pymysql, traceback) corrupts the live table.
+        import io as _io
 
-                while True:
-                    done_futures = {f for f in futures if f.done()}
-                    live.update(_build_progress_table())
-                    if len(done_futures) == len(futures):
-                        break
-                    _time.sleep(0.5)
+        _saved_stderr = sys.stderr
+        _stderr_buffer = _io.StringIO()
+        sys.stderr = _stderr_buffer
 
-                for fut in futures:
-                    try:
-                        name, output = fut.result()
-                        if output is None:
-                            self.failed_connections.add(name)
-                        else:
-                            self.results[name] = output
-                    except Exception as e:
-                        m = futures[fut]
-                        self.failed_connections.add(m.name)
-                        log.error("MTR execution failed for %s: %s", m.name, e)
+        _saved_root_handlers = logging.root.handlers[:]
+        _saved_rosetta_handlers = log.handlers[:]
+        logging.root.handlers.clear()
+        log.handlers.clear()
+        log.addHandler(logging.NullHandler())
+
+        try:
+            with Live(
+                _build_progress_table(),
+                console=live_console,
+                refresh_per_second=2,
+                transient=False,
+            ) as live:
+                with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=len(configs)) as pool:
+                    futures = {pool.submit(_run_single, c): c for c in configs}
+
+                    while True:
+                        done_futures = {f for f in futures if f.done()}
+                        live.update(_build_progress_table())
+                        if len(done_futures) == len(futures):
+                            break
+                        _time.sleep(0.5)
+
+                    for fut in futures:
+                        try:
+                            name, output = fut.result()
+                            if output is None:
+                                self.failed_connections.add(name)
+                            else:
+                                self.results[name] = output
+                        except Exception as e:
+                            m = futures[fut]
+                            self.failed_connections.add(m.name)
+                            log.error("MTR execution failed for %s: %s", m.name, e)
+
+        finally:
+            # Restore stderr and logging handlers after Live progress display ends
+            sys.stderr = _saved_stderr
+            # Dump any captured stderr as debug log (for troubleshooting)
+            _captured = _stderr_buffer.getvalue()
+            if _captured.strip():
+                log.debug("Captured stderr during Live display:\n%s",
+                          _captured.strip())
+            log.handlers.clear()
+            log.handlers.extend(_saved_rosetta_handlers)
+            logging.root.handlers.clear()
+            logging.root.handlers.extend(_saved_root_handlers)
 
         # Build statement list for report (from MTR commands)
         self.statements = self._mtr_commands_to_statements(test)
@@ -2271,13 +2303,28 @@ def _select_concurrent_params(
     return result[0]
 
 
-def _select_mode(configs, database: str) -> Optional[str]:
-    """Show an arrow-key mode selector and return 'mtr' or 'bench'.
+def _select_mode(configs, database: str,
+                 reachable_names: set = None,
+                 default_dbms: list = None,
+                 baseline: str = "tdsql",
+                 server_url: str = "") -> tuple:
+    """Show a combined DBMS + Mode selector.
 
-    Returns ``None`` if the user cancels (Ctrl-C / Esc).
+    DBMS is the first row (multiselect checkboxes).
+    Modes are rows below it.  ↑↓ moves between rows; when on the DBMS row,
+    ←→ moves sub-cursor and Space toggles.
+
+    Args:
+        configs: all available (enabled) DBMSConfig objects
+        database: default database name
+        reachable_names: set of DBMS names that are reachable (connectable).
+            If None, all are assumed reachable.
+        default_dbms: list of DBMS names to pre-select. If None, all reachable
+            are selected.
+        server_url: if provided, display the web UI URL on the page.
+
+    Returns ``(mode, selected_configs)`` or ``(None, None)`` on cancel.
     """
-    import sys
-
     from prompt_toolkit import Application
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import Layout
@@ -2293,10 +2340,34 @@ def _select_mode(configs, database: str) -> Optional[str]:
         (None,         "Quit",             "exit"),
     ]
 
-    QUIT_IDX = len(MODES) - 1
+    # Row layout: row 0 = DBMS multiselect, rows 1..N = mode items
+    DBMS_ROW = 0
+    TOTAL_ROWS = 1 + len(MODES)
 
-    selected = [0]       # mutable index
-    result = [None]      # mutable result
+    # --- Determine reachability ---
+    if reachable_names is None:
+        reachable_names = {c.name for c in configs}
+
+    # --- State: initialize checkboxes ---
+    # Options: individual DBMS names + "all"
+    dbms_names = [c.name for c in configs]  # preserve order
+
+    if default_dbms is not None:
+        dbms_state = {name: (name in default_dbms and name in reachable_names)
+                      for name in dbms_names}
+    else:
+        dbms_state = {name: (name in reachable_names) for name in dbms_names}
+
+    # "all" means all reachable DBMS are selected
+    def _is_all():
+        return all(dbms_state[n] for n in dbms_names if n in reachable_names)
+
+    # Options list for display: individual DBMS + "all"
+    dbms_options = dbms_names + ["all"]
+
+    sel = [1]               # selected row; start on first mode (MTR)
+    dbms_cursor = [0]       # sub-cursor within DBMS row
+    result = [None, None]
 
     # -- key bindings -------------------------------------------------------
     kb = KeyBindings()
@@ -2304,32 +2375,124 @@ def _select_mode(configs, database: str) -> Optional[str]:
     @kb.add("up")
     @kb.add("k")
     def _up(event):
-        selected[0] = (selected[0] - 1) % len(MODES)
+        sel[0] = (sel[0] - 1) % TOTAL_ROWS
+        event.app.invalidate()
 
     @kb.add("down")
     @kb.add("j")
     def _down(event):
-        selected[0] = (selected[0] + 1) % len(MODES)
+        sel[0] = (sel[0] + 1) % TOTAL_ROWS
+        event.app.invalidate()
 
-    @kb.add("enter")
+    @kb.add("left")
+    def _left(event):
+        if sel[0] == DBMS_ROW:
+            dbms_cursor[0] = max(0, dbms_cursor[0] - 1)
+        event.app.invalidate()
+
     @kb.add("right")
     @kb.add("l")
-    def _confirm(event):
-        key = MODES[selected[0]][0]
-        result[0] = key  # None for Quit, 'mtr' or 'bench' otherwise
+    def _right(event):
+        if sel[0] == DBMS_ROW:
+            dbms_cursor[0] = min(len(dbms_options) - 1, dbms_cursor[0] + 1)
+            event.app.invalidate()
+        else:
+            _do_confirm(event)
+
+    @kb.add("space")
+    def _toggle(event):
+        warn_msg[0] = ""  # clear warning on interaction
+        if sel[0] == DBMS_ROW:
+            idx = dbms_cursor[0]
+            if 0 <= idx < len(dbms_options):
+                opt = dbms_options[idx]
+                if opt == "all":
+                    # Toggle all reachable
+                    if _is_all():
+                        for k in dbms_state:
+                            dbms_state[k] = False
+                    else:
+                        for k in dbms_state:
+                            if k in reachable_names:
+                                dbms_state[k] = True
+                elif opt in reachable_names:
+                    dbms_state[opt] = not dbms_state[opt]
+                # unreachable DBMS can't be toggled
+        event.app.invalidate()
+
+    @kb.add("a")
+    def _all_sel(event):
+        for k in dbms_state:
+            if k in reachable_names:
+                dbms_state[k] = True
+        event.app.invalidate()
+
+    @kb.add("n")
+    def _none_sel(event):
+        for k in dbms_state:
+            dbms_state[k] = False
+        event.app.invalidate()
+
+    # Minimum DBMS requirements per mode
+    MODE_MIN_DBMS = {
+        "mtr": 1,
+        "test": 2,        # cross-DBMS comparison needs at least 2
+        "playground": 1,
+        "bench": 1,
+        "history": 0,
+    }
+    warn_msg = [""]  # mutable warning message shown in UI
+
+    def _do_confirm(event):
+        if sel[0] == DBMS_ROW:
+            return  # can't confirm on DBMS row, just toggle
+        mode_idx = sel[0] - 1
+        key = MODES[mode_idx][0]
+        if key is None:  # Quit
+            result[0] = None
+            result[1] = None
+            event.app.exit()
+            return
+        selected = [c for c in configs if dbms_state.get(c.name, False)]
+        min_req = MODE_MIN_DBMS.get(key, 1)
+        if len(selected) < min_req:
+            if min_req == 0:
+                pass  # history mode doesn't need any
+            elif len(selected) == 0:
+                warn_msg[0] = f"Please select at least {min_req} DBMS"
+            else:
+                warn_msg[0] = (
+                    f"{MODES[mode_idx][1]} requires at least "
+                    f"{min_req} DBMS ({len(selected)} selected)")
+            event.app.invalidate()
+            return
+        # Baseline DBMS must be selected (except history mode)
+        if key != "history" and baseline:
+            selected_names = {c.name for c in selected}
+            if baseline not in selected_names:
+                warn_msg[0] = (
+                    f"Baseline DBMS \"{baseline}\" must be selected")
+                event.app.invalidate()
+                return
+        warn_msg[0] = ""
+        result[0] = key
+        result[1] = selected
         event.app.exit()
+
+    @kb.add("enter")
+    def _confirm(event):
+        _do_confirm(event)
 
     @kb.add("c-c")
     @kb.add("escape")
-    @kb.add("left")
-    @kb.add("h")
     @kb.add("q")
     def _cancel(event):
         result[0] = None
+        result[1] = None
         event.app.exit()
 
     # -- layout -------------------------------------------------------------
-    def _get_menu_text():
+    def _get_content():
         lines = []
 
         # ASCII Logo
@@ -2342,50 +2505,96 @@ def _select_mode(configs, database: str) -> Optional[str]:
         lines.append(("dim", f"  v{__version__}\n"))
         lines.append(("", "\n"))
 
-        dbms_str = ", ".join(c.name for c in configs)
-        lines.append(("gray", "  DBMS: "))
-        lines.append(("bold", dbms_str))
-        lines.append(("gray", "  Database: "))
-        lines.append(("bold", database))
-        lines.append(("", "\n\n"))
-
         # Hint
-        lines.append(("dim", "  ↑/↓ move  →/Enter select  ←/Esc/q quit\n\n"))
+        lines.append(("dim",
+            "  \u2191\u2193 move   \u2190\u2192/Space toggle DBMS"
+            "   Enter/\u2192 confirm   Esc/q quit\n\n"))
 
-        for i, (key, label, desc) in enumerate(MODES):
-            is_quit = (key is None)
-            if i == selected[0]:
-                if is_quit:
-                    lines.append(("bold cyan", "  ❯ "))
-                    lines.append(("bold cyan", label))
-                else:
-                    lines.append(("bold cyan", "  ❯ "))
-                    lines.append(("bold cyan", f"{label:<18s}"))
-                    lines.append(("cyan", f"— {desc}"))
+        # ---- Row 0: DBMS multiselect ----
+        is_dbms_row = (sel[0] == DBMS_ROW)
+        prefix = "\u276f " if is_dbms_row else "  "
+        label_style = "bold cyan" if is_dbms_row else ""
+        lines.append((label_style, f"{prefix}{'DBMS':<18s}"))
+
+        for idx, opt in enumerate(dbms_options):
+            is_cur_opt = (idx == dbms_cursor[0])
+            # Display name: baseline DBMS gets a * suffix
+            display_name = f"{opt}*" if (opt == baseline and opt != "all") else opt
+
+            if opt == "all":
+                checked = _is_all()
             else:
-                if is_quit:
-                    lines.append(("", "    "))
-                    lines.append(("dim", label))
+                checked = dbms_state.get(opt, False)
+                is_reachable = (opt in reachable_names)
+
+            if opt == "all":
+                mark = "[ \u2713 ]" if checked else "[   ]"
+                if is_dbms_row:
+                    if is_cur_opt:
+                        lines.append(("bold cyan", f"{mark}{display_name} "))
+                    elif checked:
+                        lines.append(("bold", f"{mark}{display_name} "))
+                    else:
+                        lines.append(("dim", f"{mark}{display_name} "))
                 else:
-                    lines.append(("", "    "))
-                    lines.append(("", f"{label:<18s}"))
-                    lines.append(("gray", f"— {desc}"))
+                    lines.append(("" if checked else "dim", f"{mark}{display_name} "))
+            elif not is_reachable:
+                mark = "[ \u2717 ]"
+                lines.append(("dim italic", f"{mark}{display_name} "))
+            else:
+                mark = "[ \u2713 ]" if checked else "[   ]"
+                if is_dbms_row:
+                    if is_cur_opt:
+                        lines.append(("bold cyan", f"{mark}{display_name} "))
+                    elif checked:
+                        lines.append(("bold", f"{mark}{display_name} "))
+                    else:
+                        lines.append(("dim", f"{mark}{display_name} "))
+                else:
+                    lines.append(("" if checked else "dim", f"{mark}{display_name} "))
+        lines.append(("", "\n"))
+
+        # ---- Rows 1..N: Mode items ----
+        for i, (key, label, desc) in enumerate(MODES):
+            row_idx = i + 1
+            is_cur = (sel[0] == row_idx)
+            is_quit = (key is None)
+            prefix = "\u276f " if is_cur else "  "
+            if is_quit:
+                style = "bold cyan" if is_cur else "dim"
+                lines.append((style, f"{prefix}{label}\n"))
+            elif is_cur:
+                lines.append(("bold cyan", prefix))
+                lines.append(("bold cyan", f"{label:<18s}"))
+                lines.append(("cyan", f"\u2014 {desc}\n"))
+            else:
+                lines.append(("", prefix))
+                lines.append(("", f"{label:<18s}"))
+                lines.append(("gray", f"\u2014 {desc}\n"))
+
+        # Warning message (if any)
+        if warn_msg[0]:
             lines.append(("", "\n"))
+            lines.append(("bold red", f"  \u26a0 {warn_msg[0]}"))
 
         lines.append(("", "\n"))
-        lines.append(("dim", "  ────────────────────────────────────────────────────────\n"))
-        lines.append(("dim",  "  MTR          Run native MySQL MTR test suites (row/col/pq)\n"))
-        lines.append(("dim",  "  Test         Run .test files against multiple DBs and diff results\n"))
-        lines.append(("dim",  "  Playground   Launch an interactive SQL playground in the browser\n"))
-        lines.append(("dim",  "  Benchmark    Compare query performance with latency/QPS reports\n"))
-        lines.append(("dim",  "  History      Browse and view historical test/benchmark runs\n"))
+        lines.append(("dim", "  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"))
+        lines.append(("dim", "  MTR          Run native MySQL MTR test suites (row/col/pq)\n"))
+        lines.append(("dim", "  Test         Run .test files against multiple DBs and diff results\n"))
+        lines.append(("dim", "  Playground   Launch an interactive SQL playground in the browser\n"))
+        lines.append(("dim", "  Benchmark    Compare query performance with latency/QPS reports\n"))
+        lines.append(("dim", "  History      Browse and view historical test/benchmark runs\n"))
+
+        # Display web UI URL if server is running
+        if server_url:
+            lines.append(("", "\n"))
+            lines.append(("dim", "  ────────────────────────────────\n"))
+            lines.append(("dim", f"  Web UI: {server_url}/index.html\n"))
 
         return lines
 
-    menu = Window(
-        content=FormattedTextControl(_get_menu_text),
-        dont_extend_height=True,
-    )
+    ctrl = FormattedTextControl(_get_content)
+    menu = Window(content=ctrl, dont_extend_height=True)
 
     app: Application = Application(
         layout=Layout(HSplit([menu])),
@@ -2393,12 +2602,11 @@ def _select_mode(configs, database: str) -> Optional[str]:
         full_screen=False,
     )
 
-    # Save cursor, run, then restore and clear via /dev/tty
     _tty_write("\033[s")
     app.run()
     _tty_write("\033[u\033[J")
 
-    return result[0]
+    return tuple(result)
 
 
 def _select_mtr_params(
@@ -2571,7 +2779,7 @@ def _select_mtr_params(
         lines.append(("dim", f"  {LOGO_SUBTITLE}\n"))
         from . import __version__
         lines.append(("dim", f"  v{__version__}"))
-        lines.append(("bold white", "  MTR Parameters\n"))
+        lines.append(("bold white", "  MTR Mode\n"))
         lines.append(("", "\n"))
 
         lines.append(("dim",
@@ -2990,6 +3198,136 @@ def _select_rerun_run_id(output_dir: str) -> Optional[dict]:
     return result[0]
 
 
+def _select_dbms(configs: list) -> Optional[list]:
+    """Show a DBMS selection screen where users toggle which DBMS to use.
+
+    Returns ``None`` if user cancels, otherwise the selected (subset) configs.
+    """
+    import sys
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    state = {c.name: True for c in configs}
+    result = [None]
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("k")
+    def _up(event):
+        names = list(state.keys())
+        for i in range(1, len(names)):
+            if state[names[i]] and not state[names[i - 1]]:
+                state[names[i]], state[names[i - 1]] = state[names[i - 1]], state[names[i]]
+                break
+
+    @kb.add("down")
+    @kb.add("j")
+    def _down(event):
+        names = list(state.keys())
+        for i in range(len(names) - 2, -1, -1):
+            if state[names[i]] and not state[names[i + 1]]:
+                state[names[i]], state[names[i + 1]] = state[names[i + 1]], state[names[i]]
+                break
+
+    @kb.add("space")
+    def _toggle(event):
+        names = list(state.keys())
+        idx = s_idx[0]
+        if 0 <= idx < len(names):
+            state[names[idx]] = not state[names[idx]]
+
+    @kb.add("a")
+    def _select_all(event):
+        for k in state:
+            state[k] = True
+
+    @kb.add("n")
+    def _select_none(event):
+        for k in state:
+            state[k] = False
+
+    @kb.add("enter")
+    @kb.add("right")
+    @kb.add("l")
+    def _confirm(event):
+        selected = [c for c in configs if state[c.name]]
+        if selected:
+            result[0] = selected
+            event.app.exit()
+
+    @kb.add("c-c")
+    @kb.add("escape")
+    @kb.add("left")
+    @kb.add("h")
+    @kb.add("q")
+    def _cancel(event):
+        result[0] = None
+        event.app.exit()
+
+    s_idx = [0]
+
+    def _get_content():
+        lines = []
+        lines.append(("", "\n"))
+        for logo_line in LOGO_LINES:
+            lines.append(("bold cyan", f"  {logo_line}\n"))
+        lines.append(("", "\n"))
+        lines.append(("dim", f"  {LOGO_SUBTITLE}\n"))
+        from . import __version__
+        lines.append(("dim", f"  v{__version__}\n"))
+        lines.append(("", "\n\n"))
+        lines.append(("bold", "  Select DBMS targets:\n"))
+        lines.append(("dim", "  [Space] toggle | [a] all | [n] none | ↑↓ move\n\n"))
+
+        names = list(state.keys())
+        for i, name in enumerate(names):
+            enabled = state[name]
+            cursor = "▸ " if i == s_idx[0] else "  "
+            prefix = cursor + ("[bold cyan]" if i == s_idx[0] else "")
+            marker = "[green bold]✓[/green bold]" if enabled else "[dim]○[/dim]"
+            lines.append((prefix, f"{name}", f"  {marker}\n"))
+
+        lines.append(("", "\n"))
+        lines.append(("bold dim",
+                         "  [Enter/→] Confirm   "
+                         "[Space] Toggle   "
+                         "[Esc/←/h/q] Back   "
+                         "[a] All   [n] None\n"))
+        return lines
+
+    ctrl = FormattedTextControl(_get_content)
+    window = Window(content=ctrl)
+
+    app: Application = Application(
+        layout=Layout(window),
+        key_bindings=kb,
+        full_screen=False,
+        mouse_support=False,
+    )
+
+    @kb.add("tab")
+    def _next(event):
+        s_idx[0] = (s_idx[0] + 1) % len(state)
+        ctrl.content = _get_content()
+        app.invalidate()
+
+    @kb.add("s-tab")
+    def _prev(event):
+        s_idx[0] = (s_idx[0] - 1) % len(state)
+        ctrl.content = _get_content()
+        app.invalidate()
+
+    _tty_write("\033[s")
+    app.run()
+    _tty_write("\033[u\033[J")
+
+    return result[0]
+
+
 def _enter_interactive(args) -> int:
     """Load config and launch the interactive session.
 
@@ -3027,6 +3365,63 @@ def _enter_interactive(args) -> int:
 
     output_dir = os.path.abspath(args.output_dir)
 
+    # ----- Quick connectivity check (parallel) for mode selection page ------
+    import concurrent.futures as _cf
+    from .executor import check_port
+
+    def _check_one(cfg):
+        return cfg.name, check_port(cfg.host, cfg.port, timeout=2.0)
+
+    reachable_names = set()
+    with _cf.ThreadPoolExecutor(max_workers=len(configs)) as pool:
+        futs = [pool.submit(_check_one, c) for c in configs]
+        for fut in _cf.as_completed(futs, timeout=8):
+            name, ok = fut.result()
+            if ok:
+                reachable_names.add(name)
+
+    # default_dbms: if user passed --dbms, use those; otherwise None (= all reachable)
+    default_dbms = None
+    if args.dbms:
+        default_dbms = [n.strip() for n in args.dbms.split(",")]
+
+    # ----- Start background HTTP server (playground always available) --------
+    from .interactive import ReportServer, _APIHandler
+
+    bg_server = ReportServer(
+        output_dir, port=args.port,
+        configs=configs,
+        all_configs=all_configs,
+        database=args.database,
+    )
+    try:
+        bg_server.start()
+    except OSError as e:
+        log.warning("Failed to start background server on port %s: %s",
+                    args.port, e)
+        bg_server = None
+
+    # Ensure server stops on any exit path
+    import atexit
+    def _stop_bg_server():
+        if bg_server and bg_server.running:
+            bg_server.stop()
+    atexit.register(_stop_bg_server)
+
+    # Auto-open Playground in browser when server starts successfully
+    if bg_server and bg_server.running:
+        pg_url = f"{bg_server.base_url}/playground.html"
+        console.print(
+            f"\n  [green]●[/green] Playground: "
+            f"[bold link={pg_url}]{pg_url}[/bold link]")
+        # Open in IDE browser
+        try:
+            import subprocess as _sp
+            _sp.Popen(["code", "--open-url", pg_url],
+                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        except FileNotFoundError:
+            pass
+
     # Clear terminal before entering interactive mode
     console.clear()
 
@@ -3035,12 +3430,26 @@ def _enter_interactive(args) -> int:
 
     if force_bench:
         mode = "bench"
+        selected_configs = configs
     else:
-        mode = _select_mode(configs, args.database)
+        mode, selected_configs = _select_mode(
+            configs, args.database,
+            reachable_names=reachable_names,
+            default_dbms=default_dbms,
+            baseline=args.baseline,
+            server_url=bg_server.base_url if bg_server and bg_server.running else "",
+        )
         if mode is None:
             # User cancelled
+            if bg_server:
+                bg_server.stop()
             console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
             return 0
+
+    # Update server configs to match user's DBMS selection
+    if bg_server and selected_configs:
+        _APIHandler._configs = selected_configs
+        _APIHandler._database = args.database
 
     # ----- benchmark parameter configuration (interactive) ----------------
     # Only in interactive benchmark mode — prompt for iterations/warmup/profile
@@ -3051,8 +3460,7 @@ def _enter_interactive(args) -> int:
     # ----- launch selected session -----------------------------------------
     while True:
         if mode == "playground":
-            # Start server and open Playground page in browser
-            from .interactive import ReportServer, _APIHandler
+            # Use existing bg_server or create new one if needed
             from . import __version__
 
             # ASCII Logo
@@ -3063,30 +3471,32 @@ def _enter_interactive(args) -> int:
             console.print(f"  [dim]{LOGO_SUBTITLE}[/dim]")
             console.print(f"  [dim]v{__version__}[/dim]  [bold white]Playground Mode[/bold white]")
 
-            srv = ReportServer(
-                output_dir, port=args.port,
-                configs=configs,
-                all_configs=all_configs,
-                database=args.database,
-            )
-            try:
-                srv.start()
-            except OSError as e:
-                print_error(f"Failed to start server: {e}")
-                flush_all()
-                return 1
+            # Reuse bg_server if available, otherwise create new one
+            if bg_server and bg_server.running:
+                srv = bg_server
+            else:
+                from .interactive import ReportServer
+                srv = ReportServer(
+                    output_dir, port=args.port,
+                    configs=selected_configs,
+                    all_configs=all_configs,
+                    database=args.database,
+                )
+
+            # Start server if it's not already running
+            if not srv.running:
+                try:
+                    srv.start()
+                except OSError as e:
+                    print_error(f"Failed to start server: {e}")
+                    flush_all()
+                    return 1
 
             pg_url = f"{srv.base_url}/playground.html"
             console.print(
                 f"\n  [green]●[/green] Playground: "
                 f"[bold link={pg_url}]{pg_url}[/bold link]")
-            # Open in IDE browser
-            try:
-                import subprocess as _sp
-                _sp.Popen(["code", "--open-url", pg_url],
-                          stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-            except FileNotFoundError:
-                pass
+            # Browser already opened when bg_server started
 
             from prompt_toolkit import HTML as _HTML
             from prompt_toolkit.history import InMemoryHistory as _IMH
@@ -3114,7 +3524,9 @@ def _enter_interactive(args) -> int:
                         placeholder=_pg_placeholder,
                     )
                 except (EOFError, KeyboardInterrupt):
-                    srv.stop()
+                    # Only stop server if it's not the shared bg_server
+                    if srv is not bg_server and srv.running:
+                        srv.stop()
                     console.print(
                         "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
                     return 0
@@ -3131,7 +3543,9 @@ def _enter_interactive(args) -> int:
                 if cmd in ("back", "b"):
                     break
                 elif cmd in ("quit", "exit", "q"):
-                    srv.stop()
+                    # Only stop server if it's not the shared bg_server
+                    if srv is not bg_server and srv.running:
+                        srv.stop()
                     console.print(
                         "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
                     return 0
@@ -3164,9 +3578,12 @@ def _enter_interactive(args) -> int:
                         f"  [dim]Type 'help', 'back', "
                         f"or 'quit'.[/dim]")
 
-            srv.stop()
+            # Only stop server if it's not the shared bg_server
+            if srv is not bg_server and srv.running:
+                srv.stop()
             console.clear()
-            mode = _select_mode(configs, args.database)
+            mode, selected_configs = _select_mode(configs, args.database, reachable_names=reachable_names, default_dbms=default_dbms, baseline=args.baseline,
+                                                 server_url=bg_server.base_url if bg_server and bg_server.running else "")
             if mode is None:
                 console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
                 return 0
@@ -3185,18 +3602,22 @@ def _enter_interactive(args) -> int:
             console.print(f"  [dim]{LOGO_SUBTITLE}[/dim]")
             console.print(f"  [dim]v{__version__}[/dim]  [bold white]History Mode[/bold white]")
 
-            srv = ReportServer(
-                output_dir, port=args.port,
-                configs=configs,
-                all_configs=all_configs,
-                database=args.database,
-            )
-            try:
-                srv.start()
-            except OSError as e:
-                print_error(f"Failed to start server: {e}")
-                flush_all()
-                return 1
+            # Reuse bg_server if already running (from interactive mode startup)
+            if bg_server and bg_server.running:
+                srv = bg_server
+            else:
+                srv = ReportServer(
+                    output_dir, port=args.port,
+                    configs=selected_configs,
+                    all_configs=all_configs,
+                    database=args.database,
+                )
+                try:
+                    srv.start()
+                except OSError as e:
+                    print_error(f"Failed to start server: {e}")
+                    flush_all()
+                    return 1
 
             history_url = f"{srv.base_url}/index.html"
             console.print(
@@ -3236,7 +3657,8 @@ def _enter_interactive(args) -> int:
                         placeholder=_hist_placeholder,
                     )
                 except (EOFError, KeyboardInterrupt):
-                    srv.stop()
+                    if srv is not bg_server:
+                        srv.stop()
                     console.print(
                         "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
                     return 0
@@ -3254,7 +3676,8 @@ def _enter_interactive(args) -> int:
                 if cmd in ("back", "b"):
                     break
                 elif cmd in ("quit", "exit", "q"):
-                    srv.stop()
+                    if srv is not bg_server:
+                        srv.stop()
                     console.print(
                         "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
                     return 0
@@ -3287,17 +3710,20 @@ def _enter_interactive(args) -> int:
                         f"  [dim]Type 'help', 'back', "
                         f"or 'quit'.[/dim]")
 
-            srv.stop()
+            if srv is not bg_server:
+                srv.stop()
             console.clear()
-            mode = _select_mode(configs, args.database)
+            mode, selected_configs = _select_mode(configs, args.database, reachable_names=reachable_names, default_dbms=default_dbms, baseline=args.baseline,
+                                                 server_url=bg_server.base_url if bg_server and bg_server.running else "")
             if mode is None:
                 console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
                 return 0
             continue
 
         elif mode == "test":
+            # selected_configs already chosen from top-level DBMS+Mode page
             session = InteractiveSession(
-                configs=configs,
+                configs=selected_configs,
                 output_dir=output_dir,
                 database=args.database,
                 baseline=args.baseline,
@@ -3310,14 +3736,13 @@ def _enter_interactive(args) -> int:
                 all_configs=all_configs,
             )
             reason = session.run()
-            # Stop the report server before leaving this session
-            # so the port is released for the next session.
             if session._report_server:
                 session._report_server.stop()
             if reason != "back":
                 break
             console.clear()
-            mode = _select_mode(configs, args.database)
+            mode, selected_configs = _select_mode(configs, args.database, reachable_names=reachable_names, default_dbms=default_dbms, baseline=args.baseline,
+                                                 server_url=bg_server.base_url if bg_server and bg_server.running else "")
             if mode is None:
                 console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
                 return 0
@@ -3334,7 +3759,8 @@ def _enter_interactive(args) -> int:
                 if params.get("action") == "back":
                     # Back to mode selection
                     console.clear()
-                    mode = _select_mode(configs, args.database)
+                    mode, selected_configs = _select_mode(configs, args.database, reachable_names=reachable_names, default_dbms=default_dbms, baseline=args.baseline,
+                                                 server_url=bg_server.base_url if bg_server and bg_server.running else "")
                     if mode is None:
                         console.print(
                             "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
@@ -3343,7 +3769,7 @@ def _enter_interactive(args) -> int:
 
                 from .interactive import MtrInteractiveSession
                 session = MtrInteractiveSession(
-                    configs=configs,
+                    configs=selected_configs,
                     output_dir=output_dir,
                     mtr_mode=params["mode"],
                     parallel=params["parallel"],
@@ -3389,7 +3815,8 @@ def _enter_interactive(args) -> int:
                     if params.get("action") == "back":
                         # Back to mode selection
                         console.clear()
-                        mode = _select_mode(configs, args.database)
+                        mode, selected_configs = _select_mode(configs, args.database, reachable_names=reachable_names, default_dbms=default_dbms, baseline=args.baseline,
+                                                     server_url=bg_server.base_url if bg_server and bg_server.running else "")
                         if mode is None:
                             console.print(
                                 "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
@@ -3507,7 +3934,7 @@ def _enter_interactive(args) -> int:
                             console.print(f"  [dim]File:[/dim]       [bold]{rerun_bench_file}[/bold]")
                         
                         rr_session = BenchInteractiveSession(
-                            configs=configs,
+                            configs=selected_configs,
                             output_dir=output_dir,
                             database=rerun_database,
                             iterations=rr_iter,
@@ -3560,7 +3987,7 @@ def _enter_interactive(args) -> int:
                     bench_skip_teardown = getattr(args, 'skip_teardown', False)
 
                 session = BenchInteractiveSession(
-                    configs=configs,
+                    configs=selected_configs,
                     output_dir=output_dir,
                     database=args.database,
                     iterations=bench_iterations,

@@ -30,6 +30,12 @@ CONFIG_FILE = os.path.join(ROSETTA_HOME, "config.json")
 RESULTS_DIR = os.path.join(ROSETTA_HOME, "results")
 MTR_LOGS_DIR = os.path.join(ROSETTA_HOME, "mtr_logs")
 
+# Sample config bundled with the package (project root)
+_SAMPLE_CONFIG_NAME = "config.sample.json"
+# Resolve relative to the package directory: rosetta/paths.py -> project root
+_PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SAMPLE_CONFIG_FILE = os.path.join(_PACKAGE_DIR, _SAMPLE_CONFIG_NAME)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
