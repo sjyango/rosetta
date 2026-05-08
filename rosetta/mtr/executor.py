@@ -478,7 +478,11 @@ class MtrExecutor:
         if query_log:
             self._output.append(query_log)
 
-        # Output the result (if result log enabled)
+        # Output the result (if both query log and result log enabled)
+        # When disable_query_log is active, suppress all output (matching
+        # mysqltest behavior where silent blocks produce no output at all).
+        if self._result_processor.disable_query_log:
+            return
         if not self._result_processor.disable_result_log:
             formatted = self._result_processor.format_result(result)
             if formatted:
@@ -577,30 +581,40 @@ class MtrExecutor:
     def _handle_if(self, cmd: MtrCommand) -> None:
         """Handle --if: conditional execution.
 
-        Note: The actual branching logic depends on the block structure
-        parsed by the parser. This handler evaluates the condition
-        and records the result for block processing.
+        Evaluates the condition and executes cmd.body if true,
+        otherwise executes cmd.else_body if present.
         """
         cond = cmd.condition
-        if cond:
-            result = self._evaluate_condition(cond)
-            self._block_stack.append({
-                'type': 'if',
-                'condition': result,
-                'depth': len(self._block_stack),
-            })
+        if not cond:
+            return
+        result = self._evaluate_condition(cond)
+        if result:
+            if cmd.body:
+                self._execute_commands(cmd.body)
+        else:
+            if cmd.else_body:
+                self._execute_commands(cmd.else_body)
 
     def _handle_while(self, cmd: MtrCommand) -> None:
-        """Handle --while: loop execution."""
+        """Handle --while: loop execution.
+
+        Repeatedly executes cmd.body while the condition is true.
+        Max iterations capped at 10000 to prevent infinite loops.
+        """
+        MAX_ITERATIONS = 10000
         cond = cmd.condition
-        if cond:
+        if not cond or not cmd.body:
+            return
+        iterations = 0
+        while iterations < MAX_ITERATIONS:
             result = self._evaluate_condition(cond)
-            self._block_stack.append({
-                'type': 'while',
-                'condition': result,
-                'start_cmd_idx': self._commands_executed - 1,
-                'depth': len(self._block_stack),
-            })
+            if not result:
+                break
+            self._execute_commands(cmd.body)
+            iterations += 1
+        if iterations >= MAX_ITERATIONS:
+            log.warning("While loop at line %d hit max iterations (%d)",
+                        cmd.line_no, MAX_ITERATIONS)
 
     def _handle_end(self, cmd: MtrCommand) -> None:
         """Handle --end: end of if/while block."""

@@ -894,10 +894,15 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
 
     total_mode = getattr(args, "total", False)
     port_base = cfg["total_port"] if total_mode else cfg["base_port"]
+    # Apply port offset based on mode (col +1000, pq +2000)
+    mode_name_for_port = _parse_mtr_mode_name(args)
+    port_base += _MODE_PORT_OFFSETS.get(mode_name_for_port, 0)
     cfg["port_base"] = port_base
 
     cfg["optimistic"] = getattr(args, "optimistic", False)
     cfg["record"] = getattr(args, "record", False)
+    cfg["vector"] = getattr(args, "vector", False)
+    cfg["parallel_query"] = getattr(args, "parallel_query", False)
     cfg["suite"] = getattr(args, "suite", None)
     cfg["cases"] = getattr(args, "cases", [])
 
@@ -933,7 +938,8 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
         info_lines = []
         info_lines.append(f"[bold]Config [/bold]    : {os.path.abspath(config_path)}")
         info_lines.append(f"[bold]Test dir[/bold]   : {test_dir}")
-        info_lines.append(f"[bold]Mode[/bold]       : {'total' if total_mode else 'base'}")
+        _mode_display = "total" if total_mode else mode_name_for_port
+        info_lines.append(f"[bold]Mode[/bold]       : {_mode_display}")
         info_lines.append(f"[bold]Port base[/bold]  : {port_base}")
         info_lines.append(f"[bold]Skip list[/bold]  : {cfg['skip_list']}")
         if cfg["suite"]:
@@ -964,7 +970,11 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
 
     # Build mode label for progress display
     mode_parts = []
-    if cfg["optimistic"]:
+    if cfg.get("vector"):
+        mode_parts.append("ve-protocol")
+    if cfg.get("parallel_query"):
+        mode_parts.append("parallel-query")
+    if cfg.get("optimistic"):
         mode_parts.append("optimistic")
     mode_label = "+".join(mode_parts) if mode_parts else "row (default)"
     mode_name = _parse_mtr_mode_name(args)

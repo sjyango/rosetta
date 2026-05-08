@@ -156,12 +156,23 @@ class _SilentHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
     def handle_error(self, request, client_address):
         """Silently ignore connection reset/broken pipe errors."""
-        # These are normal when clients disconnect abruptly
-        pass
+        import sys
+        import traceback
+        exc_type = sys.exc_info()[0]
+        # Ignore normal disconnect errors
+        if exc_type in (ConnectionResetError, BrokenPipeError, OSError):
+            return
+        # Log unexpected errors to help debug issues
+        log.error("Server error from %s:\n%s",
+                  client_address, traceback.format_exc())
 
 
 class _APIHandler(http.server.SimpleHTTPRequestHandler):
     """HTTP handler with API endpoints and suppressed logging."""
+
+    # Use HTTP/1.1 to support persistent connections and chunked transfer,
+    # which is critical for SSE streams over SSH tunnels / proxies.
+    protocol_version = "HTTP/1.1"
 
     # Class-level reference set by ReportServer before creating instances.
     _configs: List[DBMSConfig] = []
@@ -368,7 +379,12 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
         from .mtr import MtrParser
         from .mtr.nodes import MtrCommandType
         _mtr_parser = MtrParser("<playground>")
-        _mtr_test = _mtr_parser.parse_text(sql_text)
+        try:
+            _mtr_test = _mtr_parser.parse_text(sql_text)
+        except Exception as e:
+            self._respond_json(
+                {"ok": False, "error": f"SQL parse error: {e}"}, 400)
+            return
         stmts = [cmd.argument for cmd in _mtr_test.commands
                  if cmd.cmd_type in (MtrCommandType.SQL, MtrCommandType.EVAL,
                                      MtrCommandType.QUERY,
@@ -554,7 +570,12 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
         from .mtr import MtrParser
         from .mtr.nodes import MtrCommandType
         _mtr_parser = MtrParser("<playground>")
-        _mtr_test = _mtr_parser.parse_text(sql_text)
+        try:
+            _mtr_test = _mtr_parser.parse_text(sql_text)
+        except Exception as e:
+            self._respond_json(
+                {"ok": False, "error": f"SQL parse error: {e}"}, 400)
+            return
         stmts = [cmd.argument for cmd in _mtr_test.commands
                  if cmd.cmd_type in (MtrCommandType.SQL, MtrCommandType.EVAL,
                                      MtrCommandType.QUERY,
@@ -574,10 +595,23 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "close")
+        self.send_header("X-Accel-Buffering", "no")
         self._send_cors_headers()
         self.end_headers()
         self.wfile.flush()
+
+        # Send an immediate SSE comment as heartbeat so the client receives
+        # data right away (critical for SSH tunnels / proxies that may close
+        # idle connections).
+        try:
+            heartbeat = b": heartbeat\n\n"
+            if raw_sock:
+                raw_sock.sendall(heartbeat)
+            else:
+                self.wfile.write(heartbeat)
+                self.wfile.flush()
+        except Exception:
+            return  # Client already gone
 
         sse_lock = threading.Lock()
         _client_gone = False
@@ -781,6 +815,8 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
             watchdog_stop.set()  # Tell watchdog to stop
             # Ensure all DB connections are cleaned up
             self._cleanup_connections()
+            # SSE stream is done — close connection (HTTP/1.1 would try reuse)
+            self.close_connection = True
 
 
 def _format_val(value) -> str:
@@ -887,7 +923,8 @@ class InteractiveSession:
                  skip_show_create: bool = True,
                  output_format: str = "all",
                  serve: bool = False, port: int = 19527,
-                 all_configs: Optional[List[DBMSConfig]] = None):
+                 all_configs: Optional[List[DBMSConfig]] = None,
+                 report_server: Optional[ReportServer] = None):
         self.configs = configs
         self.all_configs = all_configs or configs
         self.output_dir = os.path.abspath(output_dir)
@@ -900,16 +937,17 @@ class InteractiveSession:
         self.serve = serve
         self.port = port
         self._run_history: List[Dict] = []
-        self._report_server: Optional[ReportServer] = None
+        self._report_server: Optional[ReportServer] = report_server
 
 
     # -- server helpers -----------------------------------------------------
 
     def _ensure_server(self) -> Optional[ReportServer]:
-        if not self.serve:
-            return None
+        # Reuse an externally-provided server that is already running
         if self._report_server and self._report_server.running:
             return self._report_server
+        if not self.serve:
+            return None
         # Stop previous server if it exists but is no longer running
         if self._report_server:
             self._report_server.stop()
@@ -1271,7 +1309,8 @@ class BenchInteractiveSession:
                  perf_freq: int = 99,
                  query_timeout: int = 5,
                  flamegraph_min_ms: int = 1000,
-                 bench_mode: str = "serial"):
+                 bench_mode: str = "serial",
+                 report_server: Optional[ReportServer] = None):
         self.configs = configs
         self.output_dir = os.path.abspath(output_dir)
         self.database = database
@@ -1292,15 +1331,16 @@ class BenchInteractiveSession:
         self.flamegraph_min_ms = flamegraph_min_ms
         self.bench_mode = bench_mode
         self._run_history: List[Dict] = []
-        self._report_server: Optional[ReportServer] = None
+        self._report_server: Optional[ReportServer] = report_server
 
     # -- server helpers -----------------------------------------------------
 
     def _ensure_server(self) -> Optional[ReportServer]:
-        if not self.serve:
-            return None
+        # Reuse an externally-provided server that is already running
         if self._report_server and self._report_server.running:
             return self._report_server
+        if not self.serve:
+            return None
         # Stop previous server if it exists but is no longer running
         if self._report_server:
             self._report_server.stop()
@@ -2528,10 +2568,14 @@ class MtrInteractiveSession:
         _file_watcher.start()
 
         # Layer 3: TTY watcher (best-effort)
+        _tty_stop = _threading.Event()
+
         def _watch_tty():
+            import fcntl
+            tty_fd = -1
             try:
                 tty_fd = os.open("/dev/tty", os.O_RDONLY | os.O_NONBLOCK)
-                while not _cancel.is_set():
+                while not _cancel.is_set() and not _tty_stop.is_set():
                     try:
                         rl, _, _ = _select.select([tty_fd], [], [], 0.5)
                         if rl:
@@ -2551,17 +2595,23 @@ class MtrInteractiveSession:
             except Exception:
                 pass
             finally:
-                try:
-                    os.close(tty_fd)
-                except Exception:
-                    pass
+                if tty_fd >= 0:
+                    try:
+                        # Remove O_NONBLOCK before closing to avoid
+                        # affecting shared file description state
+                        flags = fcntl.fcntl(tty_fd, fcntl.F_GETFL)
+                        fcntl.fcntl(tty_fd, fcntl.F_SETFL,
+                                    flags & ~os.O_NONBLOCK)
+                    except Exception:
+                        pass
+                    try:
+                        os.close(tty_fd)
+                    except Exception:
+                        pass
 
         import select as _select
         _tty_watcher = _threading.Thread(target=_watch_tty, daemon=True)
         _tty_watcher.start()
-
-        console.print(
-            f"  [dim](To stop: ^C / q)[/dim]")
 
         with Live(_build_progress(), console=live_console,
                   refresh_per_second=2, transient=False) as live:
@@ -2599,8 +2649,19 @@ class MtrInteractiveSession:
             finally:
                 _kill_all_children(force=True)
                 _cleanup_cancel_file()
+                # Stop the TTY watcher thread and wait for it to exit
+                _tty_stop.set()
+                _tty_watcher.join(timeout=2)
                 try:
                     _signal.signal(_signal.SIGINT, _orig_sig)
+                except Exception:
+                    pass
+                # Restore terminal state in case it was corrupted
+                try:
+                    import termios
+                    import sys
+                    fd = sys.stdin.fileno()
+                    termios.tcflush(fd, termios.TCIFLUSH)
                 except Exception:
                     pass
 

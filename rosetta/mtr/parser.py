@@ -305,13 +305,24 @@ class MtrParser:
 
     def _parse_lines(self, lines: List[str], filepath: str) -> None:
         """Core line-by-line parsing logic."""
-        idx = 0
-        line_no = 0
+        ctx = {'idx': 0, 'lines': lines, 'filepath': filepath}
+        cmds = self._parse_block(ctx, top_level=True)
+        self._commands.extend(cmds)
 
-        while idx < len(lines):
-            line = lines[idx].rstrip("\n\r")
-            line_no = idx + 1
-            idx += 1
+    def _parse_block(self, ctx: dict, top_level: bool = False) -> List[MtrCommand]:
+        """Parse commands until end of file (top_level) or closing '}'.
+
+        Returns a list of MtrCommand nodes.  For if/while commands, body
+        commands are collected recursively into cmd.body / cmd.else_body.
+        """
+        lines = ctx['lines']
+        filepath = ctx['filepath']
+        commands: List[MtrCommand] = []
+
+        while ctx['idx'] < len(lines):
+            line = lines[ctx['idx']].rstrip("\n\r")
+            line_no = ctx['idx'] + 1
+            ctx['idx'] += 1
 
             stripped = line.strip()
 
@@ -321,59 +332,63 @@ class MtrParser:
 
             # Skip comment lines (single # at start)
             if stripped.startswith("#"):
-                # Double ## comments may be output to result file
                 continue
 
-            # Handle } and }; (end of block)
+            # Handle { — start of block (only meaningful at top of
+            # while/if body; skip if encountered standalone)
+            if stripped == "{":
+                continue
+
+            # Handle } and }; — end of current block
             if stripped in ("}", "};"):
+                if not top_level:
+                    return commands
                 continue
 
             # Handle --directive lines
             if stripped.startswith("--"):
-                cmd = self._parse_directive(stripped, lines, idx, line_no, filepath)
+                cmd = self._parse_directive(stripped, lines, ctx['idx'],
+                                            line_no, filepath)
                 if cmd is not None:
-                    # For content-delimited commands, consume content lines
                     if cmd.cmd_type in _CONTENT_DELIMITED_COMMANDS:
-                        idx = self._consume_content(cmd, lines, idx, filepath)
+                        ctx['idx'] = self._consume_content(
+                            cmd, lines, ctx['idx'], filepath)
                     elif cmd.cmd_type == MtrCommandType.SOURCE:
                         self._handle_source(cmd)
-                    self._commands.append(cmd)
-                    # Update idx if multi-line directive consumed lines
-                    if cmd.cmd_type in (MtrCommandType.LET, MtrCommandType.EVAL,
-                                        MtrCommandType.QUERY,
-                                        MtrCommandType.QUERY_VERTICAL,
-                                        MtrCommandType.QUERY_HORIZONTAL,
-                                        MtrCommandType.SEND, MtrCommandType.SEND_EVAL):
-                        # These may consume additional lines
-                        pass
-                continue
-
-            # Handle bare-word directives (without -- prefix)
-            # e.g., "let $var = value;" or "source include/foo.inc;"
-            bare_cmd = self._try_parse_bare_directive(stripped, lines, idx,
-                                                       line_no, filepath)
-            if bare_cmd is not None:
-                if bare_cmd.cmd_type == MtrCommandType.SOURCE:
-                    self._handle_source(bare_cmd)
-                self._commands.append(bare_cmd)
+                    elif cmd.cmd_type in (MtrCommandType.IF,
+                                          MtrCommandType.WHILE):
+                        self._collect_if_while_body(cmd, ctx)
+                    commands.append(cmd)
                 continue
 
             # Handle if(...) and while(...) without -- prefix
+            # (must be before bare-word check since 'while'/'if' are in bare_words)
             if re.match(r'if\s*\(', stripped, re.IGNORECASE):
                 cmd = self._parse_if_while(stripped, MtrCommandType.IF,
                                            line_no, filepath)
-                self._commands.append(cmd)
+                self._collect_if_while_body(cmd, ctx)
+                commands.append(cmd)
                 continue
 
             if re.match(r'while\s*\(', stripped, re.IGNORECASE):
                 cmd = self._parse_if_while(stripped, MtrCommandType.WHILE,
                                            line_no, filepath)
-                self._commands.append(cmd)
+                self._collect_if_while_body(cmd, ctx)
+                commands.append(cmd)
+                continue
+
+            # Handle bare-word directives (without -- prefix)
+            bare_cmd = self._try_parse_bare_directive(
+                stripped, lines, ctx['idx'], line_no, filepath)
+            if bare_cmd is not None:
+                if bare_cmd.cmd_type == MtrCommandType.SOURCE:
+                    self._handle_source(bare_cmd)
+                commands.append(bare_cmd)
                 continue
 
             # Handle SQL statements (collected until delimiter)
-            sql_text, new_idx = self._collect_sql(stripped, lines, idx)
-            idx = new_idx
+            sql_text, new_idx = self._collect_sql(stripped, lines, ctx['idx'])
+            ctx['idx'] = new_idx
             if sql_text:
                 sql_text = self._strip_delimiter(sql_text)
                 cmd = MtrCommand(
@@ -383,7 +398,71 @@ class MtrParser:
                     file_path=filepath,
                     argument=sql_text,
                 )
-                self._commands.append(cmd)
+                commands.append(cmd)
+
+        return commands
+
+    def _collect_if_while_body(self, cmd: MtrCommand, ctx: dict) -> None:
+        """Collect the { ... } body for an if/while command.
+
+        After parsing the if/while header, we look for { on the same line
+        (already consumed by the regex) or on subsequent lines, then
+        recursively parse until the matching }.
+
+        Also handles else/else if branches for IF commands.
+        """
+        # Skip to the opening { if not already on the header line
+        lines = ctx['lines']
+        self._skip_to_open_brace(ctx)
+
+        # Recursively parse body
+        cmd.body = self._parse_block(ctx)
+
+        # For IF, check for else / else if
+        if cmd.cmd_type == MtrCommandType.IF:
+            self._try_parse_else(cmd, ctx)
+
+    def _skip_to_open_brace(self, ctx: dict) -> None:
+        """Advance ctx['idx'] past the opening { of a block."""
+        lines = ctx['lines']
+        while ctx['idx'] < len(lines):
+            s = lines[ctx['idx']].strip()
+            if not s or s.startswith('#'):
+                ctx['idx'] += 1
+                continue
+            if s == '{':
+                ctx['idx'] += 1
+                return
+            # Opening brace might be on the if/while line itself
+            # (already consumed by regex \{?), so body starts here
+            return
+        return
+
+    def _try_parse_else(self, cmd: MtrCommand, ctx: dict) -> None:
+        """Check if an else or else-if follows after an if body."""
+        lines = ctx['lines']
+        # Peek ahead (skip whitespace/comments)
+        save_idx = ctx['idx']
+        while ctx['idx'] < len(lines):
+            s = lines[ctx['idx']].strip()
+            if not s or s.startswith('#'):
+                ctx['idx'] += 1
+                continue
+            # Check for else
+            if s == 'else' or s == 'else {' or s.startswith('else '):
+                ctx['idx'] += 1
+                self._skip_to_open_brace(ctx)
+                cmd.else_body = self._parse_block(ctx)
+                return
+            if s.startswith('--') and s[2:].strip().lower() == 'else':
+                ctx['idx'] += 1
+                self._skip_to_open_brace(ctx)
+                cmd.else_body = self._parse_block(ctx)
+                return
+            # No else found
+            break
+        # Restore position if no else found
+        ctx['idx'] = save_idx
 
     def _parse_directive(self, stripped: str, lines: List[str],
                          idx: int, line_no: int, filepath: str) -> Optional[MtrCommand]:
@@ -454,7 +533,7 @@ class MtrParser:
             self._parse_let(cmd, argument)
 
         elif cmd.cmd_type in (MtrCommandType.INC, MtrCommandType.DEC):
-            cmd.var_name = argument.strip()
+            cmd.var_name = argument.strip().rstrip(';').strip()
 
         elif cmd.cmd_type == MtrCommandType.EXPR:
             self._parse_expr(cmd, argument)
@@ -1000,11 +1079,43 @@ class MtrParser:
     # Source file handling
     # -----------------------------------------------------------------------
 
+    # Include files that should be silently skipped during parsing.
+    # These are TDSQL-specific utility scripts that:
+    #   - use disable_query_log internally (no meaningful output)
+    #   - reference TDSQL-only system variables (cause ERRORs on other DBMS)
+    #   - only perform background housekeeping (wait for DDL recovery, etc.)
+    # Patterns are matched as suffixes against the source path argument.
+    _SILENT_SOURCES = (
+        # TDSQL-specific DDL recovery wait scripts
+        "suite/tdsql/include/wait_until_ddl_recovery_done.inc",
+        "suite/tdsql/include/wait_until_schema_ddl_recovery_done.inc",
+        # Feature detection (skip causes test abort on non-debug builds)
+        "include/have_debug.inc",
+        "include/have_debug_sync.inc",
+        # Wait/polling utilities (use disable_query_log, cause errors on other DBMS)
+        "include/wait_condition.inc",
+        "include/wait_condition_or_abort.inc",
+        "include/wait_until_disconnected.inc",
+        "include/wait_until_connected_again.inc",
+        # Replication helpers (require $rpl_connection_name etc.)
+        "include/rpl_connection.inc",
+        "include/rpl_reconnect.inc",
+        # Eval helper (internally sources rpl_connection.inc)
+        "include/eval.inc",
+    )
+
     def _handle_source(self, cmd: MtrCommand) -> None:
         """Handle --source directive by recursively parsing the included file."""
         source_path = cmd.source_path
         if not source_path:
             return
+
+        # Skip known utility includes that produce no meaningful output
+        # and cause noise (ERRORs) on non-TDSQL databases.
+        normalized = source_path.replace("\\", "/")
+        for pattern in self._SILENT_SOURCES:
+            if normalized.endswith(pattern) or normalized == pattern:
+                return
 
         resolved = self._resolve_source_path(source_path)
         if resolved:

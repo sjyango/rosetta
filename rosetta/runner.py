@@ -173,6 +173,41 @@ class RosettaRunner:
 
         return comparisons
 
+    @staticmethod
+    def _estimate_total_commands(commands) -> int:
+        """Recursively estimate total commands including if/while bodies.
+
+        For while loops, attempts to estimate iteration count from the
+        condition (e.g. $i <= 1000). Falls back to 1 iteration if unknown.
+        """
+        import re
+        from .mtr.nodes import MtrCommandType
+
+        total = 0
+        for cmd in commands:
+            total += 1  # The command itself
+            if cmd.cmd_type == MtrCommandType.WHILE:
+                # Try to estimate loop iterations from condition
+                iterations = 1  # default fallback
+                if cmd.condition and cmd.condition.right_operand:
+                    try:
+                        iterations = int(cmd.condition.right_operand)
+                    except (ValueError, TypeError):
+                        pass
+                if cmd.body:
+                    body_cmds = RosettaRunner._estimate_total_commands(cmd.body)
+                    total += body_cmds * iterations
+            elif cmd.cmd_type == MtrCommandType.IF:
+                # Count the larger branch (body or else_body)
+                body_count = 0
+                else_count = 0
+                if cmd.body:
+                    body_count = RosettaRunner._estimate_total_commands(cmd.body)
+                if cmd.else_body:
+                    else_count = RosettaRunner._estimate_total_commands(cmd.else_body)
+                total += max(body_count, else_count)
+        return total
+
     def _run_mtr_native(self) -> Dict[str, CompareResult]:
         """Execute using the new rosetta.mtr module (full MTR syntax support).
 
@@ -193,7 +228,7 @@ class RosettaRunner:
 
         parser = MtrParser(self.test_file, mysql_test_dir=mysql_test_dir)
         test = parser.parse()
-        n_cmds = len(test.commands)
+        n_cmds = self._estimate_total_commands(test.commands)
         cmd_types = len(set(c.cmd_type.name for c in test.commands))
         print_success(f"Parsed {n_cmds} commands ({cmd_types} types) "
                       f"via rosetta.mtr")
@@ -209,8 +244,6 @@ class RosettaRunner:
         from rich.live import Live
         from rich.table import Table
         from rich.text import Text
-
-        live_console = Console(stderr=True)
 
         # Track state for each DBMS
         dbms_state: Dict[str, dict] = {
@@ -262,7 +295,7 @@ class RosettaRunner:
                     elapsed_str = f"{mins:02d}m{secs:02d}s"
 
                 # Progress display
-                pct = st.get("progress", 0)
+                pct = min(st.get("progress", 0), 100)
                 if st["status"] == "waiting":
                     progress = Text("⏳ Waiting", style="dim")
                 elif st["status"] == "running":
@@ -272,7 +305,7 @@ class RosettaRunner:
                     progress = Text.from_markup(bar_str)
                 elif st["status"] == "done":
                     if st["errors"] > 0:
-                        progress = Text(f"✅ {st['executed']}/{st['total']} ({st['errors']} err)", style="yellow bold")
+                        progress = Text(f"✅ {st['executed']} done ({st['errors']} err)", style="yellow bold")
                     else:
                         progress = Text("✅ Finished", style="green bold")
                 else:
@@ -303,7 +336,9 @@ class RosettaRunner:
                         if has_error:
                             st["errors"] += 1
                         if n_cmds > 0:
-                            st["progress"] = int(executed / n_cmds * 100)
+                            st["progress"] = min(int(executed / n_cmds * 100), 100)
+                        err_str = f" ({st['errors']} err)" if st["errors"] else ""
+                        st["last_status"] = f"{executed}/{n_cmds}{err_str}"
 
                 executor = MtrExecutor(connector,
                                        mysql_test_dir=mysql_test_dir,
@@ -358,6 +393,10 @@ class RosettaRunner:
         _saved_stderr = sys.stderr
         _stderr_buffer = _io.StringIO()
         sys.stderr = _stderr_buffer
+
+        # Recreate live_console with a direct reference to the real stderr,
+        # so that Rich Live output is not swallowed by the redirect above.
+        live_console = Console(file=_saved_stderr)
 
         _saved_root_handlers = logging.root.handlers[:]
         _saved_rosetta_handlers = log.handlers[:]
@@ -2750,8 +2789,6 @@ def _select_mtr_params(
             mode_cursor[0] = (mode_cursor[0] + 1) % len(MODE_OPTIONS)
         elif i == 1:
             p_idx[0] = (p_idx[0] + 1) % len(PARALLEL_PRESETS)
-        elif i == 4:
-            r_idx[0] = (r_idx[0] + 1) % len(RETRY_PRESETS)
         else:
             var = _get_toggle_var(i)
             if var is not None:
@@ -2762,8 +2799,6 @@ def _select_mtr_params(
             mode_cursor[0] = (mode_cursor[0] - 1) % len(MODE_OPTIONS)
         elif i == 1:
             p_idx[0] = (p_idx[0] - 1) % len(PARALLEL_PRESETS)
-        elif i == 4:
-            r_idx[0] = (r_idx[0] - 1) % len(RETRY_PRESETS)
         else:
             var = _get_toggle_var(i)
             if var is not None:
@@ -3734,9 +3769,10 @@ def _enter_interactive(args) -> int:
                 serve=args.serve,
                 port=args.port,
                 all_configs=all_configs,
+                report_server=bg_server,
             )
             reason = session.run()
-            if session._report_server:
+            if session._report_server and session._report_server is not bg_server:
                 session._report_server.stop()
             if reason != "back":
                 break
@@ -3951,6 +3987,7 @@ def _enter_interactive(args) -> int:
                             perf_freq=getattr(args, 'perf_freq', 99),
                             flamegraph_min_ms=getattr(args, 'flamegraph_min_ms', 1000),
                             bench_mode=bench_mode_val,
+                            report_server=bg_server,
                         )
                         
                         console.print()
@@ -4004,13 +4041,14 @@ def _enter_interactive(args) -> int:
                     perf_freq=getattr(args, 'perf_freq', 99),
                     flamegraph_min_ms=getattr(args, 'flamegraph_min_ms', 1000),
                     bench_mode=bench_mode,
+                    report_server=bg_server,
                 )
                 session.skip_setup = bench_skip_setup
                 session.skip_teardown = bench_skip_teardown
                 reason = session.run()
                 # Stop the report server before leaving this session
                 # so the port is released for the next session.
-                if session._report_server:
+                if session._report_server and session._report_server is not bg_server:
                     session._report_server.stop()
                 if reason == "quit":
                     return 0

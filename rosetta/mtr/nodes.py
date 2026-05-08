@@ -354,6 +354,10 @@ class MtrCommand:
     warning_list: List[str] = field(default_factory=list)
     once: bool = False
 
+    # Block body (for if/while): commands inside { ... }
+    body: List["MtrCommand"] = field(default_factory=list)
+    else_body: List["MtrCommand"] = field(default_factory=list)
+
 
 @dataclass
 class MtrBlock:
