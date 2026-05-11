@@ -1588,49 +1588,120 @@ def _select_bench_mode() -> Optional[dict]:
         result[0] = {"action": "back"}
         event.app.exit()
 
+    # -- Dynamic hints for benchmark modes --
+    MODE_HINTS = {
+        "serial":     "Run each query N times sequentially, measure latency",
+        "concurrent": "Multiple threads for D seconds, measures QPS throughput",
+        "rerun":      "Replay a historical benchmark run with same parameters",
+        "back":       "Return to mode selection",
+        "quit":       "Exit Rosetta",
+    }
+
+    # Box drawing
+    _BENCH_BOX_W = 61
+
+    def _bench_dw(s):
+        from prompt_toolkit.utils import get_cwidth
+        return sum(get_cwidth(ch) for ch in s)
+
+    def _bench_box_top():
+        return ("dim cyan", "  \u256d" + "\u2500" * _BENCH_BOX_W + "\u256e\n")
+
+    def _bench_box_mid():
+        return ("dim cyan", "  \u251c" + "\u2500" * _BENCH_BOX_W + "\u2524\n")
+
+    def _bench_box_bot():
+        return ("dim cyan", "  \u2570" + "\u2500" * _BENCH_BOX_W + "\u256f\n")
+
+    def _bench_box_row(fragments):
+        vis_w = sum(_bench_dw(t) for _, t in fragments)
+        if vis_w > _BENCH_BOX_W:
+            overflow = vis_w - _BENCH_BOX_W
+            trimmed = list(fragments)
+            for idx in range(len(trimmed) - 1, -1, -1):
+                style, text = trimmed[idx]
+                tw = _bench_dw(text)
+                if tw >= overflow:
+                    while overflow > 0 and text:
+                        overflow -= _bench_dw(text[-1])
+                        text = text[:-1]
+                    trimmed[idx] = (style, text)
+                    break
+                else:
+                    overflow -= tw
+                    trimmed[idx] = (style, "")
+            fragments = trimmed
+            vis_w = sum(_bench_dw(t) for _, t in fragments)
+        pad = max(0, _BENCH_BOX_W - vis_w)
+        result = [("dim cyan", "  \u2502")]
+        result.extend(fragments)
+        result.append(("", " " * pad))
+        result.append(("dim cyan", "\u2502\n"))
+        return result
+
     def _get_text():
         lines = []
 
-        # ASCII Logo
+        # \u2500\u2500 ASCII Logo \u2500\u2500
         lines.append(("", "\n"))
         for logo_line in LOGO_LINES:
-            lines.append(("bold cyan", f"  {logo_line}\n"))
+            lines.append(("bold cyan", f"    {logo_line}\n"))
         lines.append(("", "\n"))
-        lines.append(("dim", f"  {LOGO_SUBTITLE}\n"))
         from . import __version__
+        lines.append(("dim", f"  {LOGO_SUBTITLE}"))
         lines.append(("dim", f"  v{__version__}"))
         lines.append(("bold white", "  Benchmark Mode\n"))
         lines.append(("", "\n"))
 
-        lines.append(("dim", "  ↑/↓ move  →/Enter select  ←/b back  Esc/q quit\n"))
-        lines.append(("", "\n"))
+        # \u2500\u2500 Box top \u2500\u2500
+        lines.append(_bench_box_top())
 
+        # \u2500\u2500 Keyboard hints \u2500\u2500
+        lines.extend(_bench_box_row([
+            ("dim", "  \u2191\u2193 move  \u2192/Enter select  \u2190/b back  q quit")
+        ]))
+
+        # \u2500\u2500 Separator \u2500\u2500
+        lines.append(_bench_box_mid())
+
+        # \u2500\u2500 Mode list \u2500\u2500
         for i, (mode_key, mode_name, mode_desc) in enumerate(MODES):
             is_sel = (i == selected[0])
             is_action = (i >= BACK_IDX)
-            if is_sel:
-                if is_action:
-                    lines.append(("bold cyan", "  ❯ "))
-                    lines.append(("bold cyan", mode_name))
-                else:
-                    lines.append(("bold cyan", "  ❯ "))
-                    lines.append(("bold cyan", f"{mode_name:<14s}"))
-                    lines.append(("cyan", f"— {mode_desc}"))
-            else:
-                if is_action:
-                    lines.append(("", "    "))
-                    lines.append(("dim", mode_name))
-                else:
-                    lines.append(("", "    "))
-                    lines.append(("", f"{mode_name:<14s}"))
-                    lines.append(("gray", f"— {mode_desc}"))
-            lines.append(("", "\n"))
 
-        lines.append(("", "\n"))
-        lines.append(("dim", "  ────────────────────────────────────────\n"))
-        lines.append(("dim", "  SERIAL:      Each query runs N times sequentially\n"))
-        lines.append(("dim", "  CONCURRENT:  Multiple threads, duration-based test\n"))
-        lines.append(("dim", "  RERUN:       Replay a historical benchmark run\n"))
+            if is_action:
+                icon = "\u25cb"  # \u25cb
+                if is_sel:
+                    lines.extend(_bench_box_row([
+                        ("bold cyan", f"  {icon} {mode_name}")
+                    ]))
+                else:
+                    lines.extend(_bench_box_row([
+                        ("dim", f"  {icon} {mode_name}")
+                    ]))
+            else:
+                icon = "\u25c6" if is_sel else "\u25c7"  # \u25c6 / \u25c7
+                if is_sel:
+                    lines.extend(_bench_box_row([
+                        ("bold cyan", f"  {icon} {mode_name}")
+                    ]))
+                else:
+                    lines.extend(_bench_box_row([
+                        ("", f"  {icon} {mode_name}")
+                    ]))
+
+        # \u2500\u2500 Dynamic hint separator \u2500\u2500
+        lines.append(_bench_box_mid())
+
+        # \u2500\u2500 Dynamic hint \u2500\u2500
+        cur_key = MODES[selected[0]][0]
+        hint = MODE_HINTS.get(cur_key, "")
+        lines.extend(_bench_box_row([
+            ("dim italic", f"  \U0001f4a1 {hint}")
+        ]))
+
+        # \u2500\u2500 Box bottom \u2500\u2500
+        lines.append(_bench_box_bot())
 
         return lines
 
@@ -1887,74 +1958,151 @@ def _select_serial_params(
         result[0] = None
         event.app.exit()
 
+    # -- Field hints --
+    _FIELD_HINTS = {
+        0: "Number of sequential iterations per query",
+        1: "Warmup iterations (not measured)",
+        2: "Capture flame graphs during execution",
+        3: "Reuse existing tables, skip CREATE/INSERT",
+        4: "Keep tables after benchmark completes",
+        5: "Confirm and start benchmark",
+        6: "Return to benchmark mode selection",
+        7: "Exit Rosetta",
+    }
+
+    _CFG_BOX_W = 61
+
+    def _cfg_dw(s):
+        from prompt_toolkit.utils import get_cwidth
+        return sum(get_cwidth(ch) for ch in s)
+
+    def _cfg_box_top():
+        return ("dim cyan", "  \u256d" + "\u2500" * _CFG_BOX_W + "\u256e\n")
+
+    def _cfg_box_mid():
+        return ("dim cyan", "  \u251c" + "\u2500" * _CFG_BOX_W + "\u2524\n")
+
+    def _cfg_box_bot():
+        return ("dim cyan", "  \u2570" + "\u2500" * _CFG_BOX_W + "\u256f\n")
+
+    def _cfg_box_row(fragments):
+        vis_w = sum(_cfg_dw(t) for _, t in fragments)
+        if vis_w > _CFG_BOX_W:
+            overflow = vis_w - _CFG_BOX_W
+            trimmed = list(fragments)
+            for idx in range(len(trimmed) - 1, -1, -1):
+                style, text = trimmed[idx]
+                tw = _cfg_dw(text)
+                if tw >= overflow:
+                    while overflow > 0 and text:
+                        overflow -= _cfg_dw(text[-1])
+                        text = text[:-1]
+                    trimmed[idx] = (style, text)
+                    break
+                else:
+                    overflow -= tw
+                    trimmed[idx] = (style, "")
+            fragments = trimmed
+            vis_w = sum(_cfg_dw(t) for _, t in fragments)
+        pad = max(0, _CFG_BOX_W - vis_w)
+        result = [("dim cyan", "  \u2502")]
+        result.extend(fragments)
+        result.append(("", " " * pad))
+        result.append(("dim cyan", "\u2502\n"))
+        return result
+
     def _get_text():
         lines = []
 
-        # ASCII Logo
+        # Logo
         lines.append(("", "\n"))
         for logo_line in LOGO_LINES:
-            lines.append(("bold cyan", f"  {logo_line}\n"))
+            lines.append(("bold cyan", f"    {logo_line}\n"))
         lines.append(("", "\n"))
-        lines.append(("dim", f"  {LOGO_SUBTITLE}\n"))
         from . import __version__
+        lines.append(("dim", f"  {LOGO_SUBTITLE}"))
         lines.append(("dim", f"  v{__version__}"))
-        lines.append(("bold white", "  SERIAL Mode Configuration\n"))
-        lines.append(("", "\n"))
-        lines.append(("dim", "  ←/→ change  Enter confirm/custom  ↑/↓ move  Esc cancel\n"))
+        lines.append(("bold white", "  SERIAL Mode\n"))
         lines.append(("", "\n"))
 
+        # If in editing mode, show inline input (outside box)
         if editing[0] is not None:
             idx = editing[0]
             label = FIELDS[idx]["label"]
-            lines.append(("bold cyan", "  ❯ "))
+            lines.append(("bold cyan", "  \u276f "))
             lines.append(("bold cyan", label))
             lines.append(("", "  "))
-            lines.append(("bold white", f"[ {edit_buf[0]}▌ ]"))
+            lines.append(("bold white", f"[ {edit_buf[0]}\u258c ]"))
             lines.append(("", "\n"))
             lines.append(("dim",
                          "     Type a number, Enter to confirm, "
                          "Esc to cancel\n"))
             return lines
 
+        # Box top
+        lines.append(_cfg_box_top())
+
+        # Keyboard hints
+        lines.extend(_cfg_box_row([
+            ("dim", "  \u2190\u2192 change  Enter confirm/custom  \u2191\u2193 move  Esc cancel")
+        ]))
+
+        # Separator
+        lines.append(_cfg_box_mid())
+
+        # Fields
         for i, field in enumerate(FIELDS):
             is_sel = (i == sel[0])
 
             if field["type"] == "action":
-                if is_sel:
-                    prefix = ("bold cyan", "  ❯ ")
-                    label = ("bold cyan", field["label"])
+                if field["label"] == "Quit":
+                    icon = "\u25cb"
                 else:
-                    prefix = ("", "    ")
-                    label = ("dim", field["label"])
-                lines.append(prefix)
-                lines.append(label)
-                lines.append(("", "\n"))
+                    icon = "\u25c6" if is_sel else "\u25c7"
+                if is_sel:
+                    lines.extend(_cfg_box_row([
+                        ("bold cyan", f"  {icon} {field['label']}")
+                    ]))
+                else:
+                    lines.extend(_cfg_box_row([
+                        ("dim", f"  {icon} {field['label']}")
+                    ]))
                 continue
 
-            prefix = ("bold cyan", "  ❯ ") if is_sel else ("", "    ")
-            label = ("bold cyan" if is_sel else "bold",
-                     field["label"])
+            frags = []
+            if is_sel:
+                frags.append(("bold cyan", f"  {field['label']}  "))
+            else:
+                frags.append(("dim", f"  {field['label']}  "))
 
             val_str = _field_val(i)
             if field["type"] == "choice":
                 if is_sel:
-                    val = ("bold yellow", f"◄ {val_str} ►")
+                    frags.append(("bold yellow", f"\u25c4 {val_str} \u25ba"))
                 else:
-                    val = ("dim", val_str)
+                    frags.append(("", val_str))
             else:
                 toggle_var = _get_toggle_var(i)
                 toggle_on = toggle_var[0] if toggle_var else False
                 if toggle_on:
-                    val = ("bold green" if is_sel else "green",
-                           f"● {val_str}")
+                    frags.append(("bold green" if is_sel else "green",
+                                  f"\u25cf {val_str}"))
                 else:
-                    val = ("dim", f"○ {val_str}")
+                    frags.append(("dim", f"\u25cb {val_str}"))
 
-            lines.append(prefix)
-            lines.append(label)
-            lines.append(("", "  "))
-            lines.append(val)
-            lines.append(("", "\n"))
+            lines.extend(_cfg_box_row(frags))
+
+        # Dynamic hint separator
+        lines.append(_cfg_box_mid())
+
+        # Dynamic hint
+        hint = _FIELD_HINTS.get(sel[0], "")
+        lines.extend(_cfg_box_row([
+            ("dim italic", f"  \U0001f4a1 {hint}")
+        ]))
+
+        # Box bottom
+        lines.append(_cfg_box_bot())
 
         return lines
 
@@ -2253,74 +2401,152 @@ def _select_concurrent_params(
         result[0] = None
         event.app.exit()
 
+    # -- Field hints --
+    _FIELD_HINTS = {
+        0: "Number of concurrent threads",
+        1: "Total test duration in seconds",
+        2: "Gradual thread ramp-up period",
+        3: "Capture flame graphs during execution",
+        4: "Reuse existing tables, skip CREATE/INSERT",
+        5: "Keep tables after benchmark completes",
+        6: "Confirm and start benchmark",
+        7: "Return to benchmark mode selection",
+        8: "Exit Rosetta",
+    }
+
+    _CFG_BOX_W = 61
+
+    def _cfg_dw(s):
+        from prompt_toolkit.utils import get_cwidth
+        return sum(get_cwidth(ch) for ch in s)
+
+    def _cfg_box_top():
+        return ("dim cyan", "  \u256d" + "\u2500" * _CFG_BOX_W + "\u256e\n")
+
+    def _cfg_box_mid():
+        return ("dim cyan", "  \u251c" + "\u2500" * _CFG_BOX_W + "\u2524\n")
+
+    def _cfg_box_bot():
+        return ("dim cyan", "  \u2570" + "\u2500" * _CFG_BOX_W + "\u256f\n")
+
+    def _cfg_box_row(fragments):
+        vis_w = sum(_cfg_dw(t) for _, t in fragments)
+        if vis_w > _CFG_BOX_W:
+            overflow = vis_w - _CFG_BOX_W
+            trimmed = list(fragments)
+            for idx in range(len(trimmed) - 1, -1, -1):
+                style, text = trimmed[idx]
+                tw = _cfg_dw(text)
+                if tw >= overflow:
+                    while overflow > 0 and text:
+                        overflow -= _cfg_dw(text[-1])
+                        text = text[:-1]
+                    trimmed[idx] = (style, text)
+                    break
+                else:
+                    overflow -= tw
+                    trimmed[idx] = (style, "")
+            fragments = trimmed
+            vis_w = sum(_cfg_dw(t) for _, t in fragments)
+        pad = max(0, _CFG_BOX_W - vis_w)
+        result = [("dim cyan", "  \u2502")]
+        result.extend(fragments)
+        result.append(("", " " * pad))
+        result.append(("dim cyan", "\u2502\n"))
+        return result
+
     def _get_text():
         lines = []
 
-        # ASCII Logo
+        # Logo
         lines.append(("", "\n"))
         for logo_line in LOGO_LINES:
-            lines.append(("bold cyan", f"  {logo_line}\n"))
+            lines.append(("bold cyan", f"    {logo_line}\n"))
         lines.append(("", "\n"))
-        lines.append(("dim", f"  {LOGO_SUBTITLE}\n"))
         from . import __version__
+        lines.append(("dim", f"  {LOGO_SUBTITLE}"))
         lines.append(("dim", f"  v{__version__}"))
-        lines.append(("bold white", "  CONCURRENT Mode Configuration\n"))
-        lines.append(("", "\n"))
-        lines.append(("dim", "  ←/→ change  Enter confirm/custom  ↑/↓ move  Esc cancel\n"))
+        lines.append(("bold white", "  CONCURRENT Mode\n"))
         lines.append(("", "\n"))
 
+        # If in editing mode, show inline input (outside box)
         if editing[0] is not None:
             idx = editing[0]
             label = FIELDS[idx]["label"]
-            lines.append(("bold cyan", "  ❯ "))
+            lines.append(("bold cyan", "  \u276f "))
             lines.append(("bold cyan", label))
             lines.append(("", "  "))
-            lines.append(("bold white", f"[ {edit_buf[0]}▌ ]"))
+            lines.append(("bold white", f"[ {edit_buf[0]}\u258c ]"))
             lines.append(("", "\n"))
             lines.append(("dim",
                          "     Type a number, Enter to confirm, "
                          "Esc to cancel\n"))
             return lines
 
+        # Box top
+        lines.append(_cfg_box_top())
+
+        # Keyboard hints
+        lines.extend(_cfg_box_row([
+            ("dim", "  \u2190\u2192 change  Enter confirm/custom  \u2191\u2193 move  Esc cancel")
+        ]))
+
+        # Separator
+        lines.append(_cfg_box_mid())
+
+        # Fields
         for i, field in enumerate(FIELDS):
             is_sel = (i == sel[0])
 
             if field["type"] == "action":
-                if is_sel:
-                    prefix = ("bold cyan", "  ❯ ")
-                    label = ("bold cyan", field["label"])
+                if field["label"] == "Quit":
+                    icon = "\u25cb"
                 else:
-                    prefix = ("", "    ")
-                    label = ("dim", field["label"])
-                lines.append(prefix)
-                lines.append(label)
-                lines.append(("", "\n"))
+                    icon = "\u25c6" if is_sel else "\u25c7"
+                if is_sel:
+                    lines.extend(_cfg_box_row([
+                        ("bold cyan", f"  {icon} {field['label']}")
+                    ]))
+                else:
+                    lines.extend(_cfg_box_row([
+                        ("dim", f"  {icon} {field['label']}")
+                    ]))
                 continue
 
-            prefix = ("bold cyan", "  ❯ ") if is_sel else ("", "    ")
-            label = ("bold cyan" if is_sel else "bold",
-                     field["label"])
+            frags = []
+            if is_sel:
+                frags.append(("bold cyan", f"  {field['label']}  "))
+            else:
+                frags.append(("dim", f"  {field['label']}  "))
 
             val_str = _field_val(i)
             if field["type"] == "choice":
                 if is_sel:
-                    val = ("bold yellow", f"◄ {val_str} ►")
+                    frags.append(("bold yellow", f"\u25c4 {val_str} \u25ba"))
                 else:
-                    val = ("dim", val_str)
+                    frags.append(("", val_str))
             else:
                 toggle_var = _get_toggle_var(i)
                 toggle_on = toggle_var[0] if toggle_var else False
                 if toggle_on:
-                    val = ("bold green" if is_sel else "green",
-                           f"● {val_str}")
+                    frags.append(("bold green" if is_sel else "green",
+                                  f"\u25cf {val_str}"))
                 else:
-                    val = ("dim", f"○ {val_str}")
+                    frags.append(("dim", f"\u25cb {val_str}"))
 
-            lines.append(prefix)
-            lines.append(label)
-            lines.append(("", "  "))
-            lines.append(val)
-            lines.append(("", "\n"))
+            lines.extend(_cfg_box_row(frags))
+
+        # Dynamic hint separator
+        lines.append(_cfg_box_mid())
+
+        # Dynamic hint
+        hint = _FIELD_HINTS.get(sel[0], "")
+        lines.extend(_cfg_box_row([
+            ("dim italic", f"  \U0001f4a1 {hint}")
+        ]))
+
+        # Box bottom
+        lines.append(_cfg_box_bot())
 
         return lines
 
@@ -2375,7 +2601,6 @@ def _select_mode(configs, database: str,
         ("test",       "Test mode",       "run .test compatibility tests"),
         ("playground", "Playground mode",  "run SQL Playground in browser"),
         ("bench",      "Benchmark mode",   "run JSON performance benchmarks"),
-        ("history",    "History mode",     "view historical test runs"),
         (None,         "Quit",             "exit"),
     ]
 
@@ -2448,12 +2673,21 @@ def _select_mode(configs, database: str,
                 if opt == "all":
                     # Toggle all reachable
                     if _is_all():
+                        # Deselect all EXCEPT baseline
                         for k in dbms_state:
-                            dbms_state[k] = False
+                            if k != baseline:
+                                dbms_state[k] = False
                     else:
                         for k in dbms_state:
                             if k in reachable_names:
                                 dbms_state[k] = True
+                elif opt == baseline:
+                    # Baseline cannot be deselected
+                    if dbms_state.get(opt, False):
+                        warn_msg[0] = (
+                            f"Baseline \"{baseline}\" cannot be deselected")
+                    else:
+                        dbms_state[opt] = True
                 elif opt in reachable_names:
                     dbms_state[opt] = not dbms_state[opt]
                 # unreachable DBMS can't be toggled
@@ -2469,16 +2703,16 @@ def _select_mode(configs, database: str,
     @kb.add("n")
     def _none_sel(event):
         for k in dbms_state:
-            dbms_state[k] = False
+            if k != baseline:
+                dbms_state[k] = False
         event.app.invalidate()
 
     # Minimum DBMS requirements per mode
     MODE_MIN_DBMS = {
-        "mtr": 1,
-        "test": 2,        # cross-DBMS comparison needs at least 2
-        "playground": 1,
-        "bench": 1,
-        "history": 0,
+        "mtr": 1,          # MTR only needs baseline (tdsql)
+        "test": 2,         # cross-DBMS comparison needs at least 2
+        "playground": 2,   # cross-DBMS comparison needs at least 2
+        "bench": 2,        # cross-DBMS comparison needs at least 2
     }
     warn_msg = [""]  # mutable warning message shown in UI
 
@@ -2495,9 +2729,7 @@ def _select_mode(configs, database: str,
         selected = [c for c in configs if dbms_state.get(c.name, False)]
         min_req = MODE_MIN_DBMS.get(key, 1)
         if len(selected) < min_req:
-            if min_req == 0:
-                pass  # history mode doesn't need any
-            elif len(selected) == 0:
+            if len(selected) == 0:
                 warn_msg[0] = f"Please select at least {min_req} DBMS"
             else:
                 warn_msg[0] = (
@@ -2505,12 +2737,18 @@ def _select_mode(configs, database: str,
                     f"{min_req} DBMS ({len(selected)} selected)")
             event.app.invalidate()
             return
-        # Baseline DBMS must be selected (except history mode)
-        if key != "history" and baseline:
+        # Baseline DBMS must be selected and reachable
+        if baseline:
             selected_names = {c.name for c in selected}
             if baseline not in selected_names:
                 warn_msg[0] = (
                     f"Baseline DBMS \"{baseline}\" must be selected")
+                event.app.invalidate()
+                return
+            if baseline not in reachable_names:
+                warn_msg[0] = (
+                    f"Baseline \"{baseline}\" is unreachable, "
+                    f"please check its service")
                 event.app.invalidate()
                 return
         warn_msg[0] = ""
@@ -2531,104 +2769,185 @@ def _select_mode(configs, database: str,
         event.app.exit()
 
     # -- layout -------------------------------------------------------------
+    # -- Dynamic hints for each mode/row --
+    MODE_HINTS = {
+        "mtr":        "Run native MySQL MTR test suites (row/col/pq)",
+        "test":       "Run .test files against multiple DBs and diff results",
+        "playground": "Launch an interactive SQL playground in the browser",
+        "bench":      "Compare query performance with latency/QPS reports",
+        None:         "Exit Rosetta",
+    }
+    DBMS_HINT = "Use Space to toggle, Baseline (*) must stay selected."
+
+    # Box drawing constants
+    BOX_W = 61  # number of ─ chars in border = inner display width in columns
+
+    def _display_width(s):
+        """Calculate terminal display width consistent with prompt_toolkit.
+
+        Uses prompt_toolkit's get_cwidth() which treats:
+        - East Asian Wide/Fullwidth (W/F): width 2 (CJK, emoji)
+        - Everything else (including Ambiguous): width 1
+
+        This ensures our padding aligns with prompt_toolkit's own cursor
+        positioning, which is the authoritative source of truth for how
+        text is laid out in the terminal when using prompt_toolkit.
+        """
+        from prompt_toolkit.utils import get_cwidth
+        return sum(get_cwidth(ch) for ch in s)
+
+    def _box_top():
+        return ("dim cyan", "  ╭" + "─" * BOX_W + "╮\n")
+
+    def _box_mid():
+        return ("dim cyan", "  ├" + "─" * BOX_W + "┤\n")
+
+    def _box_bot():
+        return ("dim cyan", "  ╰" + "─" * BOX_W + "╯\n")
+
+    def _box_row(fragments):
+        """Wrap content fragments in │...│ with right-padding.
+
+        Layout: "  │" + <fragments> + <padding spaces> + "│\\n"
+        The content + padding fills exactly BOX_W display columns.
+        """
+        vis_w = sum(_display_width(t) for _, t in fragments)
+        if vis_w > BOX_W:
+            # Truncate last fragment to fit within box
+            overflow = vis_w - BOX_W
+            trimmed = list(fragments)
+            for idx in range(len(trimmed) - 1, -1, -1):
+                style, text = trimmed[idx]
+                tw = _display_width(text)
+                if tw >= overflow:
+                    while overflow > 0 and text:
+                        overflow -= _display_width(text[-1])
+                        text = text[:-1]
+                    trimmed[idx] = (style, text)
+                    break
+                else:
+                    overflow -= tw
+                    trimmed[idx] = (style, "")
+            fragments = trimmed
+            vis_w = sum(_display_width(t) for _, t in fragments)
+        pad = max(0, BOX_W - vis_w)
+        result = [("dim cyan", "  │")]
+        result.extend(fragments)
+        result.append(("", " " * pad))
+        result.append(("dim cyan", "│\n"))
+        return result
+
     def _get_content():
         lines = []
 
-        # ASCII Logo
+        # ── ASCII Logo ──
         lines.append(("", "\n"))
         for logo_line in LOGO_LINES:
-            lines.append(("bold cyan", f"  {logo_line}\n"))
+            lines.append(("bold cyan", f"    {logo_line}\n"))
         lines.append(("", "\n"))
-        lines.append(("dim", f"  {LOGO_SUBTITLE}\n"))
         from . import __version__
+        lines.append(("dim", f"  {LOGO_SUBTITLE}"))
         lines.append(("dim", f"  v{__version__}\n"))
         lines.append(("", "\n"))
 
-        # Hint
-        lines.append(("dim",
-            "  \u2191\u2193 move   \u2190\u2192/Space toggle DBMS"
-            "   Enter/\u2192 confirm   Esc/q quit\n\n"))
+        # ── Box top ──
+        lines.append(_box_top())
 
-        # ---- Row 0: DBMS multiselect ----
+        # ── Keyboard hints row ──
+        hint_text = "  ↑↓ navigate  ←→ select DBMS  Space toggle  Enter confirm"
+        lines.extend(_box_row([("dim", hint_text)]))
+
+        # ── DBMS separator ──
+        lines.append(_box_mid())
+
+        # ── DBMS capsule row ──
         is_dbms_row = (sel[0] == DBMS_ROW)
-        prefix = "\u276f " if is_dbms_row else "  "
-        label_style = "bold cyan" if is_dbms_row else ""
-        lines.append((label_style, f"{prefix}{'DBMS':<18s}"))
+        dbms_frags = []
+        label_style = "bold cyan" if is_dbms_row else "dim"
+        dbms_frags.append((label_style, "  DBMS   "))
 
         for idx, opt in enumerate(dbms_options):
-            is_cur_opt = (idx == dbms_cursor[0])
-            # Display name: baseline DBMS gets a * suffix
+            is_cur_opt = (is_dbms_row and idx == dbms_cursor[0])
             display_name = f"{opt}*" if (opt == baseline and opt != "all") else opt
+            capsule_text = f" {display_name} "
 
             if opt == "all":
                 checked = _is_all()
+                is_reachable = True
             else:
                 checked = dbms_state.get(opt, False)
                 is_reachable = (opt in reachable_names)
 
-            if opt == "all":
-                mark = "[ \u2713 ]" if checked else "[   ]"
-                if is_dbms_row:
-                    if is_cur_opt:
-                        lines.append(("bold cyan", f"{mark}{display_name} "))
-                    elif checked:
-                        lines.append(("bold", f"{mark}{display_name} "))
-                    else:
-                        lines.append(("dim", f"{mark}{display_name} "))
-                else:
-                    lines.append(("" if checked else "dim", f"{mark}{display_name} "))
-            elif not is_reachable:
-                mark = "[ \u2717 ]"
-                lines.append(("dim italic", f"{mark}{display_name} "))
+            if not is_reachable:
+                style = "dim italic strikethrough"
+            elif checked and is_cur_opt:
+                style = "bold reverse fg:ansiwhite bg:ansicyan"
+            elif checked:
+                style = "reverse fg:ansicyan"
+            elif is_cur_opt:
+                style = "bold underline fg:ansicyan"
             else:
-                mark = "[ \u2713 ]" if checked else "[   ]"
-                if is_dbms_row:
-                    if is_cur_opt:
-                        lines.append(("bold cyan", f"{mark}{display_name} "))
-                    elif checked:
-                        lines.append(("bold", f"{mark}{display_name} "))
-                    else:
-                        lines.append(("dim", f"{mark}{display_name} "))
-                else:
-                    lines.append(("" if checked else "dim", f"{mark}{display_name} "))
-        lines.append(("", "\n"))
+                style = "dim"
 
-        # ---- Rows 1..N: Mode items ----
+            dbms_frags.append((style, capsule_text))
+            dbms_frags.append(("", " "))
+
+        lines.extend(_box_row(dbms_frags))
+
+        # ── Mode separator ──
+        lines.append(_box_mid())
+
+        # ── Mode list ──
         for i, (key, label, desc) in enumerate(MODES):
             row_idx = i + 1
             is_cur = (sel[0] == row_idx)
             is_quit = (key is None)
-            prefix = "\u276f " if is_cur else "  "
+
+            mode_frags = []
             if is_quit:
-                style = "bold cyan" if is_cur else "dim"
-                lines.append((style, f"{prefix}{label}\n"))
-            elif is_cur:
-                lines.append(("bold cyan", prefix))
-                lines.append(("bold cyan", f"{label:<18s}"))
-                lines.append(("cyan", f"\u2014 {desc}\n"))
+                icon = "○"
+                if is_cur:
+                    mode_frags.append(("bold cyan", f"  {icon} {label}"))
+                else:
+                    mode_frags.append(("dim", f"  {icon} {label}"))
             else:
-                lines.append(("", prefix))
-                lines.append(("", f"{label:<18s}"))
-                lines.append(("gray", f"\u2014 {desc}\n"))
+                icon = "◆" if is_cur else "◇"
+                if is_cur:
+                    mode_frags.append(("bold cyan", f"  {icon} {label}"))
+                else:
+                    mode_frags.append(("", f"  {icon} {label}"))
 
-        # Warning message (if any)
+            lines.extend(_box_row(mode_frags))
+
+        # ── Warning message (if any, inside box) ──
         if warn_msg[0]:
-            lines.append(("", "\n"))
-            lines.append(("bold red", f"  \u26a0 {warn_msg[0]}"))
+            lines.append(_box_mid())
+            warn_frags = [("bold red", f"  ⚠ {warn_msg[0]}")]
+            lines.extend(_box_row(warn_frags))
 
-        lines.append(("", "\n"))
-        lines.append(("dim", "  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"))
-        lines.append(("dim", "  MTR          Run native MySQL MTR test suites (row/col/pq)\n"))
-        lines.append(("dim", "  Test         Run .test files against multiple DBs and diff results\n"))
-        lines.append(("dim", "  Playground   Launch an interactive SQL playground in the browser\n"))
-        lines.append(("dim", "  Benchmark    Compare query performance with latency/QPS reports\n"))
-        lines.append(("dim", "  History      Browse and view historical test/benchmark runs\n"))
+        # ── Dynamic hint separator ──
+        lines.append(_box_mid())
 
-        # Display web UI URL if server is running
+        # ── Dynamic hint row ──
+        if sel[0] == DBMS_ROW:
+            hint = DBMS_HINT
+        else:
+            mode_idx = sel[0] - 1
+            mode_key = MODES[mode_idx][0] if mode_idx < len(MODES) else None
+            hint = MODE_HINTS.get(mode_key, "")
+        hint_frags = [("dim italic", f"  💡 {hint}")]
+        lines.extend(_box_row(hint_frags))
+
+        # ── Box bottom ──
+        lines.append(_box_bot())
+
+        # ── Web UI URL (outside box) ──
         if server_url:
             lines.append(("", "\n"))
-            lines.append(("dim", "  ────────────────────────────────\n"))
-            lines.append(("dim", f"  Web UI: {server_url}/index.html\n"))
+            lines.append(("dim", "   Web UI:     "))
+            lines.append(("dim", f"{server_url}/index.html\n"))
+            lines.append(("dim", "   Playground: "))
+            lines.append(("dim", f"{server_url}/playground.html\n"))
 
         return lines
 
@@ -2804,100 +3123,182 @@ def _select_mtr_params(
             if var is not None:
                 var[0] = not var[0]
 
+    # -- Dynamic hints for each field --
+    FIELD_HINTS = {
+        0: "row=Row-store, col=Column-store, pq=Parallel-query",
+        1: "Number of concurrent workers for MTR execution",
+        2: "Run with --suite flag for test-suite organization",
+        3: "Enable optimistic transaction mode (-o)",
+        4: "Record mode: regenerate .result files (-r)",
+        5: "Confirm and start MTR run",
+        6: "Return to mode selection",
+        7: "Exit Rosetta",
+    }
+
+    # Box drawing (reuse same approach as main menu)
+    _MTR_BOX_W = 61
+
+    def _mtr_display_width(s):
+        from prompt_toolkit.utils import get_cwidth
+        return sum(get_cwidth(ch) for ch in s)
+
+    def _mtr_box_top():
+        return ("dim cyan", "  \u256d" + "\u2500" * _MTR_BOX_W + "\u256e\n")
+
+    def _mtr_box_mid():
+        return ("dim cyan", "  \u251c" + "\u2500" * _MTR_BOX_W + "\u2524\n")
+
+    def _mtr_box_bot():
+        return ("dim cyan", "  \u2570" + "\u2500" * _MTR_BOX_W + "\u256f\n")
+
+    def _mtr_box_row(fragments):
+        vis_w = sum(_mtr_display_width(t) for _, t in fragments)
+        if vis_w > _MTR_BOX_W:
+            # Truncate: trim last fragment's text to fit
+            overflow = vis_w - _MTR_BOX_W
+            trimmed = list(fragments)
+            for idx in range(len(trimmed) - 1, -1, -1):
+                style, text = trimmed[idx]
+                tw = _mtr_display_width(text)
+                if tw >= overflow:
+                    # Trim characters from end until we fit
+                    while overflow > 0 and text:
+                        overflow -= _mtr_display_width(text[-1])
+                        text = text[:-1]
+                    trimmed[idx] = (style, text)
+                    break
+                else:
+                    overflow -= tw
+                    trimmed[idx] = (style, "")
+            fragments = trimmed
+            vis_w = sum(_mtr_display_width(t) for _, t in fragments)
+        pad = max(0, _MTR_BOX_W - vis_w)
+        result = [("dim cyan", "  \u2502")]
+        result.extend(fragments)
+        result.append(("", " " * pad))
+        result.append(("dim cyan", "\u2502\n"))
+        return result
+
     def _get_text():
         lines = []
 
+        # \u2500\u2500 ASCII Logo \u2500\u2500
         lines.append(("", "\n"))
         for logo_line in LOGO_LINES:
-            lines.append(("bold cyan", f"  {logo_line}\n"))
+            lines.append(("bold cyan", f"    {logo_line}\n"))
         lines.append(("", "\n"))
-        lines.append(("dim", f"  {LOGO_SUBTITLE}\n"))
         from . import __version__
+        lines.append(("dim", f"  {LOGO_SUBTITLE}"))
         lines.append(("dim", f"  v{__version__}"))
         lines.append(("bold white", "  MTR Mode\n"))
         lines.append(("", "\n"))
 
-        lines.append(("dim",
-                      "  up/down navigate   left/right change"
-                      "   space/enter toggle   Esc/q quit\n\n"))
+        # \u2500\u2500 Box top \u2500\u2500
+        lines.append(_mtr_box_top())
 
+        # \u2500\u2500 Keyboard hints \u2500\u2500
+        hint_text = "  \u2191\u2193 navigate  \u2190\u2192 change  Space/Enter toggle  q quit"
+        lines.extend(_mtr_box_row([("dim", hint_text)]))
+
+        # \u2500\u2500 Separator \u2500\u2500
+        lines.append(_mtr_box_mid())
+
+        # \u2500\u2500 Fields \u2500\u2500
         label_width = max(len(f["label"]) for f in FIELDS[:ACTION_OK])
-        prefix_sel = "  \u276f "
-        prefix_nonsel = "    "
 
         for i, field in enumerate(FIELDS):
             is_sel = (i == sel[0])
             is_action = field["type"] == "action"
 
             if is_action:
-                if is_sel:
-                    lines.append(("bold cyan",
-                                  f"{prefix_sel}{field['label']}\n"))
+                # Action buttons: OK / Back / Quit
+                if field["label"] == "Quit":
+                    icon = "\u25cb"
                 else:
-                    lines.append(("dim",
-                                  f"{prefix_nonsel}{field['label']}\n"))
+                    icon = "\u25c6" if is_sel else "\u25c7"
+                if is_sel:
+                    lines.extend(_mtr_box_row([
+                        ("bold cyan", f"  {icon} {field['label']}")
+                    ]))
+                else:
+                    lines.extend(_mtr_box_row([
+                        ("dim", f"  {icon} {field['label']}")
+                    ]))
+
             elif field["type"] == "multiselect":
-                # ---- Mode multi-select (single-line inline) ----
+                # \u2500\u2500 Mode capsule row \u2500\u2500
                 mc = mode_checks[0]
                 cur = mode_cursor[0]
+                frags = []
                 padded_label = f"{field['label']:<{label_width}s}"
 
-                tokens = []
+                if is_sel:
+                    frags.append(("bold cyan", f"  {padded_label}  "))
+                else:
+                    frags.append(("dim", f"  {padded_label}  "))
+
                 for idx, mkey in enumerate(MODE_OPTIONS):
                     checked = mc.get(mkey, False)
-                    mark = "[ \u2713 ]" if checked else "[   ]"
-                    is_cur_opt = (idx == cur)
-                    if is_sel:
-                        # Field is active – show full contrast
-                        if is_cur_opt:
-                            # Current option: always bright
-                            tokens.append(("bold cyan", f"{mark}{mkey}"))
-                        elif checked:
-                            # Selected but not cursor: bold to stand out
-                            tokens.append(("bold", f"{mark}{mkey}"))
-                        else:
-                            # Unselected & not cursor: dim
-                            tokens.append(("dim", f"{mark}{mkey}"))
-                    else:
-                        # Field inactive: all dim
-                        tokens.append(("dim", f"{mark}{mkey}"))
-                    if idx < len(MODE_OPTIONS) - 1:
-                        tokens.append(("", " "))
+                    capsule_text = f" {mkey} "
+                    is_cur_opt = (is_sel and idx == cur)
 
-                # Render single line: label + tokens
-                if is_sel:
-                    lines.append(("bold cyan", prefix_sel))
-                    lines.append(("bold cyan", f"{padded_label}  "))
-                    for style, text in tokens:
-                        lines.append((style, text))
-                    lines.append(("", "\n"))
-                else:
-                    lines.append(("dim", prefix_nonsel))
-                    lines.append(("", f"{padded_label}  "))
-                    for style, text in tokens:
-                        gray_style = ("gray" if style else "")
-                        lines.append((gray_style, text))
-                    lines[-1] = (lines[-1][0], lines[-1][1] + "\n")
+                    if not is_sel:
+                        style = "reverse fg:ansicyan" if checked else "dim"
+                    elif checked and is_cur_opt:
+                        style = "bold reverse fg:ansiwhite bg:ansicyan"
+                    elif checked:
+                        style = "reverse fg:ansicyan"
+                    elif is_cur_opt:
+                        style = "bold underline fg:ansicyan"
+                    else:
+                        style = "dim"
+
+                    frags.append((style, capsule_text))
+                    frags.append(("", " "))
+
+                lines.extend(_mtr_box_row(frags))
+
             else:
+                # \u2500\u2500 Value fields (choice / toggle) \u2500\u2500
                 val = _field_val(i)
                 padded_label = f"{field['label']:<{label_width}s}"
-                if is_sel:
-                    lines.append(("bold cyan", prefix_sel))
-                    lines.append(("bold cyan", f"{padded_label}  "))
-                    lines.append(("cyan", f"[ {val} ]\n"))
-                else:
-                    lines.append(("dim", prefix_nonsel))
-                    lines.append(("", f"{padded_label}  "))
-                    lines.append(("gray", f"[ {val} ]\n"))
+                frags = []
 
+                if is_sel:
+                    frags.append(("bold cyan", f"  {padded_label}  "))
+                else:
+                    frags.append(("dim", f"  {padded_label}  "))
+
+                if field["type"] == "choice":
+                    if is_sel:
+                        frags.append(("bold yellow", f"\u25c4 {val} \u25ba"))
+                    else:
+                        frags.append(("", val))
+                else:
+                    # Toggle
+                    toggle_var = _get_toggle_var(i)
+                    toggle_on = toggle_var[0] if toggle_var else (val == "On")
+                    if toggle_on:
+                        frags.append(("bold green" if is_sel else "green",
+                                      f"\u25cf {val}"))
+                    else:
+                        frags.append(("dim", f"\u25cb {val}"))
+
+                lines.extend(_mtr_box_row(frags))
+
+        # \u2500\u2500 Dynamic hint separator \u2500\u2500
+        lines.append(_mtr_box_mid())
+
+        # \u2500\u2500 Dynamic hint row \u2500\u2500
+        hint = FIELD_HINTS.get(sel[0], "")
+        lines.extend(_mtr_box_row([("dim italic", f"  \U0001f4a1 {hint}")]))
+
+        # \u2500\u2500 Box bottom \u2500\u2500
+        lines.append(_mtr_box_bot())
+
+        # \u2500\u2500 Stop hint (outside box) \u2500\u2500
         lines.append(("", "\n"))
-        lines.append(("dim", "  ────────────────────────────────────────\n"))
-        lines.append(("dim", "  Mode:   row=Row-store, col=Column-store,"
-                          " pq=Parallel-query\n"))
-        lines.append(("dim", "  Flags:  -o=Optimistic-tx,"
-                          " -r=Record-mode\n"))
-        lines.append(("dim", "  Stop:   ^C / q during run, or\n"
-                          "          touch /tmp/.rosetta_mtr_cancel\n"))
+        lines.append(("dim", "  Stop: ^C / q during run, or touch /tmp/.rosetta_mtr_cancel\n"))
 
         return lines
 
@@ -3154,64 +3555,76 @@ def _select_rerun_run_id(output_dir: str) -> Optional[dict]:
         lines = []
         border_len = COL_ID + COL_WK + COL_TS + COL_MODE + 10
 
-        # ASCII Logo
+        # Logo
         lines.append(("", "\n"))
         for logo_line in LOGO_LINES:
-            lines.append(("bold cyan", f"  {logo_line}\n"))
+            lines.append(("bold cyan", f"    {logo_line}\n"))
         lines.append(("", "\n"))
-        lines.append(("dim", f"  {LOGO_SUBTITLE}\n"))
         from . import __version__
+        lines.append(("dim", f"  {LOGO_SUBTITLE}"))
         lines.append(("dim", f"  v{__version__}"))
         lines.append(("bold white", "  Rerun Mode\n"))
         lines.append(("", "\n"))
 
         lines.append(("bold white", "  Select Historical Run\n"))
-        lines.append(("dim", "  ↑/↓ move  ←/→ page  / search  Enter select  Esc/q back\n"))
+        lines.append(("dim", "  \u2191\u2193 move  \u2190\u2192 page  / search  Enter select  Esc/q back\n"))
         lines.append(("", "\n"))
 
         # If in editing mode, show inline input
         if editing[0]:
-            lines.append(("bold cyan", "  ❯ "))
+            lines.append(("bold cyan", "  \u276f "))
             lines.append(("bold cyan", "RUN ID"))
             lines.append(("", "  "))
-            lines.append(("bold white", f"[ {edit_buf[0]}▌ ]"))
+            lines.append(("bold white", f"[ {edit_buf[0]}\u258c ]"))
             lines.append(("", "\n"))
             lines.append(("dim",
                          "     Type RUN ID, Enter to confirm, "
                          "Esc to cancel\n"))
             return lines
 
-        # Table header
-        hdr = f"    {'RUN ID':<{COL_ID}} {'Workload':<{COL_WK}} {'Timestamp':<{COL_TS}} {'Mode':<{COL_MODE}}"
-        lines.append(("dim bold", f"  {hdr}\n"))
-        lines.append(("dim", "  " + "─" * border_len + "\n"))
+        # Table header with box-style top border
+        lines.append(("dim cyan", "  \u256d" + "\u2500" * border_len + "\u256e\n"))
+        hdr = f"  {'RUN ID':<{COL_ID}} {'Workload':<{COL_WK}} {'Timestamp':<{COL_TS}} {'Mode':<{COL_MODE}}"
+        hdr_pad = border_len - len(hdr)
+        lines.append(("dim cyan", "  \u2502"))
+        lines.append(("dim bold", hdr))
+        lines.append(("", " " * max(0, hdr_pad)))
+        lines.append(("dim cyan", "\u2502\n"))
+        lines.append(("dim cyan", "  \u251c" + "\u2500" * border_len + "\u2524\n"))
 
         items = _page_items()
         for i, item in enumerate(items):
             is_sel = (i == selected[0])
-            prefix_style = "bold cyan" if is_sel else ""
-            prefix_text = "  ❯ " if is_sel else "    "
 
             if item["type"] == "run":
                 rid = item["id"][:COL_ID]
                 wk = item["workload"][:COL_WK]
                 ts = item["ts"]
                 mode = item["mode"]
-                row = f"{rid:<{COL_ID}} {wk:<{COL_WK}} {ts:<{COL_TS}} {mode:<{COL_MODE}}"
+                prefix = "\u25c6 " if is_sel else "  "
+                row = f"{prefix}{rid:<{COL_ID}} {wk:<{COL_WK}} {ts:<{COL_TS}} {mode:<{COL_MODE}}"
+                row_pad = border_len - len(row)
                 style = "bold cyan" if is_sel else ""
-                lines.append((prefix_style, prefix_text))
+                lines.append(("dim cyan", "  \u2502"))
                 lines.append((style, row))
+                lines.append(("", " " * max(0, row_pad)))
+                lines.append(("dim cyan", "\u2502\n"))
             else:  # back
                 style = "bold cyan" if is_sel else "dim"
-                lines.append((prefix_style, prefix_text))
-                lines.append((style, "← Back"))
+                prefix = "\u25c6 " if is_sel else "  "
+                row = f"{prefix}\u2190 Back"
+                row_pad = border_len - len(row)
+                lines.append(("dim cyan", "  \u2502"))
+                lines.append((style, row))
+                lines.append(("", " " * max(0, row_pad)))
+                lines.append(("dim cyan", "\u2502\n"))
 
-            lines.append(("", "\n"))
+        # Bottom border with page info
+        lines.append(("dim cyan", "  \u2570" + "\u2500" * border_len + "\u256f\n"))
 
         # Page indicator
-        lines.append(("", "\n"))
-        page_info = f"Page {page[0]+1}/{total_pages}  ({len(ALL_RUNS)} runs)"
-        lines.append(("dim", f"  {page_info}\n"))
+        page_info = f"  Page {page[0]+1}/{total_pages}  ({len(ALL_RUNS)} runs)"
+        lines.append(("dim", f"{page_info}\n"))
 
         return lines
 
@@ -3480,6 +3893,9 @@ def _enter_interactive(args) -> int:
                 bg_server.stop()
             console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
             return 0
+        # Persist user's DBMS selection for next menu re-entry
+        if selected_configs:
+            default_dbms = [c.name for c in selected_configs]
 
     # Update server configs to match user's DBMS selection
     if bg_server and selected_configs:
@@ -3506,6 +3922,15 @@ def _enter_interactive(args) -> int:
             console.print(f"  [dim]{LOGO_SUBTITLE}[/dim]")
             console.print(f"  [dim]v{__version__}[/dim]  [bold white]Playground Mode[/bold white]")
 
+            # DBMS info banner
+            dbms_names_str = ", ".join(c.name for c in selected_configs)
+            console.print(
+                f"\n  [dim]DBMS:[/dim] "
+                f"[bold]{dbms_names_str}[/bold]  "
+                f"[dim]Baseline:[/dim] "
+                f"[bold]{args.baseline}[/bold]  "
+                f"[dim]Database:[/dim] [bold]{args.database}[/bold]")
+
             # Reuse bg_server if available, otherwise create new one
             if bg_server and bg_server.running:
                 srv = bg_server
@@ -3529,8 +3954,8 @@ def _enter_interactive(args) -> int:
 
             pg_url = f"{srv.base_url}/playground.html"
             console.print(
-                f"\n  [green]●[/green] Playground: "
-                f"[bold link={pg_url}]{pg_url}[/bold link]")
+                f"  [dim]Playground:[/dim] "
+                f"[bold green]{pg_url}[/bold green]")
             # Browser already opened when bg_server started
 
             from prompt_toolkit import HTML as _HTML
@@ -3622,137 +4047,8 @@ def _enter_interactive(args) -> int:
             if mode is None:
                 console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
                 return 0
-            continue
-
-        elif mode == "history":
-            # Start server and show History URL
-            from .interactive import ReportServer, _APIHandler
-            from . import __version__
-
-            # ASCII Logo
-            console.print()
-            for logo_line in LOGO_LINES:
-                console.print(f"  [bold cyan]{logo_line}[/bold cyan]")
-            console.print()
-            console.print(f"  [dim]{LOGO_SUBTITLE}[/dim]")
-            console.print(f"  [dim]v{__version__}[/dim]  [bold white]History Mode[/bold white]")
-
-            # Reuse bg_server if already running (from interactive mode startup)
-            if bg_server and bg_server.running:
-                srv = bg_server
-            else:
-                srv = ReportServer(
-                    output_dir, port=args.port,
-                    configs=selected_configs,
-                    all_configs=all_configs,
-                    database=args.database,
-                )
-                try:
-                    srv.start()
-                except OSError as e:
-                    print_error(f"Failed to start server: {e}")
-                    flush_all()
-                    return 1
-
-            history_url = f"{srv.base_url}/index.html"
-            console.print(
-                f"\n  [green]●[/green] History: "
-                f"[bold link={history_url}]{history_url}[/bold link]")
-            # Open in IDE browser
-            try:
-                import subprocess as _sp
-                _sp.Popen(["code", "--open-url", history_url],
-                          stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-            except FileNotFoundError:
-                pass
-
-            from prompt_toolkit import HTML as _HTML
-            from prompt_toolkit.history import InMemoryHistory as _IMH
-            from prompt_toolkit import PromptSession as _PS
-            from .interactive import _PROMPT_STYLE, _make_repl_bindings, _BackSignal
-
-            _hist_placeholder = _HTML(
-                "<placeholder>Type 'help', ← back, or 'quit'"
-                "</placeholder>")
-            _hist_prompt = _HTML(
-                '<prompt>rosetta</prompt> <path>▶</path> ')
-            _hist_session = _PS(
-                history=_IMH(),
-                style=_PROMPT_STYLE,
-                multiline=False,
-                key_bindings=_make_repl_bindings(),
-            )
-
-            console.print()
-            # Wait for user command
-            while True:
-                try:
-                    user_input = _hist_session.prompt(
-                        _hist_prompt,
-                        placeholder=_hist_placeholder,
-                    )
-                except (EOFError, KeyboardInterrupt):
-                    if srv is not bg_server:
-                        srv.stop()
-                    console.print(
-                        "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
-                    return 0
-
-                if isinstance(user_input, _BackSignal):
-                    break
-
-                user_input = user_input.strip()
-
-                if not user_input:
-                    continue
-
-                cmd = user_input.lower()
-
-                if cmd in ("back", "b"):
-                    break
-                elif cmd in ("quit", "exit", "q"):
-                    if srv is not bg_server:
-                        srv.stop()
-                    console.print(
-                        "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
-                    return 0
-                elif cmd == "help":
-                    console.print(
-                        "\n  [bold]History commands:[/bold]")
-                    console.print(
-                        f"  [green]open[/green]    "
-                        f"re-open history in browser")
-                    console.print(
-                        f"  [green]back[/green]    "
-                        f"return to mode selection")
-                    console.print(
-                        f"  [green]quit[/green]    "
-                        f"exit rosetta\n")
-                elif cmd == "open":
-                    try:
-                        _sp.Popen(["code", "--open-url", history_url],
-                                  stdout=_sp.DEVNULL,
-                                  stderr=_sp.DEVNULL)
-                        console.print(
-                            f"  [green]Opened:[/green] {history_url}")
-                    except FileNotFoundError:
-                        console.print(
-                            f"  [dim]URL:[/dim] {history_url}")
-                elif cmd:
-                    console.print(
-                        f"  [yellow]Unknown command:[/yellow] {cmd}")
-                    console.print(
-                        f"  [dim]Type 'help', 'back', "
-                        f"or 'quit'.[/dim]")
-
-            if srv is not bg_server:
-                srv.stop()
-            console.clear()
-            mode, selected_configs = _select_mode(configs, args.database, reachable_names=reachable_names, default_dbms=default_dbms, baseline=args.baseline,
-                                                 server_url=bg_server.base_url if bg_server and bg_server.running else "")
-            if mode is None:
-                console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
-                return 0
+            if selected_configs:
+                default_dbms = [c.name for c in selected_configs]
             continue
 
         elif mode == "test":
@@ -3782,6 +4078,8 @@ def _enter_interactive(args) -> int:
             if mode is None:
                 console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
                 return 0
+            if selected_configs:
+                default_dbms = [c.name for c in selected_configs]
             continue
 
         elif mode == "mtr":
@@ -3801,6 +4099,8 @@ def _enter_interactive(args) -> int:
                         console.print(
                             "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
                         return 0
+                    if selected_configs:
+                        default_dbms = [c.name for c in selected_configs]
                     break  # exit inner loop, re-enter while True with new mode
 
                 from .interactive import MtrInteractiveSession
@@ -3857,6 +4157,8 @@ def _enter_interactive(args) -> int:
                             console.print(
                                 "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
                             return 0
+                        if selected_configs:
+                            default_dbms = [c.name for c in selected_configs]
                         back_to_mode = True
                         break  # exit inner loop
                     

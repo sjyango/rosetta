@@ -1152,7 +1152,7 @@ class InteractiveSession:
         if srv and srv.running:
             console.print(
                 f"  [dim]Server:[/dim] "
-                f"[bold green]{srv.base_url}[/bold green]")
+                f"[bold green]{srv.base_url}/index.html[/bold green]")
         console.print()
 
         run_count = 0
@@ -2076,17 +2076,29 @@ class MtrInteractiveSession:
                       f"[bold white]MTR Mode[/bold white]")
 
         mode_label = self._get_mode_label()
-        parts = [f"Mode={mode_label}", f"Parallel={self.parallel}", f"Retry={self.retry}"]
-        if self.optimistic:
-            parts.append("Optimistic=ON")
-        if self.record:
-            parts.append("Record=ON")
-        if self.suite:
-            parts.append(f"Suite={self.suite}")
 
-        console.print()
+        # DBMS info line (consistent with Test/Playground modes)
+        dbms_names = ", ".join(c.name for c in self.configs)
         console.print(
-            f"  [dim]{'  '.join(parts)}[/dim]")
+            f"\n  [dim]DBMS:[/dim] [bold]{dbms_names}[/bold]  "
+            f"[dim]Database:[/dim] [bold]cross_dbms_test_db[/bold]")
+
+        # MTR parameters line
+        console.print(
+            f"  [dim]Mode:[/dim] [bold]{mode_label}[/bold]  "
+            f"[dim]Parallel:[/dim] [bold]{self.parallel}[/bold]  "
+            f"[dim]Retry:[/dim] [bold]{self.retry}[/bold]  "
+            f"[dim]Suite:[/dim] [bold]{'ON' if self.suite_mode else 'Off'}[/bold]")
+
+        # Flags line (only show enabled flags)
+        flags = []
+        if self.optimistic:
+            flags.append("[bold yellow]Optimistic[/bold yellow]")
+        if self.record:
+            flags.append("[bold yellow]Record[/bold yellow]")
+        if flags:
+            console.print(f"  [dim]Flags:[/dim] {', '.join(flags)}")
+
         console.print()
 
         exit_reason = "quit"
