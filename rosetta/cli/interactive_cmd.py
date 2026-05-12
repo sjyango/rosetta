@@ -247,7 +247,7 @@ def handle_interactive(args, output: "OutputFormatter") -> CommandResult:
         ])
         
         # Use filtered configs (either user-specified or auto-detected reachable)
-        legacy_args.dbms = ",".join(c.name for c in configs)
+        legacy_args.dbms = ",".join(c.name for c in enabled_configs)
         if args.port:
             legacy_args.port = args.port
         

@@ -178,6 +178,7 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
     _configs: List[DBMSConfig] = []
     _all_configs: List[DBMSConfig] = []
     _database: str = ""
+    _baseline: str = ""
     # Cancellation event — set by /api/stop, cleared when a new execution starts
     _cancel_event: threading.Event = threading.Event()
     # Active DB connections that can be killed on stop
@@ -326,6 +327,7 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
         self._respond_json({
             "ok": True,
             "database": self._database,
+            "baseline": self._baseline,
             "dbms": dbms_list,
         })
 
@@ -836,12 +838,14 @@ class ReportServer:
     def __init__(self, directory: str, port: int = 0,
                  configs: Optional[List[DBMSConfig]] = None,
                  all_configs: Optional[List[DBMSConfig]] = None,
-                 database: str = ""):
+                 database: str = "",
+                 baseline: str = ""):
         self.directory = os.path.abspath(directory)
         self.port = port
         self.configs = configs or []
         self.all_configs = all_configs or self.configs
         self.database = database
+        self.baseline = baseline
         self._server: Optional[http.server.HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
@@ -872,6 +876,7 @@ class ReportServer:
         _APIHandler._configs = self.configs
         _APIHandler._all_configs = self.all_configs
         _APIHandler._database = self.database
+        _APIHandler._baseline = self.baseline
         handler = lambda *a, **kw: _APIHandler(
             *a, directory=directory, **kw)
         self._server = _SilentHTTPServer(

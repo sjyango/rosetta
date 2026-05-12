@@ -1598,7 +1598,7 @@ def _select_bench_mode() -> Optional[dict]:
     }
 
     # Box drawing
-    _BENCH_BOX_W = 61
+    _BENCH_BOX_W = 80
 
     def _bench_dw(s):
         from prompt_toolkit.utils import get_cwidth
@@ -1970,7 +1970,7 @@ def _select_serial_params(
         7: "Exit Rosetta",
     }
 
-    _CFG_BOX_W = 61
+    _CFG_BOX_W = 80
 
     def _cfg_dw(s):
         from prompt_toolkit.utils import get_cwidth
@@ -2414,7 +2414,7 @@ def _select_concurrent_params(
         8: "Exit Rosetta",
     }
 
-    _CFG_BOX_W = 61
+    _CFG_BOX_W = 80
 
     def _cfg_dw(s):
         from prompt_toolkit.utils import get_cwidth
@@ -2572,7 +2572,8 @@ def _select_mode(configs, database: str,
                  reachable_names: set = None,
                  default_dbms: list = None,
                  baseline: str = "tdsql",
-                 server_url: str = "") -> tuple:
+                 server_url: str = "",
+                 dbms_status: dict = None) -> tuple:
     """Show a combined DBMS + Mode selector.
 
     DBMS is the first row (multiselect checkboxes).
@@ -2780,7 +2781,7 @@ def _select_mode(configs, database: str,
     DBMS_HINT = "Use Space to toggle, Baseline (*) must stay selected."
 
     # Box drawing constants
-    BOX_W = 61  # number of ─ chars in border = inner display width in columns
+    BOX_W = 80  # number of ─ chars in border = inner display width in columns
 
     def _display_width(s):
         """Calculate terminal display width consistent with prompt_toolkit.
@@ -2879,7 +2880,7 @@ def _select_mode(configs, database: str,
                 is_reachable = (opt in reachable_names)
 
             if not is_reachable:
-                style = "dim italic strikethrough"
+                style = "dim italic"
             elif checked and is_cur_opt:
                 style = "bold reverse fg:ansiwhite bg:ansicyan"
             elif checked:
@@ -2940,6 +2941,76 @@ def _select_mode(configs, database: str,
 
         # ── Box bottom ──
         lines.append(_box_bot())
+
+        # ── DBMS Status table (outside box, same width) ──
+        if dbms_status:
+            lines.append(("", "\n"))
+
+            # Column widths — fits _ST_BOX_W = 80
+            _C_NAME = 12
+            _C_ADDR = 22
+            _C_VER = 34
+            _C_LAT = 8
+            _ST_BOX_W = 80  # same width as main menu box
+
+            # Table top
+            lines.append(("dim cyan", "  ╭" + "─" * _ST_BOX_W + "╮\n"))
+
+            # Header row
+            hdr = f"    {'Name':<{_C_NAME}s}{'Host':<{_C_ADDR}s}{'Version':<{_C_VER}s}{'Latency':>{_C_LAT}s}"
+            hdr_pad = _ST_BOX_W - _display_width(hdr)
+            lines.append(("dim cyan", "  │"))
+            lines.append(("dim bold", hdr))
+            lines.append(("", " " * max(0, hdr_pad)))
+            lines.append(("dim cyan", "│\n"))
+
+            # Header separator
+            lines.append(("dim cyan", "  ├" + "─" * _ST_BOX_W + "┤\n"))
+
+            # Data rows
+            for cfg in configs:
+                info = dbms_status.get(cfg.name, {})
+                is_conn = info.get("connected", False)
+                version = info.get("version") or ""
+                latency = info.get("latency_ms")
+                host = info.get("host", cfg.host)
+                port = info.get("port", cfg.port)
+
+                addr = f"{host}:{port}"
+                if len(addr) > _C_ADDR:
+                    addr = addr[:_C_ADDR - 1] + "~"
+                ver_short = version if len(version) <= _C_VER else version[:_C_VER - 2] + ".."
+                lat_str = f"{latency:.1f}ms" if latency is not None else "-"
+
+                if is_conn:
+                    st_mark = "*"
+                    st_style = "green"
+                else:
+                    st_mark = "!"
+                    st_style = "red"
+                    ver_short = "disconnected"
+                    lat_str = "-"
+
+                # Row: " <mark>  <name>  <addr>  <version>  <latency>"
+                row_text = f"  {cfg.name:<{_C_NAME}s}{addr:<{_C_ADDR}s}{ver_short:<{_C_VER}s}{lat_str:>{_C_LAT}s}"
+                full_row = f" {st_mark}" + row_text
+                row_pad = _ST_BOX_W - _display_width(full_row)
+
+                lines.append(("dim cyan", "  │"))
+                lines.append((st_style, f" {st_mark}"))
+                lines.append(("" if is_conn else "dim", row_text))
+                lines.append(("", " " * max(0, row_pad)))
+                lines.append(("dim cyan", "│\n"))
+
+            # Table bottom
+            lines.append(("dim cyan", "  ╰" + "─" * _ST_BOX_W + "╯\n"))
+
+            # Summary line below table
+            connected = sum(1 for v in dbms_status.values() if v["connected"])
+            total = len(dbms_status)
+            disconnected = total - connected
+            if disconnected > 0:
+                lines.append(("red", f"   Disconnected: {disconnected}"))
 
         # ── Web UI URL (outside box) ──
         if server_url:
@@ -3136,7 +3207,7 @@ def _select_mtr_params(
     }
 
     # Box drawing (reuse same approach as main menu)
-    _MTR_BOX_W = 61
+    _MTR_BOX_W = 80
 
     def _mtr_display_width(s):
         from prompt_toolkit.utils import get_cwidth
@@ -3815,18 +3886,60 @@ def _enter_interactive(args) -> int:
 
     # ----- Quick connectivity check (parallel) for mode selection page ------
     import concurrent.futures as _cf
+    import time as _time
     from .executor import check_port
 
     def _check_one(cfg):
-        return cfg.name, check_port(cfg.host, cfg.port, timeout=2.0)
+        """Check connectivity and fetch version/latency for a DBMS."""
+        start = _time.time()
+        port_ok = check_port(cfg.host, cfg.port, timeout=2.0)
+        latency_ms = round((_time.time() - start) * 1000, 2)
+        if not port_ok:
+            return cfg.name, {"connected": False, "host": cfg.host,
+                              "port": cfg.port, "version": None,
+                              "latency_ms": None}
+        # Try to get version
+        version = None
+        try:
+            import pymysql as _pymysql
+            conn = _pymysql.connect(
+                host=cfg.host, port=cfg.port,
+                user=cfg.user, password=cfg.password,
+                connect_timeout=3)
+            cur = conn.cursor()
+            cur.execute("SELECT VERSION()")
+            row = cur.fetchone()
+            version = row[0] if row else "unknown"
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+        return cfg.name, {"connected": True, "host": cfg.host,
+                          "port": cfg.port, "version": version,
+                          "latency_ms": latency_ms}
 
     reachable_names = set()
+    # Pre-populate all enabled DBMS as disconnected; connectivity check will update
+    dbms_status_info = {
+        c.name: {"connected": False, "host": c.host, "port": c.port,
+                 "version": None, "latency_ms": None}
+        for c in configs
+    }
     with _cf.ThreadPoolExecutor(max_workers=len(configs)) as pool:
         futs = [pool.submit(_check_one, c) for c in configs]
-        for fut in _cf.as_completed(futs, timeout=8):
-            name, ok = fut.result()
-            if ok:
-                reachable_names.add(name)
+        try:
+            for fut in _cf.as_completed(futs, timeout=10):
+                try:
+                    name, info = fut.result()
+                    dbms_status_info[name] = info
+                    if info["connected"]:
+                        reachable_names.add(name)
+                except Exception:
+                    pass
+        except (TimeoutError, Exception):
+            # Some checks didn't finish in time; pre-populated entries
+            # remain as disconnected — that's fine
+            pass
 
     # default_dbms: if user passed --dbms, use those; otherwise None (= all reachable)
     default_dbms = None
@@ -3841,6 +3954,7 @@ def _enter_interactive(args) -> int:
         configs=configs,
         all_configs=all_configs,
         database=args.database,
+        baseline=args.baseline,
     )
     try:
         bg_server.start()
@@ -3873,6 +3987,14 @@ def _enter_interactive(args) -> int:
     # Clear terminal before entering interactive mode
     console.clear()
 
+    # Helper: ensure bg_server is running before showing menu
+    def _ensure_bg_server():
+        if bg_server and not bg_server.running:
+            try:
+                bg_server.start()
+            except OSError:
+                pass
+
     # ----- mode selection (skip if --benchmark already set) -----------------
     force_bench = getattr(args, "benchmark", False)
 
@@ -3886,6 +4008,7 @@ def _enter_interactive(args) -> int:
             default_dbms=default_dbms,
             baseline=args.baseline,
             server_url=bg_server.base_url if bg_server and bg_server.running else "",
+            dbms_status=dbms_status_info,
         )
         if mode is None:
             # User cancelled
@@ -3901,6 +4024,7 @@ def _enter_interactive(args) -> int:
     if bg_server and selected_configs:
         _APIHandler._configs = selected_configs
         _APIHandler._database = args.database
+        _APIHandler._baseline = args.baseline
 
     # ----- benchmark parameter configuration (interactive) ----------------
     # Only in interactive benchmark mode — prompt for iterations/warmup/profile
@@ -3941,6 +4065,7 @@ def _enter_interactive(args) -> int:
                     configs=selected_configs,
                     all_configs=all_configs,
                     database=args.database,
+                    baseline=args.baseline,
                 )
 
             # Start server if it's not already running
@@ -4042,8 +4167,9 @@ def _enter_interactive(args) -> int:
             if srv is not bg_server and srv.running:
                 srv.stop()
             console.clear()
+            _ensure_bg_server()
             mode, selected_configs = _select_mode(configs, args.database, reachable_names=reachable_names, default_dbms=default_dbms, baseline=args.baseline,
-                                                 server_url=bg_server.base_url if bg_server and bg_server.running else "")
+                                                 server_url=bg_server.base_url if bg_server and bg_server.running else "", dbms_status=dbms_status_info)
             if mode is None:
                 console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
                 return 0
@@ -4073,8 +4199,9 @@ def _enter_interactive(args) -> int:
             if reason != "back":
                 break
             console.clear()
+            _ensure_bg_server()
             mode, selected_configs = _select_mode(configs, args.database, reachable_names=reachable_names, default_dbms=default_dbms, baseline=args.baseline,
-                                                 server_url=bg_server.base_url if bg_server and bg_server.running else "")
+                                                 server_url=bg_server.base_url if bg_server and bg_server.running else "", dbms_status=dbms_status_info)
             if mode is None:
                 console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
                 return 0
@@ -4093,8 +4220,9 @@ def _enter_interactive(args) -> int:
                 if params.get("action") == "back":
                     # Back to mode selection
                     console.clear()
+                    _ensure_bg_server()
                     mode, selected_configs = _select_mode(configs, args.database, reachable_names=reachable_names, default_dbms=default_dbms, baseline=args.baseline,
-                                                 server_url=bg_server.base_url if bg_server and bg_server.running else "")
+                                                 server_url=bg_server.base_url if bg_server and bg_server.running else "", dbms_status=dbms_status_info)
                     if mode is None:
                         console.print(
                             "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
@@ -4151,8 +4279,9 @@ def _enter_interactive(args) -> int:
                     if params.get("action") == "back":
                         # Back to mode selection
                         console.clear()
+                        _ensure_bg_server()
                         mode, selected_configs = _select_mode(configs, args.database, reachable_names=reachable_names, default_dbms=default_dbms, baseline=args.baseline,
-                                                     server_url=bg_server.base_url if bg_server and bg_server.running else "")
+                                                     server_url=bg_server.base_url if bg_server and bg_server.running else "", dbms_status=dbms_status_info)
                         if mode is None:
                             console.print(
                                 "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")

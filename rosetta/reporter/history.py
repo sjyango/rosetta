@@ -757,7 +757,9 @@ function loadDbms() {
     DBMS_LIST = r.dbms || [];
     DATABASE = r.database || '';
     ACTIVE_DBMS = new Set(DBMS_LIST.filter(d => d.active).map(d => d.name));
-    if (!BASELINE_DBMS && DBMS_LIST.length > 0) {
+    if (r.baseline) {
+      BASELINE_DBMS = r.baseline;
+    } else if (!BASELINE_DBMS && DBMS_LIST.length > 0) {
       BASELINE_DBMS = DBMS_LIST[0].name;
     }
     renderChips();
