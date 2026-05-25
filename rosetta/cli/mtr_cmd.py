@@ -5,7 +5,7 @@ This wraps the ./mtr binary in the MySQL test directory, supporting
 common options like suite selection, record mode, optimistic transactions,
 vector engine, parallel query, etc.
 
-Supports running multiple modes (row/column/pq) in parallel via --mode.
+Supports running multiple modes (row/column/pq/ps) in parallel via --mode.
 
 Configuration is read from the same ~/.rosetta/config.json file under the
 "mtr" top-level key.  CLI flags override config values.
@@ -33,9 +33,10 @@ if TYPE_CHECKING:
 
 # Canonical mode names and their display labels
 MTR_MODES = {
-    "row":    {"label": "行存 (Row)",    "vector": False, "parallel_query": False},
-    "col":    {"label": "列存 (Column)", "vector": True,  "parallel_query": False},
-    "pq":     {"label": "PQ (Parallel)", "vector": False, "parallel_query": True},
+    "row":    {"label": "行存 (Row)",    "vector": False, "parallel_query": False, "ps_protocol": False},
+    "col":    {"label": "列存 (Column)", "vector": True,  "parallel_query": False, "ps_protocol": False},
+    "pq":     {"label": "PQ (Parallel)", "vector": False, "parallel_query": True,  "ps_protocol": False},
+    "ps":     {"label": "PS (Prepared)", "vector": False, "parallel_query": False, "ps_protocol": True},
 }
 
 # Aliases for convenience (column -> col)
@@ -44,7 +45,7 @@ _MODE_ALIASES = {"column": "col"}
 # Port offset per mode (to avoid port conflicts when running in parallel)
 # Each MTR worker uses ~30 ports, with --parallel=8 that's ~240 ports.
 # Use 1000 offset per mode to be safe.
-_MODE_PORT_OFFSETS = {"row": 0, "col": 1000, "pq": 2000}
+_MODE_PORT_OFFSETS = {"row": 0, "col": 1000, "pq": 2000, "ps": 3000}
 
 
 # -----------------------------------------------------------------------
@@ -118,6 +119,8 @@ def _build_command(cfg: dict) -> str:
         parts.append("--record")
     if cfg.get("vector"):
         parts.append("--ve-protocol")
+    if cfg.get("ps_protocol"):
+        parts.append("--ps-protocol")
     if cfg.get("parallel_query"):
         parts.append("--parallel-query")
     if cfg.get("suite"):
@@ -310,6 +313,7 @@ def handle_mtr(args, output: "OutputFormatter") -> CommandResult:
             mode_def = MTR_MODES[requested[0]]
             args.vector = mode_def["vector"]
             args.parallel_query = mode_def["parallel_query"]
+            args.ps_protocol = mode_def["ps_protocol"]
             return _run_native_mtr(args, output)
         return _run_parallel_modes(args, output, requested)
     else:
@@ -323,6 +327,8 @@ def _parse_mtr_mode_name(args) -> str:
         return "col"
     elif getattr(args, "parallel_query", False):
         return "pq"
+    elif getattr(args, "ps_protocol", False):
+        return "ps"
     return "row"
 
 
@@ -411,6 +417,7 @@ def _run_parallel_modes(
             "record": getattr(args, "record", False),
             "vector": mode_def["vector"],
             "parallel_query": mode_def["parallel_query"],
+            "ps_protocol": mode_def["ps_protocol"],
             "suite": getattr(args, "suite", None),
             "cases": getattr(args, "cases", []),
             # Isolated var/tmp directories per mode to prevent conflicts
@@ -447,6 +454,8 @@ def _run_parallel_modes(
             flags = []
             if cfg["vector"]:
                 flags.append("--ve-protocol")
+            if cfg["ps_protocol"]:
+                flags.append("--ps-protocol")
             if cfg["parallel_query"]:
                 flags.append("--parallel-query")
             if cfg["optimistic"]:
@@ -903,6 +912,7 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
     cfg["record"] = getattr(args, "record", False)
     cfg["vector"] = getattr(args, "vector", False)
     cfg["parallel_query"] = getattr(args, "parallel_query", False)
+    cfg["ps_protocol"] = getattr(args, "ps_protocol", False)
     cfg["suite"] = getattr(args, "suite", None)
     cfg["cases"] = getattr(args, "cases", [])
 
@@ -972,6 +982,8 @@ def _run_native_mtr(args, output: "OutputFormatter") -> CommandResult:
     mode_parts = []
     if cfg.get("vector"):
         mode_parts.append("ve-protocol")
+    if cfg.get("ps_protocol"):
+        mode_parts.append("ps-protocol")
     if cfg.get("parallel_query"):
         mode_parts.append("parallel-query")
     if cfg.get("optimistic"):

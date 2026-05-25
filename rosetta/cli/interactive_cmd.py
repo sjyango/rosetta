@@ -187,7 +187,7 @@ def handle_interactive(args, output: "OutputFormatter") -> CommandResult:
                 f"All enabled: {', '.join(all_enabled_names)}\n"
                 "Tip: use --dbms to specify targets "
                 "(e.g. --dbms tdsql,mysql)\n"
-                'Or set "enabled": false for unavailable DBMS.')
+                'Or set "enabled": true for available DBMS.')
 
         # Warn about enabled-but-down DBMS (non-fatal in auto-detect mode)
         if unreachable_enabled:

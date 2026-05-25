@@ -3733,7 +3733,7 @@ def _select_mtr_params(
     """Show parameter configuration for MTR native test mode.
 
     Provides an interactive panel for configuring MTR execution parameters:
-      - Mode multi-select (row / col / pq / all) as checkboxes
+      - Mode multi-select (row / col / pq / ps / all) as checkboxes
       - Parallel workers
       - Feature toggles (-o, -r)
 
@@ -3748,18 +3748,19 @@ def _select_mtr_params(
     from prompt_toolkit.filters import Condition
 
     # --- Mode multi-select state ---
-    MODE_OPTIONS = ["row", "col", "pq", "all"]
+    MODE_OPTIONS = ["row", "col", "pq", "ps", "all"]
     MODE_DESCS = {
         "row": "Row-store (default)",
         "col":  "Column-store (ve-protocol)",
         "pq":   "Parallel-query mode",
+        "ps":   "Prepared-statement (ps-protocol)",
         "all":  "All modes above",
     }
     # Parse initial mode string into checkbox states
     if mode == "all":
-        _initial = {"row": True, "col": True, "pq": True, "all": True}
+        _initial = {"row": True, "col": True, "pq": True, "ps": True, "all": True}
     else:
-        _initial = {"row": False, "col": False, "pq": False, "all": False}
+        _initial = {"row": False, "col": False, "pq": False, "ps": False, "all": False}
         if mode in _initial:
             _initial[mode] = True
     mode_checks = [_initial.copy()]   # {name: bool} per option
@@ -3847,17 +3848,15 @@ def _select_mtr_params(
             mc["row"] = new_val
             mc["col"] = new_val
             mc["pq"] = new_val
+            mc["ps"] = new_val
         else:
             # Toggle individual option
             mc[key] = not mc.get(key, False)
-            # If all three individual options are on, auto-set "all"
-            if mc.get("row") and mc.get("col") and mc.get("pq"):
+            # If all individual options are on, auto-set "all"
+            if mc.get("row") and mc.get("col") and mc.get("pq") and mc.get("ps"):
                 mc["all"] = True
             else:
                 mc["all"] = False
-                # If unchecking one while "all" was on, turn off "all"
-                # (already handled above since we set all=True only when
-                #  all three are on)
 
     def _toggle_right(i):
         if i == 0:
@@ -3886,7 +3885,7 @@ def _select_mtr_params(
 
     # -- Dynamic hints for each field --
     FIELD_HINTS = {
-        0: "row=Row-store, col=Column-store, pq=Parallel-query",
+        0: "row=Row-store, col=Column-store, pq=Parallel-query, ps=Prepared-statement",
         1: "Number of concurrent workers for MTR execution",
         2: "Number of retries for failed tests (0 = no retry)",
         3: "Run with --suite flag for test-suite organization",

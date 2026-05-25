@@ -198,9 +198,9 @@ def _add_mtr_arguments(parser):
         type=str,
         default=None,
         help="Run multiple MTR modes in parallel. "
-             "Comma-separated list of: row, col, pq, "
-             "or 'all' (equivalent to row,col,pq). "
-             "Example: --mode row,col,pq",
+             "Comma-separated list of: row, col, pq, ps, "
+             "or 'all' (equivalent to row,col,pq,ps). "
+             "Example: --mode row,col,pq,ps",
     )
     parser.add_argument(
         "-r", "--record",
@@ -421,19 +421,20 @@ def _add_list_subparser(subparsers):
 
 
 def _add_status_subparser(subparsers):
-    """Add the 'status' subcommand."""
-    status_parser = subparsers.add_parser(
-        "status",
-        help="Check DBMS connection status",
-        description="Check connection status for all configured databases",
-    )
-    _add_global_options(status_parser)
-    status_parser.add_argument(
-        "--timeout",
-        type=int,
-        default=5,
-        help="Connection timeout in seconds (default: 5)",
-    )
+    """Add the 'status' subcommand (with alias 's')."""
+    for name in ["status", "s"]:
+        status_parser = subparsers.add_parser(
+            name,
+            help="Check DBMS connection status" + (" (alias)" if name != "status" else ""),
+            description="Check connection status for all configured databases",
+        )
+        _add_global_options(status_parser)
+        status_parser.add_argument(
+            "--timeout",
+            type=int,
+            default=5,
+            help="Connection timeout in seconds (default: 5)",
+        )
 
 
 def _add_exec_subparser(subparsers):
@@ -678,7 +679,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif args.command == "bench":
             from .run import handle_bench
             result = handle_bench(args, output)
-        elif args.command == "status":
+        elif args.command in ["status", "s"]:
             from .status import handle_status
             result = handle_status(args, output)
         elif args.command == "exec":

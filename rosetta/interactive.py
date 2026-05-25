@@ -2147,11 +2147,12 @@ class MtrInteractiveSession:
     }
 
     _MTR_MODES = {
-        "row":    {"label": "Row",    "vector": False, "parallel_query": False},
-        "col":    {"label": "Column", "vector": True,  "parallel_query": False},
-        "pq":     {"label": "Parallel Query", "vector": False, "parallel_query": True},
+        "row":    {"label": "Row",    "vector": False, "parallel_query": False, "ps_protocol": False},
+        "col":    {"label": "Column", "vector": True,  "parallel_query": False, "ps_protocol": False},
+        "pq":     {"label": "Parallel Query", "vector": False, "parallel_query": True,  "ps_protocol": False},
+        "ps":     {"label": "Prepared Statement", "vector": False, "parallel_query": False, "ps_protocol": True},
     }
-    _MODE_PORT_OFFSETS = {"row": 0, "col": 1000, "pq": 2000}
+    _MODE_PORT_OFFSETS = {"row": 0, "col": 1000, "pq": 2000, "ps": 3000}
 
     def __init__(self, configs, output_dir,
                  mtr_mode="row", parallel=8,
@@ -2286,7 +2287,7 @@ class MtrInteractiveSession:
         from rosetta.cli.mtr_cmd import _MODE_ALIASES
         mode = self.mtr_mode
         if mode == "all":
-            return "All (row + col + pq)"
+            return "All (row + col + pq + ps)"
         # Handle multi-mode string like "row,pq"
         if "," in mode:
             parts = [m.strip() for m in mode.split(",")]
@@ -2339,6 +2340,7 @@ class MtrInteractiveSession:
             "record": self.record,
             "vector": mode_def.get("vector", False),
             "parallel_query": mode_def.get("parallel_query", False),
+            "ps_protocol": mode_def.get("ps_protocol", False),
             "suite": self.suite,
             "vardir": os.path.join(test_dir, f"var_{mode_name}"),
             "tmpdir": os.path.join(test_dir, f"tmp_{mode_name}"),
