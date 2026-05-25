@@ -641,7 +641,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    
+
+    # Auto-check for updates (human mode only, skip for JSON/scripted usage)
+    if not args.json:
+        try:
+            from .version_check import check_update_on_startup
+            check_update_on_startup()
+        except Exception:
+            pass  # Never let update check break normal operation
+
     # No command provided — default to interactive mode
     if not args.command:
         from .interactive_cmd import handle_interactive

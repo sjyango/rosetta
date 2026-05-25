@@ -47,6 +47,8 @@ class DBMSConfig:
     user: str = "root"
     password: str = ""
     driver: str = "pymysql"
+    protocol: str = "mysql"       # "mysql" | "tdsql" | "tidb" | "oceanbase" | "oracle"
+    service_name: str = ""        # Oracle service name (e.g. orclpdb1)
     skip_patterns: List[str] = field(default_factory=list)
     init_sql: List[str] = field(default_factory=list)
     enabled: bool = True

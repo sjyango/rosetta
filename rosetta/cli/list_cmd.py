@@ -62,13 +62,29 @@ def _handle_list_dbms(args, output: "OutputFormatter") -> CommandResult:
         version = ""
         if config.enabled:
             try:
-                db = DBConnection(config, database="mysql")
-                db.connect(timeout=2)
-                db.cursor.execute("SELECT VERSION()")
-                row = db.cursor.fetchone()
-                if row:
-                    version = row[0]
-                db.close()
+                protocol = getattr(config, 'protocol', 'mysql')
+                if protocol == "oracle":
+                    import oracledb
+                    svc = getattr(config, 'service_name', '') or config.name
+                    dsn = oracledb.makedsn(config.host, config.port,
+                                           service_name=svc)
+                    conn = oracledb.connect(
+                        user=config.user, password=config.password, dsn=dsn)
+                    cur = conn.cursor()
+                    cur.execute("SELECT banner FROM v$version WHERE ROWNUM = 1")
+                    row = cur.fetchone()
+                    if row:
+                        version = row[0]
+                    cur.close()
+                    conn.close()
+                else:
+                    db = DBConnection(config, database="mysql")
+                    db.connect()
+                    db.cursor.execute("SELECT VERSION()")
+                    row = db.cursor.fetchone()
+                    if row:
+                        version = row[0]
+                    db.close()
             except Exception:
                 version = ""
         

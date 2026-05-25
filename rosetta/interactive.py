@@ -179,6 +179,7 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
     _all_configs: List[DBMSConfig] = []
     _database: str = ""
     _baseline: str = ""
+    _traceless: bool = True
     # Cancellation event — set by /api/stop, cleared when a new execution starts
     _cancel_event: threading.Event = threading.Event()
     # Active DB connections that can be killed on stop
@@ -328,6 +329,7 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
             "ok": True,
             "database": self._database,
             "baseline": self._baseline,
+            "traceless": self._traceless,
             "dbms": dbms_list,
         })
 
@@ -339,7 +341,8 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
         """
         import concurrent.futures
 
-        from .executor import DBConnection, check_port
+        from .executor import DBConnection
+        from .explain import is_explain_stmt, get_explain_variants
 
         # Kill any lingering execution from a previous request
         self._cancel_event.set()
@@ -358,6 +361,7 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         requested_dbms = body.get("dbms", [])
+        sandbox = body.get("sandbox", True)
         configs_map = {c.name: c for c in self._all_configs}
 
         if not requested_dbms:
@@ -395,6 +399,8 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
 
         def _exec_on_dbms(config):
             """Execute all statements on one DBMS, return result dict."""
+            import uuid
+
             result = {
                 "name": config.name,
                 "statements": [],
@@ -402,12 +408,15 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
                 "cancelled": False,
             }
 
-            if not check_port(config.host, config.port):
-                result["error"] = (f"Cannot reach {config.host}:"
-                                   f"{config.port}")
-                return result
+            # Sandbox mode: create a temp DB for isolation (skip for Oracle)
+            use_sandbox = sandbox and config.protocol != "oracle"
+            if use_sandbox:
+                temp_db = f"_rosetta_sandbox_{uuid.uuid4().hex[:8]}"
+            else:
+                temp_db = None
 
-            db = DBConnection(config, database)
+            target_db = temp_db if use_sandbox else database
+            db = DBConnection(config, target_db)
             with self._active_connections_lock:
                 self._active_connections.append(db)
             try:
@@ -433,45 +442,96 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
                                    "rows": None, "error": None,
                                    "affected_rows": 0,
                                    "elapsed_ms": 0}
-                    try:
-                        t0 = _time.monotonic()
-                        db.cursor.execute(sql)
-                        if db.cursor.description:
-                            stmt_result["columns"] = [
-                                desc[0]
-                                for desc in db.cursor.description
-                            ]
-                            rows = db.cursor.fetchall()
-                            # Convert to serializable format
-                            stmt_result["rows"] = [
-                                [_format_val(c) for c in row]
-                                for row in rows
-                            ]
-                        else:
-                            stmt_result["affected_rows"] = (
-                                db.cursor.rowcount or 0)
-                        t1 = _time.monotonic()
-                        stmt_result["elapsed_ms"] = round(
-                            (t1 - t0) * 1000, 3)
-                    except Exception as e:
-                        t1 = _time.monotonic()
-                        if cancel.is_set():
-                            result["cancelled"] = True
-                            break
-                        stmt_result["error"] = str(e)
-                        # Extract error code if available (e.g., MySQL error code)
-                        # Most DB-API exceptions have error code in args[0]
-                        error_code = None
-                        if hasattr(e, 'args') and e.args and isinstance(e.args[0], int):
-                            error_code = e.args[0]
-                        elif hasattr(e, 'errno'):
-                            error_code = getattr(e, 'errno')
-                        stmt_result["error_code"] = error_code
-                        stmt_result["elapsed_ms"] = round(
-                            (t1 - t0) * 1000, 3)
+
+                    # Multi-format EXPLAIN handling
+                    if is_explain_stmt(sql):
+                        variants = get_explain_variants(sql, config.protocol)
+                        explain_results = []
+                        total_elapsed = 0.0
+                        for variant in variants:
+                            if cancel.is_set():
+                                result["cancelled"] = True
+                                break
+                            vr = {"format": variant["format"],
+                                  "columns": None, "rows": None,
+                                  "error": None, "elapsed_ms": 0}
+                            try:
+                                t0 = _time.monotonic()
+                                db.cursor.execute(variant["sql"])
+                                if db.cursor.description:
+                                    vr["columns"] = [
+                                        desc[0]
+                                        for desc in db.cursor.description
+                                    ]
+                                    rows = db.cursor.fetchall()
+                                    vr["rows"] = [
+                                        [_format_val(c) for c in row]
+                                        for row in rows
+                                    ]
+                                vr["elapsed_ms"] = round(
+                                    (_time.monotonic() - t0) * 1000, 3)
+                            except Exception as e:
+                                vr["elapsed_ms"] = round(
+                                    (_time.monotonic() - t0) * 1000, 3)
+                                vr["error"] = str(e)
+                            total_elapsed += vr["elapsed_ms"]
+                            explain_results.append(vr)
+
+                        # Use first successful variant as main result
+                        for vr in explain_results:
+                            if not vr["error"]:
+                                stmt_result["columns"] = vr["columns"]
+                                stmt_result["rows"] = vr["rows"]
+                                break
+                        stmt_result["elapsed_ms"] = round(total_elapsed, 3)
+                        stmt_result["explain_formats"] = explain_results
+                    else:
+                        try:
+                            t0 = _time.monotonic()
+                            db.cursor.execute(sql)
+                            if db.cursor.description:
+                                stmt_result["columns"] = [
+                                    desc[0]
+                                    for desc in db.cursor.description
+                                ]
+                                rows = db.cursor.fetchall()
+                                # Convert to serializable format
+                                stmt_result["rows"] = [
+                                    [_format_val(c) for c in row]
+                                    for row in rows
+                                ]
+                            else:
+                                stmt_result["affected_rows"] = (
+                                    db.cursor.rowcount or 0)
+                            t1 = _time.monotonic()
+                            stmt_result["elapsed_ms"] = round(
+                                (t1 - t0) * 1000, 3)
+                        except Exception as e:
+                            t1 = _time.monotonic()
+                            if cancel.is_set():
+                                result["cancelled"] = True
+                                break
+                            stmt_result["error"] = str(e)
+                            # Extract error code if available (e.g., MySQL error code)
+                            # Most DB-API exceptions have error code in args[0]
+                            error_code = None
+                            if hasattr(e, 'args') and e.args and isinstance(e.args[0], int):
+                                error_code = e.args[0]
+                            elif hasattr(e, 'errno'):
+                                error_code = getattr(e, 'errno')
+                            stmt_result["error_code"] = error_code
+                            stmt_result["elapsed_ms"] = round(
+                                (t1 - t0) * 1000, 3)
 
                     result["statements"].append(stmt_result)
             finally:
+                # Sandbox cleanup: drop temp database
+                if use_sandbox and temp_db:
+                    try:
+                        db.cursor.execute(
+                            f"DROP DATABASE IF EXISTS `{temp_db}`")
+                    except Exception:
+                        pass
                 with self._active_connections_lock:
                     try:
                         self._active_connections.remove(db)
@@ -531,7 +591,8 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
         """
         import concurrent.futures
 
-        from .executor import DBConnection, check_port
+        from .executor import DBConnection
+        from .explain import is_explain_stmt, get_explain_variants
 
         # Kill any lingering execution from a previous request
         self._cancel_event.set()
@@ -551,6 +612,7 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         requested_dbms = body.get("dbms", [])
+        sandbox = body.get("sandbox", True)
         configs_map = {c.name: c for c in self._all_configs}
 
         if not requested_dbms:
@@ -641,6 +703,8 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
 
         def _exec_on_dbms(config, index):
             """Execute all statements on one DBMS, return result dict."""
+            import uuid
+
             result = {
                 "name": config.name,
                 "statements": [],
@@ -658,18 +722,15 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
                 })
                 return result
 
-            if not check_port(config.host, config.port):
-                result["error"] = (f"Cannot reach {config.host}:"
-                                   f"{config.port}")
-                _send_sse("progress", {
-                    "name": config.name,
-                    "index": index,
-                    "total": total,
-                    "result": result,
-                })
-                return result
+            # Sandbox mode: create a temp DB for isolation (skip for Oracle)
+            use_sandbox = sandbox and config.protocol != "oracle"
+            if use_sandbox:
+                temp_db = f"_rosetta_sandbox_{uuid.uuid4().hex[:8]}"
+            else:
+                temp_db = None
 
-            db = DBConnection(config, database)
+            target_db = temp_db if use_sandbox else database
+            db = DBConnection(config, target_db)
             # Register connection BEFORE connect so /api/stop can kill it
             # even if connect() itself is blocking
             with self._active_connections_lock:
@@ -710,40 +771,84 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
                                    "rows": None, "error": None,
                                    "affected_rows": 0,
                                    "elapsed_ms": 0}
-                    try:
-                        t0 = _time.monotonic()
-                        db.cursor.execute(sql)
-                        if db.cursor.description:
-                            stmt_result["columns"] = [
-                                desc[0]
-                                for desc in db.cursor.description
-                            ]
-                            rows = db.cursor.fetchall()
-                            stmt_result["rows"] = [
-                                [_format_val(c) for c in row]
-                                for row in rows
-                            ]
-                        else:
-                            stmt_result["affected_rows"] = (
-                                db.cursor.rowcount or 0)
-                        t1 = _time.monotonic()
-                        stmt_result["elapsed_ms"] = round(
-                            (t1 - t0) * 1000, 3)
-                    except Exception as e:
-                        t1 = _time.monotonic()
-                        # If cancelled, mark as cancelled rather than error
-                        if cancel.is_set():
-                            result["cancelled"] = True
-                            break
-                        stmt_result["error"] = str(e)
-                        error_code = None
-                        if hasattr(e, 'args') and e.args and isinstance(e.args[0], int):
-                            error_code = e.args[0]
-                        elif hasattr(e, 'errno'):
-                            error_code = getattr(e, 'errno')
-                        stmt_result["error_code"] = error_code
-                        stmt_result["elapsed_ms"] = round(
-                            (t1 - t0) * 1000, 3)
+
+                    # Multi-format EXPLAIN handling
+                    if is_explain_stmt(sql):
+                        variants = get_explain_variants(sql, config.protocol)
+                        explain_results = []
+                        total_elapsed = 0.0
+                        for variant in variants:
+                            if cancel.is_set():
+                                result["cancelled"] = True
+                                break
+                            vr = {"format": variant["format"],
+                                  "columns": None, "rows": None,
+                                  "error": None, "elapsed_ms": 0}
+                            try:
+                                t0 = _time.monotonic()
+                                db.cursor.execute(variant["sql"])
+                                if db.cursor.description:
+                                    vr["columns"] = [
+                                        desc[0]
+                                        for desc in db.cursor.description
+                                    ]
+                                    rows = db.cursor.fetchall()
+                                    vr["rows"] = [
+                                        [_format_val(c) for c in row]
+                                        for row in rows
+                                    ]
+                                vr["elapsed_ms"] = round(
+                                    (_time.monotonic() - t0) * 1000, 3)
+                            except Exception as e:
+                                vr["elapsed_ms"] = round(
+                                    (_time.monotonic() - t0) * 1000, 3)
+                                vr["error"] = str(e)
+                            total_elapsed += vr["elapsed_ms"]
+                            explain_results.append(vr)
+
+                        # Use first successful variant as main result
+                        for vr in explain_results:
+                            if not vr["error"]:
+                                stmt_result["columns"] = vr["columns"]
+                                stmt_result["rows"] = vr["rows"]
+                                break
+                        stmt_result["elapsed_ms"] = round(total_elapsed, 3)
+                        stmt_result["explain_formats"] = explain_results
+                    else:
+                        try:
+                            t0 = _time.monotonic()
+                            db.cursor.execute(sql)
+                            if db.cursor.description:
+                                stmt_result["columns"] = [
+                                    desc[0]
+                                    for desc in db.cursor.description
+                                ]
+                                rows = db.cursor.fetchall()
+                                stmt_result["rows"] = [
+                                    [_format_val(c) for c in row]
+                                    for row in rows
+                                ]
+                            else:
+                                stmt_result["affected_rows"] = (
+                                    db.cursor.rowcount or 0)
+                            t1 = _time.monotonic()
+                            stmt_result["elapsed_ms"] = round(
+                                (t1 - t0) * 1000, 3)
+                        except Exception as e:
+                            t1 = _time.monotonic()
+                            # If cancelled, mark as cancelled rather than error
+                            if cancel.is_set():
+                                result["cancelled"] = True
+                                break
+                            stmt_result["error"] = str(e)
+                            error_code = None
+                            if hasattr(e, 'args') and e.args and isinstance(e.args[0], int):
+                                error_code = e.args[0]
+                            elif hasattr(e, 'errno'):
+                                error_code = getattr(e, 'errno')
+                            stmt_result["error_code"] = error_code
+                            stmt_result["elapsed_ms"] = round(
+                                (t1 - t0) * 1000, 3)
 
                     result["statements"].append(stmt_result)
                     # Send per-statement progress update
@@ -755,6 +860,13 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
                         "stmt_total": total_stmts,
                     })
             finally:
+                # Sandbox cleanup: drop temp database
+                if use_sandbox and temp_db:
+                    try:
+                        db.cursor.execute(
+                            f"DROP DATABASE IF EXISTS `{temp_db}`")
+                    except Exception:
+                        pass
                 # Unregister and close
                 with self._active_connections_lock:
                     try:
@@ -839,12 +951,15 @@ class ReportServer:
                  configs: Optional[List[DBMSConfig]] = None,
                  all_configs: Optional[List[DBMSConfig]] = None,
                  database: str = "",
-                 baseline: str = ""):
+                 baseline: str = "",
+                 traceless: bool = True):
         self.directory = os.path.abspath(directory)
         self.port = port
         self.configs = configs or []
         self.all_configs = all_configs or self.configs
         self.database = database
+        self.baseline = baseline
+        self.traceless = traceless
         self.baseline = baseline
         self._server: Optional[http.server.HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -877,6 +992,7 @@ class ReportServer:
         _APIHandler._all_configs = self.all_configs
         _APIHandler._database = self.database
         _APIHandler._baseline = self.baseline
+        _APIHandler._traceless = self.traceless
         handler = lambda *a, **kw: _APIHandler(
             *a, directory=directory, **kw)
         self._server = _SilentHTTPServer(
@@ -2631,7 +2747,7 @@ class MtrInteractiveSession:
         _tty_watcher.start()
 
         with Live(_build_progress(), console=live_console,
-                  refresh_per_second=2, transient=False) as live:
+                  refresh_per_second=2, transient=True) as live:
             try:
                 with _cf.ThreadPoolExecutor(max_workers=len(modes_to_run)) as pool:
                     futures = {pool.submit(_run_single, m): m
@@ -2685,6 +2801,9 @@ class MtrInteractiveSession:
         if interrupted or _cancel.is_set():
             console.print("\n[yellow bold]MTR execution cancelled by user.[/yellow bold]\n")
             return
+
+        # Print final progress table (transient Live cleared it on exit)
+        live_console.print(_build_progress())
 
         # Summary table (same format as CLI)
         summary = Table(

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rosetta-sql"
-version = "1.3.0"
+version = "1.4.2"
 description = "Cross-DBMS SQL behavioral consistency verification tool"
 readme = "README.md"
 license = {text = "MIT"}
@@ -12,7 +12,7 @@ requires-python = ">=3.8"
 authors = [
     {name = "yangshijie"},
 ]
-keywords = ["sql", "database", "consistency", "testing", "benchmark", "mysql", "tdsql", "tidb", "oceanbase"]
+keywords = ["sql", "database", "consistency", "testing", "benchmark", "mysql", "tdsql", "tidb", "oceanbase", "oracle"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -30,6 +30,7 @@ dependencies = [
     "pymysql>=1.0",
     "rich>=13.0",
     "prompt_toolkit>=3.0.52",
+    "oracledb>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -45,3 +46,6 @@ Issues = "https://github.com/sjyango/rosetta/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
+
+[tool.setuptools.package-data]
+rosetta = ["config.sample.json"]

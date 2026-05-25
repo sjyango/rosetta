@@ -75,9 +75,6 @@ def handle_interactive(args, output: "OutputFormatter") -> CommandResult:
         _CONNECT_TIMEOUT = 10
 
         dbms_names = ", ".join(c.name for c in configs)
-        _status_console.print(
-            f"  [dim]Checking connectivity to "
-            f"[cyan]{dbms_names}[/cyan] ... (timeout {_CONNECT_TIMEOUT}s)[/dim]")
         _start_time = _time.time()
 
         def _quick_check(cfg):
@@ -86,42 +83,38 @@ def handle_interactive(args, output: "OutputFormatter") -> CommandResult:
 
         reachable = {}
         unreachable = {}
-        done_count = [0]
         total_count = len(configs)
-        with concurrent.futures.ThreadPoolExecutor(
-                max_workers=total_count) as pool:
-            futures = {pool.submit(_quick_check, c): c for c in configs}
-            try:
-                for fut in concurrent.futures.as_completed(
-                        futures, timeout=_CONNECT_TIMEOUT):
-                    ok, cfg = fut.result()
-                    done_count[0] += 1
-                    status_icon = "[green]✓[/green]" if ok else "[red]✗[/red]"
-                    elapsed = f"{_time.time() - _start_time:.1f}s"
-                    _status_console.print(
-                        f"  {status_icon} {cfg.name} ({cfg.host}:{cfg.port})  "
-                        f"[dim]{done_count[0]}/{total_count}  {elapsed}[/dim]")
-                    if ok:
-                        reachable[cfg.name] = cfg
-                    else:
-                        unreachable[cfg.name] = cfg
-            except concurrent.futures.TimeoutError:
-                for f in futures:
-                    if f.done():
-                        try:
-                            ok, cfg = f.result()
-                            if ok:
-                                reachable[cfg.name] = cfg
-                            else:
-                                unreachable[cfg.name] = cfg
-                        except Exception:
-                            pass
-                    else:
-                        cfg = futures[f]
-                        _status_console.print(
-                            f"  [yellow]⏳ {cfg.name} ({cfg.host}:{cfg.port})  "
-                            f"[dim]timed out[/dim]")
-                        unreachable[cfg.name] = cfg
+
+        with _status_console.status(
+            f"  [dim]Checking connectivity to "
+            f"[cyan]{dbms_names}[/cyan] ...[/dim]",
+            spinner="dots",
+        ):
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=total_count) as pool:
+                futures = {pool.submit(_quick_check, c): c for c in configs}
+                try:
+                    for fut in concurrent.futures.as_completed(
+                            futures, timeout=_CONNECT_TIMEOUT):
+                        ok, cfg = fut.result()
+                        if ok:
+                            reachable[cfg.name] = cfg
+                        else:
+                            unreachable[cfg.name] = cfg
+                except concurrent.futures.TimeoutError:
+                    for f in futures:
+                        if f.done():
+                            try:
+                                ok, cfg = f.result()
+                                if ok:
+                                    reachable[cfg.name] = cfg
+                                else:
+                                    unreachable[cfg.name] = cfg
+                            except Exception:
+                                pass
+                        else:
+                            cfg = futures[f]
+                            unreachable[cfg.name] = cfg
 
         elapsed_total = f"{_time.time() - _start_time:.1f}s"
 
@@ -135,8 +128,8 @@ def handle_interactive(args, output: "OutputFormatter") -> CommandResult:
                 + "\n".join(lines) +
                 "\n\nTo disable a DBMS, set \"enabled\": false in config.")
         _status_console.print(
-            f"  [dim][bold green]All {len(reachable)} DBMS ready[/bold green] "
-            f"in {elapsed_total}[/dim]\n")
+            f"  [green]✓[/green] [bold green]{len(reachable)} DBMS ready[/bold green]"
+            f"  [dim]{elapsed_total}[/dim]")
         configs = list(reachable.values())
 
     else:
@@ -144,10 +137,6 @@ def handle_interactive(args, output: "OutputFormatter") -> CommandResult:
         _CONNECT_TIMEOUT = 8
 
         all_enabled_names = ", ".join(c.name for c in enabled_configs)
-        _status_console.print(
-            f"  [dim]Scanning enabled DBMS "
-            f"([cyan]{all_enabled_names}[/cyan]) ... "
-            f"(timeout {_CONNECT_TIMEOUT}s)[/dim]")
         _start_time = _time.time()
 
         def _quick_check(cfg):
@@ -157,30 +146,33 @@ def handle_interactive(args, output: "OutputFormatter") -> CommandResult:
         unreachable_enabled = []   # enabled but down → warning
         done_count = [0]
         total_count = len(enabled_configs)
-        with concurrent.futures.ThreadPoolExecutor(
-                max_workers=total_count) as pool:
-            futures = {pool.submit(_quick_check, c): c for c in enabled_configs}
-            try:
-                for fut in concurrent.futures.as_completed(
-                        futures, timeout=_CONNECT_TIMEOUT):
-                    ok, cfg = fut.result()
-                    done_count[0] += 1
-                    elapsed = f"{_time.time() - _start_time:.1f}s"
-                    if ok:
-                        _status_console.print(
-                            f"  [green]✓[/green] {cfg.name} "
-                            f"({cfg.host}:{cfg.port})  "
-                            f"[dim]{done_count[0]}/{total_count}  {elapsed}[/dim]")
-                        reachable_configs.append(cfg)
-                    else:
-                        _status_console.print(
-                            f"  [red]✗[/red] {cfg.name} "
-                            f"({cfg.host}:{cfg.port})  "
-                            f"[dim]{done_count[0]}/{total_count}  {elapsed}"
-                            f"  [yellow](enabled but down)[/])")
-                        unreachable_enabled.append(cfg)
-            except concurrent.futures.TimeoutError:
-                pass  # use whatever we have
+
+        with _status_console.status(
+            f"  [dim]Scanning enabled DBMS "
+            f"([cyan]{all_enabled_names}[/cyan]) ... "
+            f"(timeout {_CONNECT_TIMEOUT}s)[/dim]",
+            spinner="dots",
+        ) as status:
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=total_count) as pool:
+                futures = {pool.submit(_quick_check, c): c for c in enabled_configs}
+                try:
+                    for fut in concurrent.futures.as_completed(
+                            futures, timeout=_CONNECT_TIMEOUT):
+                        ok, cfg = fut.result()
+                        done_count[0] += 1
+                        if ok:
+                            reachable_configs.append(cfg)
+                        else:
+                            unreachable_enabled.append(cfg)
+                        # Update spinner text with progress
+                        remaining = total_count - done_count[0]
+                        if remaining > 0:
+                            status.update(
+                                f"  [dim]Scanning enabled DBMS ... "
+                                f"{done_count[0]}/{total_count} checked[/dim]")
+                except concurrent.futures.TimeoutError:
+                    pass  # use whatever we have
 
         elapsed_total = f"{_time.time() - _start_time:.1f}s"
 
@@ -201,15 +193,12 @@ def handle_interactive(args, output: "OutputFormatter") -> CommandResult:
         if unreachable_enabled:
             down_names = [f"{c.name}" for c in unreachable_enabled]
             _status_console.print(
-                f"  [yellow]⚠ Warning:[/yellow] The following enabled DBMS "
-                f"are down: [red]{', '.join(down_names)}[/red]")
-            _status_console.print(
-                f"  [dim]Set \"enabled\": false to skip them permanently.[/dim]")
+                f"  [yellow]⚠[/yellow] Down: [red]{', '.join(down_names)}[/red]")
 
         detected_names = ", ".join(c.name for c in reachable_configs)
         _status_console.print(
-            f"  [dim][bold green]{len(reachable_configs)} DBMS ready[/bold green]: "
-            f"[cyan]{detected_names}[/cyan]  {elapsed_total}\n")
+            f"  [green]✓[/green] [bold green]{len(reachable_configs)} DBMS ready[/bold green]: "
+            f"[cyan]{detected_names}[/cyan]  [dim]{elapsed_total}[/dim]")
 
         configs = reachable_configs
     
