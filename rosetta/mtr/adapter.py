@@ -66,6 +66,8 @@ class RosettaDBConnector:
             user=user or self.config.user,
             password=password or self.config.password,
             driver=self.config.driver,
+            protocol=self.config.protocol,
+            service_name=self.config.service_name,
             skip_patterns=self.config.skip_patterns,
             init_sql=self.config.init_sql,
         )
@@ -197,7 +199,8 @@ def run_mtr_test(test_file_path: str, config: DBMSConfig,
                  database: str = "test_mtr",
                  mysql_test_dir: Optional[str] = None,
                  abort_on_error: bool = True,
-                 on_progress=None) -> Any:
+                 on_progress=None,
+                 ignore_skip: bool = False) -> Any:
     """Convenience function to run an MTR test file against a DBMS.
 
     This is the simplest way to use the new MTR module with
@@ -240,7 +243,8 @@ def run_mtr_test(test_file_path: str, config: DBMSConfig,
     connector = RosettaDBConnector(config, database)
     executor = MtrExecutor(connector, mysql_test_dir=mysql_test_dir,
                            abort_on_error=abort_on_error,
-                           on_progress=on_progress)
+                           on_progress=on_progress,
+                           ignore_skip=ignore_skip)
 
     # Set up the default connection
     connector.setup_default_connection(executor)

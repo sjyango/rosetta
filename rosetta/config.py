@@ -20,13 +20,18 @@ def load_config(config_path: str) -> List[DBMSConfig]:
 
     configs = []
     for entry in data.get("databases", []):
+        protocol = entry.get("type", "") or entry.get("protocol", "mysql")
+        default_port = 1521 if protocol == "oracle" else 3306
+        default_driver = "oracledb" if protocol == "oracle" else "pymysql"
         configs.append(DBMSConfig(
             name=entry.get("name", "unknown"),
             host=entry.get("host", "127.0.0.1"),
-            port=entry.get("port", 3306),
+            port=entry.get("port", default_port),
             user=entry.get("user", "root"),
             password=entry.get("password", ""),
-            driver=entry.get("driver", "pymysql"),
+            driver=entry.get("driver", default_driver),
+            protocol=protocol,
+            service_name=entry.get("service_name", ""),
             skip_patterns=entry.get("skip_patterns", []),
             init_sql=entry.get("init_sql", []),
             enabled=entry.get("enabled", True),
@@ -79,3 +84,21 @@ def generate_sample_config(path: str):
     """Copy the bundled sample config to *path*."""
     shutil.copy2(SAMPLE_CONFIG_FILE, path)
     log.info("Sample config written to: %s", path)
+
+
+def load_raw_config(config_path: str) -> dict:
+    """Load raw JSON config as a dict (preserving mtr section)."""
+    with open(config_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_config(config_path: str, data: dict):
+    """Save configuration dict back to JSON file.
+
+    Args:
+        config_path: Path to config.json file.
+        data: Full config dict with "databases" and optionally "mtr" keys.
+    """
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    log.info("Config saved to: %s", config_path)

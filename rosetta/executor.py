@@ -26,11 +26,26 @@ except ImportError:
 else:
     pymysql_available = True
 
+try:
+    import oracledb
+except ImportError:
+    oracledb_available = False
+else:
+    oracledb_available = True
+
 
 def format_cell(value) -> str:
     """Format a single cell value for output."""
     if value is None:
         return "NULL"
+    if hasattr(value, 'read'):
+        # Oracle LOB types (CLOB, BLOB) have a .read() method
+        content = value.read()
+        if content is None:
+            return "NULL"
+        if isinstance(content, bytes):
+            return content.decode("utf-8", errors="replace")
+        return str(content)
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     if isinstance(value, bool):
@@ -86,11 +101,12 @@ def format_result(stmt: Statement, result: StmtResult,
 
 
 class DBConnection:
-    """Wraps a MySQL-protocol database connection."""
+    """Wraps a database connection (MySQL or Oracle protocol)."""
 
     def __init__(self, config: DBMSConfig, database: str):
         self.config = config
         self.database = database
+        self.protocol = config.protocol  # "mysql" | "tdsql" | "tidb" | "oceanbase" | "oracle"
         self.conn = None
         self.cursor = None
         self._query_timeout = 0
@@ -110,6 +126,14 @@ class DBConnection:
         """
         if query_timeout >= 0:
             self._query_timeout = query_timeout
+
+        if self.protocol == "oracle":
+            self._connect_oracle()
+        else:
+            self._connect_mysql()
+
+    def _connect_mysql(self):
+        """Establish a MySQL-protocol connection."""
         qt = self._query_timeout
         kwargs = dict(
             host=self.config.host,
@@ -159,6 +183,7 @@ class DBConnection:
             self.cursor.execute(f"USE `{self.database}`")
 
         # Set query timeout at database level
+        qt = self._query_timeout
         if qt > 0:
             timeout_ms = qt * 1000
             # Try different timeout settings for various DBMS
@@ -170,6 +195,50 @@ class DBConnection:
                     self.cursor.execute(sql)
                 except Exception:
                     pass  # Ignore if not supported
+
+        for sql in self.config.init_sql:
+            try:
+                self.cursor.execute(sql)
+            except Exception as e:
+                log.warning("[%s] init_sql failed: %s — %s",
+                            self.config.name, sql, e)
+
+    def _connect_oracle(self):
+        """Establish an Oracle-protocol connection."""
+        if not oracledb_available:
+            raise ImportError(
+                "python-oracledb is not installed. "
+                "Install via: pip install oracledb"
+            )
+
+        # Use service_name from config; fall back to database name
+        svc = self.config.service_name or self.database
+        dsn = oracledb.makedsn(
+            self.config.host,
+            self.config.port,
+            service_name=svc,
+        )
+        self.conn = oracledb.connect(
+            user=self.config.user,
+            password=self.config.password,
+            dsn=dsn,
+            tcp_connect_timeout=10,
+        )
+        self.conn.autocommit = True
+        self.cursor = self.conn.cursor()
+
+        # If database differs from service_name, switch schema
+        if self.database and self.database.upper() != svc.upper():
+            try:
+                self.cursor.execute(
+                    f'ALTER SESSION SET CURRENT_SCHEMA = '
+                    f'"{self.database.upper()}"'
+                )
+            except Exception:
+                log.warning("[%s] Could not set schema to '%s'",
+                            self.config.name, self.database)
+
+        # No max_execution_time equivalent for Oracle (uses resource profiles)
 
         for sql in self.config.init_sql:
             try:
@@ -202,8 +271,23 @@ class DBConnection:
         err_str = str(err)
         code = (getattr(err, 'args', (None,))[0]
                 if hasattr(err, 'args') else None)
-        if code in (0, 2006, 2013):
-            return True
+
+        if self.protocol == "oracle":
+            # ORA-03113: end-of-file on communication channel
+            # ORA-03114: not connected to ORACLE
+            # ORA-12571: TNS:packet writer failure
+            # ORA-01012: not logged on
+            oracle_lost_codes = {3113, 3114, 12571, 1012}
+            if isinstance(code, int) and code in oracle_lost_codes:
+                return True
+            for oc in ("ORA-03113", "ORA-03114", "ORA-12571", "ORA-01012"):
+                if oc in err_str:
+                    return True
+        else:
+            if code in (0, 2006, 2013):
+                return True
+
+        # Common heuristics (both protocols)
         if "Lost connection" in err_str or "gone away" in err_str:
             return True
         if "Connection refused" in err_str:
@@ -232,6 +316,21 @@ class DBConnection:
         log.error("[%s] All reconnect attempts failed", self.config.name)
         return False
 
+    def _switch_database_after_reconnect(self):
+        """Re-select the working database/schema after a reconnect."""
+        try:
+            if self.protocol == "oracle":
+                svc = self.config.service_name or self.database
+                if self.database and self.database.upper() != svc.upper():
+                    self.cursor.execute(
+                        f'ALTER SESSION SET CURRENT_SCHEMA = '
+                        f'"{self.database.upper()}"'
+                    )
+            else:
+                self.cursor.execute(f"USE `{self.database}`")
+        except Exception:
+            pass
+
     def execute(self, sql: str, sort_result: bool = False) -> StmtResult:
         """Execute a SQL statement and capture the result."""
         result = StmtResult(stmt=Statement(StmtType.SQL, sql, 0))
@@ -249,15 +348,17 @@ class DBConnection:
             else:
                 result.affected_rows = self.cursor.rowcount or 0
 
-            try:
-                self.cursor.execute("SHOW WARNINGS")
-                warns = self.cursor.fetchall()
-                if warns:
-                    result.warnings = [
-                        f"{w[0]}\t{w[1]}\t{w[2]}" for w in warns
-                    ]
-            except Exception:
-                pass
+            # SHOW WARNINGS — MySQL-wire-protocol only (skip Oracle)
+            if self.protocol != "oracle":
+                try:
+                    self.cursor.execute("SHOW WARNINGS")
+                    warns = self.cursor.fetchall()
+                    if warns:
+                        result.warnings = [
+                            f"{w[0]}\t{w[1]}\t{w[2]}" for w in warns
+                        ]
+                except Exception:
+                    pass
 
         except Exception as e:
             result.error = str(e)
@@ -265,10 +366,7 @@ class DBConnection:
                 log.warning("[%s] Connection lost, attempting reconnect...",
                             self.config.name)
                 if self.reconnect():
-                    try:
-                        self.cursor.execute(f"USE `{self.database}`")
-                    except Exception:
-                        pass
+                    self._switch_database_after_reconnect()
 
         return result
 
@@ -293,6 +391,13 @@ class DBConnection:
             StmtResult with error set if timed out, else success.
         """
         result = StmtResult(stmt=Statement(StmtType.DDL_WAIT, "", 0))
+
+        # DDL recovery polling uses information_schema.ddl_jobs — MySQL/TiDB only
+        if self.protocol == "oracle":
+            log.debug("[%s] DDL wait skipped (not applicable for Oracle)",
+                      self.config.name)
+            return result
+
         start = time.time()
 
         while True:
@@ -352,10 +457,7 @@ class DBConnection:
                     log.warning("[%s] Connection lost during DDL wait, "
                                 "reconnecting...", self.config.name)
                     if self.reconnect():
-                        try:
-                            self.cursor.execute(f"USE `{self.database}`")
-                        except Exception:
-                            pass
+                        self._switch_database_after_reconnect()
                     time.sleep(poll_interval)
                     continue
                 # Non-connection error — the DBMS might not support

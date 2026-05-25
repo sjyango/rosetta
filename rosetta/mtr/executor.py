@@ -114,7 +114,8 @@ class MtrExecutor:
                  mysql_test_dir: Optional[str] = None,
                  vardir: Optional[str] = None,
                  abort_on_error: Optional[bool] = None,
-                 on_progress: Optional[Callable] = None):
+                 on_progress: Optional[Callable] = None,
+                 ignore_skip: bool = False):
         """Initialize the executor.
 
         Args:
@@ -126,10 +127,14 @@ class MtrExecutor:
                 False: log errors and continue (cross-DBMS compare mode).
             on_progress: Optional callback invoked after each command.
                 Signature: on_progress(commands_executed: int, has_error: bool)
+            ignore_skip: If True, --skip directives are ignored and execution
+                continues. Used in cross-DBMS mode for non-baseline DBMS where
+                tdsql-specific precondition checks would incorrectly skip.
         """
         self._connector = connector
         self._mysql_test_dir = mysql_test_dir
         self._vardir = vardir or tempfile.mkdtemp(prefix="mtr_")
+        self._ignore_skip = ignore_skip
 
         # Runtime components
         self._variables = VariableStore()
@@ -142,6 +147,9 @@ class MtrExecutor:
 
         # Progress callback
         self._on_progress = on_progress
+
+        # Cancellation flag (set externally to stop execution)
+        self._cancelled = False
 
         # Output buffer
         self._output: List[str] = []
@@ -167,6 +175,10 @@ class MtrExecutor:
     def result_processor(self) -> ResultProcessor:
         """Access the result processor."""
         return self._result_processor
+
+    def cancel(self):
+        """Signal the executor to stop execution at the next command."""
+        self._cancelled = True
 
     def execute(self, test_file: MtrTestFile) -> ExecutionResult:
         """Execute a complete parsed test file.
@@ -217,6 +229,8 @@ class MtrExecutor:
     def _execute_commands(self, commands: List[MtrCommand]) -> None:
         """Execute a list of commands sequentially."""
         for cmd in commands:
+            if self._cancelled:
+                break
             if self._state.skip_remaining:
                 break
             self._execute_command(cmd)
@@ -260,7 +274,17 @@ class MtrExecutor:
         # Notify progress callback
         if self._on_progress:
             try:
-                self._on_progress(self._commands_executed, had_error)
+                # Pass current command info for live display
+                cmd_info = ""
+                if cmd.cmd_type == MtrCommandType.SQL and cmd.argument:
+                    cmd_info = cmd.argument.strip().replace("\n", " ")
+                self._on_progress(self._commands_executed, had_error, cmd_info)
+            except TypeError:
+                # Fallback for old-style callbacks without cmd_info
+                try:
+                    self._on_progress(self._commands_executed, had_error)
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -762,6 +786,9 @@ class MtrExecutor:
 
     def _handle_skip(self, cmd: MtrCommand) -> None:
         msg = self._variables.substitute(cmd.skip_message)
+        if self._ignore_skip:
+            self._output.append(f"# [SKIP IGNORED] {msg}")
+            return
         raise MtrTestSkipped(msg)
 
     # External command handlers

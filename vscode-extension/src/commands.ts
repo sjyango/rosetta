@@ -405,7 +405,7 @@ export function registerCommands(
     // -----------------------------------------------------------------
     reg('rosetta.showReportFile', (htmlPath?: string, title?: string) => {
         if (htmlPath && fs.existsSync(htmlPath)) {
-            showReportWebview(htmlPath, title ?? 'Rosetta Report');
+            showReportWebview(htmlPath, title ?? 'Rosetta MTR Report');
         } else {
             vscode.window.showWarningMessage(
                 `Report file not found: ${htmlPath ?? 'unknown'}`,

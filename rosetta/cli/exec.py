@@ -114,23 +114,34 @@ def handle_exec(args, output: "OutputFormatter") -> CommandResult:
             conn = None
             cursor = None
             try:
-                connect_kwargs = dict(
-                    host=config.host,
-                    port=config.port,
-                    user=config.user,
-                    password=config.password,
-                    connect_timeout=10,
-                )
-                if config.driver == "mysql.connector":
-                    import mysql.connector
-                    connect_kwargs["allow_local_infile"] = True
-                    conn = mysql.connector.connect(**connect_kwargs)
+                protocol = getattr(config, 'protocol', 'mysql')
+                if protocol == "oracle":
+                    import oracledb
+                    svc = getattr(config, 'service_name', '') or config.name
+                    dsn = oracledb.makedsn(config.host, config.port,
+                                           service_name=svc)
+                    conn = oracledb.connect(
+                        user=config.user, password=config.password, dsn=dsn)
+                    conn.autocommit = True
+                    cursor = conn.cursor()
                 else:
-                    import pymysql
-                    connect_kwargs["local_infile"] = True
-                    conn = pymysql.connect(**connect_kwargs)
-                conn.autocommit = True
-                cursor = conn.cursor()
+                    connect_kwargs = dict(
+                        host=config.host,
+                        port=config.port,
+                        user=config.user,
+                        password=config.password,
+                        connect_timeout=10,
+                    )
+                    if config.driver == "mysql.connector":
+                        import mysql.connector
+                        connect_kwargs["allow_local_infile"] = True
+                        conn = mysql.connector.connect(**connect_kwargs)
+                    else:
+                        import pymysql
+                        connect_kwargs["local_infile"] = True
+                        conn = pymysql.connect(**connect_kwargs)
+                    conn.autocommit = True
+                    cursor = conn.cursor()
             except Exception as e:
                 result["error"] = f"Connection failed: {str(e)}"
                 return result

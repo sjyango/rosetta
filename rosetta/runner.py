@@ -256,6 +256,7 @@ class RosettaRunner:
                 "elapsed": 0.0,
                 "start_time": None,
                 "last_status": "",
+                "current_sql": "",
             }
             for c in configs
         }
@@ -266,17 +267,17 @@ class RosettaRunner:
             table = Table(
                 show_header=True,
                 header_style="bold cyan",
-                expand=False,
+                expand=True,
                 padding=(0, 1),
                 box=box.ROUNDED,
-                width=None,
                 show_edge=True,
                 show_lines=False,
             )
-            table.add_column("DBMS", style="bold", min_width=10)
-            table.add_column("Progress", min_width=42)
-            table.add_column("Elapsed", justify="right", min_width=7)
-            table.add_column("Status", max_width=25, overflow="ellipsis")
+            table.add_column("DBMS", style="bold", width=10, no_wrap=True)
+            table.add_column("Progress", width=24, no_wrap=True)
+            table.add_column("Elapsed", justify="right", width=7, no_wrap=True)
+            table.add_column("Status", width=8, no_wrap=True, overflow="ellipsis")
+            table.add_column("Current SQL", ratio=1, overflow="ellipsis", style="dim", no_wrap=True)
 
             for c in configs:
                 st = dbms_state[c.name]
@@ -299,8 +300,8 @@ class RosettaRunner:
                 if st["status"] == "waiting":
                     progress = Text("⏳ Waiting", style="dim")
                 elif st["status"] == "running":
-                    bar_filled = int(pct / 5)  # 20-char bar
-                    bar_empty = 20 - bar_filled
+                    bar_filled = int(pct * 15 // 100)  # 15-char bar
+                    bar_empty = 15 - bar_filled
                     bar_str = f"[yellow]{'█' * bar_filled}{'░' * bar_empty}[/yellow] {pct}%"
                     progress = Text.from_markup(bar_str)
                 elif st["status"] == "done":
@@ -314,9 +315,18 @@ class RosettaRunner:
                 # Status text
                 status_text = st.get("last_status", "")
 
-                table.add_row(c.name, progress, elapsed_str, status_text)
+                # Current SQL (only show when running)
+                current_sql = ""
+                if st["status"] == "running":
+                    current_sql = st.get("current_sql", "")
+
+                table.add_row(c.name, progress, elapsed_str, status_text, current_sql)
 
             return table
+
+        # Track active executors for cancellation on Ctrl+C
+        active_executors = []
+        active_executors_lock = threading.Lock()
 
         def _run_single(config):
             """Execute on one DBMS using the new MTR engine."""
@@ -329,7 +339,7 @@ class RosettaRunner:
                                                database=self.database)
 
                 # Progress callback for the executor
-                def _on_mtr_progress(executed, has_error, _name=config.name):
+                def _on_mtr_progress(executed, has_error, cmd_info="", _name=config.name):
                     with state_lock:
                         st = dbms_state[_name]
                         st["executed"] = executed
@@ -339,12 +349,18 @@ class RosettaRunner:
                             st["progress"] = min(int(executed / n_cmds * 100), 100)
                         err_str = f" ({st['errors']} err)" if st["errors"] else ""
                         st["last_status"] = f"{executed}/{n_cmds}{err_str}"
+                        if cmd_info:
+                            st["current_sql"] = cmd_info
 
                 executor = MtrExecutor(connector,
                                        mysql_test_dir=mysql_test_dir,
                                        abort_on_error=False,
-                                       on_progress=_on_mtr_progress)
+                                       on_progress=_on_mtr_progress,
+                                       ignore_skip=(config.name != self.baseline))
                 connector.setup_default_connection(executor)
+
+                with active_executors_lock:
+                    active_executors.append(executor)
 
                 result = executor.execute(test)
 
@@ -415,24 +431,50 @@ class RosettaRunner:
                         max_workers=len(configs)) as pool:
                     futures = {pool.submit(_run_single, c): c for c in configs}
 
+                    interrupted = False
                     while True:
-                        done_futures = {f for f in futures if f.done()}
-                        live.update(_build_progress_table())
-                        if len(done_futures) == len(futures):
+                        try:
+                            done_futures = {f for f in futures if f.done()}
+                            live.update(_build_progress_table())
+                            if len(done_futures) == len(futures):
+                                break
+                            _time.sleep(0.5)
+                        except KeyboardInterrupt:
+                            interrupted = True
+                            # Cancel all active executors (stops SQL execution)
+                            with active_executors_lock:
+                                for exc in active_executors:
+                                    exc.cancel()
+                            # Cancel pending futures
+                            for f in futures:
+                                f.cancel()
+                            # Update status for running DBMS
+                            with state_lock:
+                                for name, st in dbms_state.items():
+                                    if st["status"] == "running":
+                                        st["status"] = "done"
+                                        st["last_status"] = "CANCELLED"
+                                        st["progress"] = 100
+                            live.update(_build_progress_table())
                             break
-                        _time.sleep(0.5)
 
                     for fut in futures:
                         try:
-                            name, output = fut.result()
-                            if output is None:
-                                self.failed_connections.add(name)
-                            else:
-                                self.results[name] = output
+                            if fut.done() and not fut.cancelled():
+                                name, output = fut.result()
+                                if output is None:
+                                    self.failed_connections.add(name)
+                                else:
+                                    self.results[name] = output
                         except Exception as e:
                             m = futures[fut]
                             self.failed_connections.add(m.name)
                             log.error("MTR execution failed for %s: %s", m.name, e)
+
+                    if interrupted:
+                        live_console.print(
+                            "\n  [yellow]⚠ Interrupted by Ctrl+C. "
+                            "Partial results collected.[/yellow]\n")
 
         finally:
             # Restore stderr and logging handlers after Live progress display ends
@@ -2602,6 +2644,7 @@ def _select_mode(configs, database: str,
         ("test",       "Test mode",       "run .test compatibility tests"),
         ("playground", "Playground mode",  "run SQL Playground in browser"),
         ("bench",      "Benchmark mode",   "run JSON performance benchmarks"),
+        ("config",     "Config",           "edit database and MTR settings"),
         (None,         "Quit",             "exit"),
     ]
 
@@ -2714,6 +2757,7 @@ def _select_mode(configs, database: str,
         "test": 2,         # cross-DBMS comparison needs at least 2
         "playground": 2,   # cross-DBMS comparison needs at least 2
         "bench": 2,        # cross-DBMS comparison needs at least 2
+        "config": 0,       # config editing doesn't need DBMS
     }
     warn_msg = [""]  # mutable warning message shown in UI
 
@@ -2738,8 +2782,8 @@ def _select_mode(configs, database: str,
                     f"{min_req} DBMS ({len(selected)} selected)")
             event.app.invalidate()
             return
-        # Baseline DBMS must be selected and reachable
-        if baseline:
+        # Baseline DBMS must be selected and reachable (skip for config mode)
+        if key != "config" and baseline:
             selected_names = {c.name for c in selected}
             if baseline not in selected_names:
                 warn_msg[0] = (
@@ -2776,6 +2820,7 @@ def _select_mode(configs, database: str,
         "test":       "Run .test files against multiple DBs and diff results",
         "playground": "Launch an interactive SQL playground in the browser",
         "bench":      "Compare query performance with latency/QPS reports",
+        "config":     "Edit database connections and MTR parameters",
         None:         "Exit Rosetta",
     }
     DBMS_HINT = "Use Space to toggle, Baseline (*) must stay selected."
@@ -3020,10 +3065,651 @@ def _select_mode(configs, database: str,
             lines.append(("dim", "   Playground: "))
             lines.append(("dim", f"{server_url}/playground.html\n"))
 
+        # Config path
+        from .paths import CONFIG_FILE
+        lines.append(("dim", f"   Config:     {CONFIG_FILE}\n"))
+
         return lines
 
-    ctrl = FormattedTextControl(_get_content)
-    menu = Window(content=ctrl, dont_extend_height=True)
+    # Place cursor at last line so prompt_toolkit scrolls to show full content.
+    from prompt_toolkit.data_structures import Point
+
+    def _get_cursor_pos():
+        content = _get_content()
+        total_lines = sum(1 for _, text in content if '\n' in text)
+        return Point(0, max(0, total_lines - 1))
+
+    ctrl = FormattedTextControl(_get_content, get_cursor_position=_get_cursor_pos,
+                                show_cursor=False)
+    menu = Window(content=ctrl)
+
+    app: Application = Application(
+        layout=Layout(HSplit([menu])),
+        key_bindings=kb,
+        full_screen=True,
+    )
+
+    app.run()
+
+    return tuple(result)
+
+
+
+def _select_config_editor(config_path: str) -> Optional[str]:
+    """Interactive config editor with tabbed navigation.
+
+    First layer: Tabs for each DBMS + MTR + Global (←→ to switch)
+    Second layer: Config fields within selected tab (↑↓ to navigate)
+
+    Returns "saved" if user saved changes, "back" if discarded, None if quit.
+    """
+    import json
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.utils import get_cwidth
+
+    from .config import load_raw_config, save_config
+
+    # Load current config
+    raw_config = load_raw_config(config_path)
+    databases = raw_config.get("databases", [])
+    mtr_config = raw_config.get("mtr", {})
+
+    # ── Build tab structure ──
+    # Each tab: {"name": str, "fields": [{"key", "type", "value", "hint", "label"}]}
+    tabs = []
+
+    DBMS_FIELDS = [
+        ("type",         "text",   "DBMS type: mysql, tdsql, tidb, oceanbase, oracle"),
+        ("host",         "text",   "Server hostname or IP address"),
+        ("port",         "number", "Server port number"),
+        ("user",         "text",   "Database username"),
+        ("password",     "text",   "Database password"),
+        ("driver",       "text",   "Python driver (pymysql / mysql.connector / oracledb)"),
+        ("service_name", "text",   "Oracle service name (e.g. orclpdb1)"),
+        ("enabled",      "toggle", "Whether this DBMS is active"),
+    ]
+
+    for db_idx, db in enumerate(databases):
+        tab_fields = []
+        db_type = db.get("type", "") or db.get("protocol", "mysql")
+        for key, ftype, hint in DBMS_FIELDS:
+            # Hide service_name for MySQL protocol configs
+            if key == "service_name" and db_type != "oracle":
+                continue
+            tab_fields.append({
+                "key": key, "type": ftype, "hint": hint,
+                "label": key.replace("_", " ").capitalize(),
+                "value": db.get(key, "" if ftype == "text" else (0 if ftype == "number" else True)),
+                "db_idx": db_idx,
+            })
+        tabs.append({"name": db.get("name", f"db{db_idx}"), "fields": tab_fields})
+
+    # MTR tab
+    MTR_FIELDS = [
+        ("test_dir",         "text",   "Path to mysql-test directory"),
+        ("skip_list",        "text",   "Path to skip list file (.def)"),
+        ("mysqld_opts",      "list",   "MySQL server options (one per line)"),
+        ("parallel",         "number", "Number of parallel MTR workers"),
+        ("retry",            "number", "Retry count for failed tests"),
+        ("retry_failure",    "number", "Retry count for test failures"),
+        ("max_test_fail",    "number", "Maximum allowed test failures"),
+        ("testcase_timeout", "number", "Timeout per test case (seconds)"),
+        ("suite_timeout",    "number", "Timeout per suite (seconds)"),
+        ("base_port",        "number", "Base port for MTR execution"),
+        ("total_port",       "number", "Total port range for MTR"),
+    ]
+    mtr_tab_fields = []
+    for key, ftype, hint in MTR_FIELDS:
+        raw_val = mtr_config.get(key, "" if ftype == "text" else ([] if ftype == "list" else 0))
+        if ftype == "list":
+            # Store list as newline-joined string for display/edit
+            display_val = ", ".join(raw_val) if isinstance(raw_val, list) else str(raw_val)
+        else:
+            display_val = raw_val
+        mtr_tab_fields.append({
+            "key": key, "type": ftype, "hint": hint,
+            "label": key.replace("_", " ").capitalize(),
+            "value": display_val,
+            "db_idx": None,
+        })
+    tabs.append({"name": "MTR", "fields": mtr_tab_fields})
+
+    # Global tab
+    playground_config = raw_config.get("playground", {})
+    global_fields = [
+        {"key": "baseline", "type": "text", "hint": "Baseline DBMS for comparisons",
+         "label": "Baseline", "value": raw_config.get("baseline", "tdsql"), "db_idx": None},
+        {"key": "traceless", "type": "toggle", "hint": "Auto-create temp DB per execution, drop after done",
+         "label": "Traceless", "value": playground_config.get("traceless", True), "db_idx": None},
+    ]
+    tabs.append({"name": "Global", "fields": global_fields})
+
+    # ── State ──
+    cur_tab = [0]
+    cur_field = [0]  # per-tab cursor (reset when switching tabs)
+    focus_level = [0]  # 0 = tab bar, 1 = field list, 2 = list editor
+    editing = [False]
+    edit_buf = [""]
+    result_val = [None]
+    saved_msg = [""]
+    # List editor state
+    list_items = [[]]   # current list being edited (mutable copy)
+    list_cursor = [0]   # cursor within expanded list
+    list_editing = [False]  # typing new/edit value for a list item
+
+    _CFG_BOX_W = 80
+
+    def _dw(s):
+        return sum(get_cwidth(ch) for ch in s)
+
+    def _box_top():
+        return ("dim cyan", "  \u256d" + "\u2500" * _CFG_BOX_W + "\u256e\n")
+
+    def _box_mid():
+        return ("dim cyan", "  \u251c" + "\u2500" * _CFG_BOX_W + "\u2524\n")
+
+    def _box_bot():
+        return ("dim cyan", "  \u2570" + "\u2500" * _CFG_BOX_W + "\u256f\n")
+
+    def _box_row(fragments):
+        vis_w = sum(_dw(t) for _, t in fragments)
+        if vis_w > _CFG_BOX_W:
+            overflow = vis_w - _CFG_BOX_W
+            trimmed = list(fragments)
+            for idx in range(len(trimmed) - 1, -1, -1):
+                style, text = trimmed[idx]
+                tw = _dw(text)
+                if tw >= overflow:
+                    while overflow > 0 and text:
+                        overflow -= _dw(text[-1])
+                        text = text[:-1]
+                    trimmed[idx] = (style, text)
+                    break
+                else:
+                    overflow -= tw
+                    trimmed[idx] = (style, "")
+            fragments = trimmed
+            vis_w = sum(_dw(t) for _, t in fragments)
+        pad = max(0, _CFG_BOX_W - vis_w)
+        r = [("dim cyan", "  \u2502")]
+        r.extend(fragments)
+        r.append(("", " " * pad))
+        r.append(("dim cyan", "\u2502\n"))
+        return r
+
+    def _cur_tab_fields():
+        """Fields for current tab + Save/Back/Quit actions."""
+        return tabs[cur_tab[0]]["fields"]
+
+    def _total_items():
+        """Total selectable items (fields + 3 actions)."""
+        return len(_cur_tab_fields()) + 3
+
+    def _get_text():
+        lines = []
+
+        # Logo
+        lines.append(("", "\n"))
+        for logo_line in LOGO_LINES:
+            lines.append(("bold cyan", f"    {logo_line}\n"))
+        lines.append(("", "\n"))
+        from . import __version__
+        lines.append(("dim", f"  {LOGO_SUBTITLE}"))
+        lines.append(("dim", f"  v{__version__}"))
+        lines.append(("bold white", "  Config Editor\n"))
+        lines.append(("", "\n"))
+
+        # ── Tab bar (first layer, inside box) ──
+        lines.append(_box_top())
+        tab_frags = [("", "  ")]
+        for i, tab in enumerate(tabs):
+            is_active = (i == cur_tab[0])
+            if is_active and focus_level[0] == 0:
+                # Focused on tab bar, current tab highlighted
+                tab_frags.append(("bold reverse fg:ansicyan", f" {tab['name']} "))
+            elif is_active:
+                # Tab bar not focused, but this is the selected tab
+                tab_frags.append(("bold bg:ansicyan fg:ansiblack", f" {tab['name']} "))
+            else:
+                tab_frags.append(("dim", f" {tab['name']} "))
+            if i < len(tabs) - 1:
+                tab_frags.append(("dim", " "))
+        lines.extend(_box_row(tab_frags))
+        lines.append(_box_mid())
+
+        # Edit mode
+        if editing[0]:
+            idx = cur_field[0]
+            tab_fields = _cur_tab_fields()
+            if idx < len(tab_fields):
+                field = tab_fields[idx]
+                lines.append(("bold cyan", f"  \u276f {field['label']}  "))
+                lines.append(("bold white", f"[ {edit_buf[0]}\u258c ]\n"))
+                lines.append(("dim", "     Type value, Enter confirm, Esc cancel\n"))
+            return lines
+
+        # ── Keyboard hints ──
+        lines.extend(_box_row([
+            ("dim", "  \u2190\u2192/Tab switch tab  \u2193 enter fields  \u2191\u2193 move  Enter edit  s save")
+        ]))
+        lines.append(_box_mid())
+
+        # ── Fields (second layer) ──
+        tab_fields = _cur_tab_fields()
+        LABEL_W = 22
+
+        for i, field in enumerate(tab_fields):
+            is_sel = (focus_level[0] in (1, 2) and i == cur_field[0])
+            frags = []
+            label_text = f"  {field['label']:<{LABEL_W}s}"
+            if is_sel:
+                frags.append(("bold cyan", label_text))
+            else:
+                frags.append(("dim", label_text))
+
+            val = field["value"]
+            if field["type"] == "toggle":
+                if val:
+                    frags.append(("bold green" if is_sel else "green", "\u25cf On"))
+                else:
+                    frags.append(("dim", "\u25cb Off"))
+            elif field["type"] == "number":
+                if is_sel:
+                    frags.append(("bold yellow", f"\u25c4 {val} \u25ba"))
+                else:
+                    frags.append(("", str(val)))
+            elif field["type"] == "list":
+                # Show truncated list summary or expanded if in list editor
+                if focus_level[0] == 2 and is_sel:
+                    # This field is being edited inline - show indicator
+                    frags.append(("bold cyan", "[editing below...]"))
+                else:
+                    display_val = str(val)
+                    if len(display_val) > 40:
+                        display_val = display_val[:37] + "..."
+                    if is_sel:
+                        frags.append(("bold", f"[{display_val}]"))
+                    else:
+                        frags.append(("dim", f"[{display_val}]"))
+            else:  # text
+                display_val = str(val)
+                if field["key"] == "password" and display_val:
+                    display_val = "\u2022" * min(len(display_val), 8)
+                if is_sel:
+                    frags.append(("bold", display_val if display_val else "(empty)"))
+                else:
+                    frags.append(("", display_val if display_val else "(empty)"))
+
+            lines.extend(_box_row(frags))
+
+            # Inline list expansion when in list editor mode
+            if field["type"] == "list" and focus_level[0] == 2 and is_sel:
+                # Show a scrollable window of max 8 visible items
+                _LIST_VISIBLE = 8
+                total_li = len(list_items[0])
+                cursor = list_cursor[0]
+
+                # Calculate visible window around cursor
+                if total_li <= _LIST_VISIBLE:
+                    vis_start = 0
+                    vis_end = total_li
+                else:
+                    half = _LIST_VISIBLE // 2
+                    vis_start = max(0, cursor - half)
+                    vis_end = vis_start + _LIST_VISIBLE
+                    if vis_end > total_li:
+                        vis_end = total_li
+                        vis_start = vis_end - _LIST_VISIBLE
+
+                # Scroll indicator (top)
+                if vis_start > 0:
+                    lines.extend(_box_row([("dim", f"      ... ({vis_start} more above)")]))
+
+                for li_idx in range(vis_start, vis_end):
+                    item = list_items[0][li_idx]
+                    li_sel = (li_idx == cursor)
+                    if list_editing[0] and li_sel:
+                        li_frags = [("bold cyan", f"      [{edit_buf[0]}")]
+                        li_frags.append(("bold white", "▌"))
+                        li_frags.append(("bold cyan", "]"))
+                    elif li_sel:
+                        li_frags = [("bold cyan", f"    > {item}")]
+                    else:
+                        li_frags = [("dim", f"      {item}")]
+                    lines.extend(_box_row(li_frags))
+
+                # Scroll indicator (bottom)
+                if vis_end < total_li:
+                    lines.extend(_box_row([("dim", f"      ... ({total_li - vis_end} more below)")]))
+
+                # List info + hint
+                li_hint = f"    [{cursor+1}/{total_li}]  Enter edit  a add  d delete  Esc done"
+                lines.extend(_box_row([("dim italic", f"  {li_hint}")]))
+
+        # Separator before actions
+        lines.append(_box_mid())
+
+        # Actions (Save / Back / Quit)
+        actions = [
+            ("Save", "Save changes to config.json"),
+            ("Back (discard)", "Return without saving"),
+            ("Quit", "Exit Rosetta"),
+        ]
+        for a_idx, (a_label, a_hint) in enumerate(actions):
+            item_idx = len(tab_fields) + a_idx
+            is_sel = (focus_level[0] == 1 and cur_field[0] == item_idx)
+            if a_label == "Quit":
+                icon = "\u25cb"
+            else:
+                icon = "\u25c6" if is_sel else "\u25c7"
+            style = "bold cyan" if is_sel else "dim"
+            lines.extend(_box_row([(style, f"  {icon} {a_label}")]))
+
+        # Dynamic hint
+        lines.append(_box_mid())
+        hint = ""
+        idx = cur_field[0]
+        tab_fields = _cur_tab_fields()
+        if idx < len(tab_fields):
+            hint = tab_fields[idx].get("hint", "")
+        else:
+            a_idx = idx - len(tab_fields)
+            if 0 <= a_idx < len(actions):
+                hint = actions[a_idx][1]
+        if saved_msg[0]:
+            hint = saved_msg[0]
+        lines.extend(_box_row([("dim italic", f"  \U0001f4a1 {hint}")]))
+        lines.append(_box_bot())
+
+        # Footer hint
+        lines.append(("dim", "  ←→ change value  |  Tab/←→ switch tab (on tab bar)  |  Esc back\n"))
+
+        return lines
+
+    # ── Key bindings ──
+    kb = KeyBindings()
+
+    @kb.add("left")
+    def _left(event):
+        if editing[0] or list_editing[0]:
+            return
+        if focus_level[0] == 0:
+            cur_tab[0] = (cur_tab[0] - 1) % len(tabs)
+            cur_field[0] = 0
+            saved_msg[0] = ""
+        elif focus_level[0] == 1:
+            tab_fields = _cur_tab_fields()
+            if cur_field[0] < len(tab_fields):
+                field = tab_fields[cur_field[0]]
+                if field["type"] == "number":
+                    v = int(field["value"]) if field["value"] else 0
+                    if v > 0:
+                        field["value"] = v - 1
+
+    @kb.add("right")
+    def _right(event):
+        if editing[0] or list_editing[0]:
+            return
+        if focus_level[0] == 0:
+            cur_tab[0] = (cur_tab[0] + 1) % len(tabs)
+            cur_field[0] = 0
+            saved_msg[0] = ""
+        elif focus_level[0] == 1:
+            tab_fields = _cur_tab_fields()
+            if cur_field[0] < len(tab_fields):
+                field = tab_fields[cur_field[0]]
+                if field["type"] == "number":
+                    field["value"] = int(field["value"]) + 1 if field["value"] else 1
+
+    @kb.add("tab")
+    def _tab_next(event):
+        if editing[0] or list_editing[0]:
+            return
+        if focus_level[0] == 2:
+            return
+        cur_tab[0] = (cur_tab[0] + 1) % len(tabs)
+        cur_field[0] = 0
+        focus_level[0] = 0
+        saved_msg[0] = ""
+
+    @kb.add("up")
+    @kb.add("k")
+    def _up(event):
+        if editing[0] or list_editing[0]:
+            return
+        if focus_level[0] == 2:
+            if list_cursor[0] > 0:
+                list_cursor[0] -= 1
+        elif focus_level[0] == 1:
+            if cur_field[0] > 0:
+                cur_field[0] -= 1
+            else:
+                focus_level[0] = 0
+        saved_msg[0] = ""
+
+    @kb.add("down")
+    @kb.add("j")
+    def _down(event):
+        if editing[0] or list_editing[0]:
+            return
+        if focus_level[0] == 2:
+            if list_cursor[0] < len(list_items[0]) - 1:
+                list_cursor[0] += 1
+        elif focus_level[0] == 0:
+            focus_level[0] = 1
+            cur_field[0] = 0
+        else:
+            if cur_field[0] < _total_items() - 1:
+                cur_field[0] += 1
+        saved_msg[0] = ""
+
+    @kb.add("space")
+    def _space(event):
+        if editing[0] or list_editing[0]:
+            edit_buf[0] += " "
+            return
+        if focus_level[0] == 1:
+            tab_fields = _cur_tab_fields()
+            if cur_field[0] < len(tab_fields):
+                field = tab_fields[cur_field[0]]
+                if field["type"] == "toggle":
+                    field["value"] = not field["value"]
+
+    @kb.add("a")
+    def _add_item(event):
+        if editing[0] or list_editing[0]:
+            edit_buf[0] += "a"
+            return
+        if focus_level[0] == 2:
+            # Add new item to list
+            list_items[0].append("")
+            list_cursor[0] = len(list_items[0]) - 1
+            list_editing[0] = True
+            edit_buf[0] = ""
+
+    @kb.add("d")
+    @kb.add("delete")
+    def _delete_item(event):
+        if editing[0] or list_editing[0]:
+            if event.data == "d":
+                edit_buf[0] += "d"
+            return
+        if focus_level[0] == 2 and list_items[0]:
+            # Delete current item
+            del list_items[0][list_cursor[0]]
+            if list_cursor[0] >= len(list_items[0]) and list_cursor[0] > 0:
+                list_cursor[0] -= 1
+
+    @kb.add("s")
+    def _save_shortcut(event):
+        if editing[0] or list_editing[0]:
+            edit_buf[0] += "s"
+            return
+        if focus_level[0] == 2:
+            return
+        _do_save()
+
+    def _do_save():
+        # Write back all field values to config
+        for tab in tabs:
+            for field in tab["fields"]:
+                val = field["value"]
+                # Convert list type back to array
+                if field["type"] == "list":
+                    if isinstance(val, str):
+                        val = [x.strip() for x in val.split(",") if x.strip()]
+                if field.get("db_idx") is not None:
+                    databases[field["db_idx"]][field["key"]] = val
+                elif field["key"] == "baseline":
+                    raw_config["baseline"] = val
+                elif field["key"] == "traceless":
+                    if "playground" not in raw_config:
+                        raw_config["playground"] = {}
+                    raw_config["playground"]["traceless"] = val
+                else:
+                    mtr_config[field["key"]] = val
+        raw_config["databases"] = databases
+        raw_config["mtr"] = mtr_config
+        save_config(config_path, raw_config)
+        saved_msg[0] = "Config saved successfully!"
+
+    @kb.add("enter")
+    def _enter(event):
+        if list_editing[0]:
+            # Confirm list item edit
+            list_items[0][list_cursor[0]] = edit_buf[0]
+            list_editing[0] = False
+            edit_buf[0] = ""
+            # Write back to field value
+            tab_fields = _cur_tab_fields()
+            field = tab_fields[cur_field[0]]
+            field["value"] = ", ".join(list_items[0])
+            return
+
+        if editing[0]:
+            # Confirm edit
+            tab_fields = _cur_tab_fields()
+            if cur_field[0] < len(tab_fields):
+                field = tab_fields[cur_field[0]]
+                val = edit_buf[0]
+                if field["type"] == "number":
+                    try:
+                        val = int(val)
+                    except ValueError:
+                        try:
+                            val = float(val)
+                        except ValueError:
+                            val = field["value"]
+                field["value"] = val
+            editing[0] = False
+            edit_buf[0] = ""
+            return
+
+        if focus_level[0] == 2:
+            # Edit current list item
+            if list_items[0]:
+                list_editing[0] = True
+                edit_buf[0] = list_items[0][list_cursor[0]]
+            return
+
+        tab_fields = _cur_tab_fields()
+        if focus_level[0] == 1 and cur_field[0] < len(tab_fields):
+            field = tab_fields[cur_field[0]]
+            if field["type"] == "toggle":
+                field["value"] = not field["value"]
+            elif field["type"] == "list":
+                # Enter list editor mode
+                val = field["value"]
+                if isinstance(val, str):
+                    list_items[0] = [x.strip() for x in val.split(",") if x.strip()]
+                elif isinstance(val, list):
+                    list_items[0] = list(val)
+                else:
+                    list_items[0] = []
+                list_cursor[0] = 0
+                focus_level[0] = 2
+            elif field["type"] in ("text", "number"):
+                editing[0] = True
+                edit_buf[0] = str(field["value"])
+        elif focus_level[0] == 1:
+            # Action buttons
+            a_idx = cur_field[0] - len(tab_fields)
+            if a_idx == 0:  # Save
+                _do_save()
+                result_val[0] = "saved"
+                event.app.exit()
+            elif a_idx == 1:  # Back
+                result_val[0] = "back"
+                event.app.exit()
+            elif a_idx == 2:  # Quit
+                result_val[0] = None
+                event.app.exit()
+
+    @kb.add("escape")
+    def _escape(event):
+        if list_editing[0]:
+            # Cancel list item edit
+            list_editing[0] = False
+            edit_buf[0] = ""
+            # Remove empty items that were being added
+            if list_items[0] and not list_items[0][list_cursor[0]]:
+                del list_items[0][list_cursor[0]]
+                if list_cursor[0] >= len(list_items[0]) and list_cursor[0] > 0:
+                    list_cursor[0] -= 1
+            return
+        if editing[0]:
+            editing[0] = False
+            edit_buf[0] = ""
+            return
+        if focus_level[0] == 2:
+            # Exit list editor, write back to field
+            tab_fields = _cur_tab_fields()
+            field = tab_fields[cur_field[0]]
+            field["value"] = ", ".join(list_items[0])
+            focus_level[0] = 1
+            return
+        result_val[0] = "back"
+        event.app.exit()
+
+    @kb.add("c-c")
+    @kb.add("q")
+    def _quit(event):
+        if editing[0] or list_editing[0]:
+            editing[0] = False
+            list_editing[0] = False
+            edit_buf[0] = ""
+            return
+        if focus_level[0] == 2:
+            # Exit list editor first
+            tab_fields = _cur_tab_fields()
+            field = tab_fields[cur_field[0]]
+            field["value"] = ", ".join(list_items[0])
+            focus_level[0] = 1
+            return
+        result_val[0] = None
+        event.app.exit()
+
+    @kb.add("backspace")
+    def _backspace(event):
+        if editing[0] or list_editing[0]:
+            edit_buf[0] = edit_buf[0][:-1]
+
+    @kb.add("<any>")
+    def _any_key(event):
+        if editing[0] or list_editing[0]:
+            data = event.data
+            # Accept single chars and pasted multi-char strings
+            if data and all(ch.isprintable() or ch == ' ' for ch in data):
+                edit_buf[0] += data
+
+    menu = Window(
+        content=FormattedTextControl(_get_text),
+        dont_extend_height=True,
+    )
 
     app: Application = Application(
         layout=Layout(HSplit([menu])),
@@ -3035,8 +3721,7 @@ def _select_mode(configs, database: str,
     app.run()
     _tty_write("\033[u\033[J")
 
-    return tuple(result)
-
+    return result_val[0]
 
 def _select_mtr_params(
     mode: str = "row",
@@ -3100,7 +3785,8 @@ def _select_mtr_params(
     FIELDS = [
         {"label": "Mode",                    "type": "multiselect"},
         {"label": "Parallel Workers",         "type": "choice"},
-        {"label": "Suite Mode",              "type": "toggle", "var": "sm"},
+        {"label": "Retry",                    "type": "choice"},
+        {"label": "Suite Mode (-s)",              "type": "toggle", "var": "sm"},
         {"label": "Optimistic Transaction (-o)", "type": "toggle", "var": "opt"},
         {"label": "Record Mode (-r)",         "type": "toggle", "var": "rec"},
         {"label": "OK",                       "type": "action"},
@@ -3122,19 +3808,19 @@ def _select_mtr_params(
         if i == 1:
             return str(_parallel_val())
         elif i == 2:
-            return TOGGLE_LABELS[sm[0]]
-        elif i == 3:
-            return TOGGLE_LABELS[opt[0]]
-        elif i == 4:
-            return TOGGLE_LABELS[rec[0]]
-        elif i == 5:
             return str(_retry_val())
+        elif i == 3:
+            return TOGGLE_LABELS[sm[0]]
+        elif i == 4:
+            return TOGGLE_LABELS[opt[0]]
+        elif i == 5:
+            return TOGGLE_LABELS[rec[0]]
         return ""
 
     def _get_toggle_var(i):
-        if i == 2: return sm
-        if i == 3: return opt
-        if i == 4: return rec
+        if i == 3: return sm
+        if i == 4: return opt
+        if i == 5: return rec
         return None
 
     def _resolve_mode():
@@ -3179,6 +3865,8 @@ def _select_mtr_params(
             mode_cursor[0] = (mode_cursor[0] + 1) % len(MODE_OPTIONS)
         elif i == 1:
             p_idx[0] = (p_idx[0] + 1) % len(PARALLEL_PRESETS)
+        elif i == 2:
+            r_idx[0] = (r_idx[0] + 1) % len(RETRY_PRESETS)
         else:
             var = _get_toggle_var(i)
             if var is not None:
@@ -3189,6 +3877,8 @@ def _select_mtr_params(
             mode_cursor[0] = (mode_cursor[0] - 1) % len(MODE_OPTIONS)
         elif i == 1:
             p_idx[0] = (p_idx[0] - 1) % len(PARALLEL_PRESETS)
+        elif i == 2:
+            r_idx[0] = (r_idx[0] - 1) % len(RETRY_PRESETS)
         else:
             var = _get_toggle_var(i)
             if var is not None:
@@ -3198,12 +3888,13 @@ def _select_mtr_params(
     FIELD_HINTS = {
         0: "row=Row-store, col=Column-store, pq=Parallel-query",
         1: "Number of concurrent workers for MTR execution",
-        2: "Run with --suite flag for test-suite organization",
-        3: "Enable optimistic transaction mode (-o)",
-        4: "Record mode: regenerate .result files (-r)",
-        5: "Confirm and start MTR run",
-        6: "Return to mode selection",
-        7: "Exit Rosetta",
+        2: "Number of retries for failed tests (0 = no retry)",
+        3: "Run with --suite flag for test-suite organization",
+        4: "Enable optimistic transaction mode (-o)",
+        5: "Record mode: regenerate .result files (-r)",
+        6: "Confirm and start MTR run",
+        7: "Return to mode selection",
+        8: "Exit Rosetta",
     }
 
     # Box drawing (reuse same approach as main menu)
@@ -3888,6 +4579,9 @@ def _enter_interactive(args) -> int:
     import concurrent.futures as _cf
     import time as _time
     from .executor import check_port
+    from rich.console import Console as _RichConsole
+
+    _scan_console = _RichConsole(stderr=True)
 
     def _check_one(cfg):
         """Check connectivity and fetch version/latency for a DBMS."""
@@ -3898,16 +4592,29 @@ def _enter_interactive(args) -> int:
             return cfg.name, {"connected": False, "host": cfg.host,
                               "port": cfg.port, "version": None,
                               "latency_ms": None}
-        # Try to get version
+        # Try to get version (with short timeout)
         version = None
         try:
-            import pymysql as _pymysql
-            conn = _pymysql.connect(
-                host=cfg.host, port=cfg.port,
-                user=cfg.user, password=cfg.password,
-                connect_timeout=3)
-            cur = conn.cursor()
-            cur.execute("SELECT VERSION()")
+            protocol = getattr(cfg, 'protocol', 'mysql')
+            if protocol == "oracle":
+                import oracledb as _oracledb
+                _svc = getattr(cfg, 'service_name', '') or cfg.name
+                _dsn = _oracledb.makedsn(
+                    cfg.host, cfg.port,
+                    service_name=_svc)
+                conn = _oracledb.connect(
+                    user=cfg.user, password=cfg.password, dsn=_dsn,
+                    tcp_connect_timeout=8)
+                cur = conn.cursor()
+                cur.execute("SELECT banner FROM v$version WHERE ROWNUM = 1")
+            else:
+                import pymysql as _pymysql
+                conn = _pymysql.connect(
+                    host=cfg.host, port=cfg.port,
+                    user=cfg.user, password=cfg.password,
+                    connect_timeout=3)
+                cur = conn.cursor()
+                cur.execute("SELECT VERSION()")
             row = cur.fetchone()
             version = row[0] if row else "unknown"
             cur.close()
@@ -3925,21 +4632,26 @@ def _enter_interactive(args) -> int:
                  "version": None, "latency_ms": None}
         for c in configs
     }
-    with _cf.ThreadPoolExecutor(max_workers=len(configs)) as pool:
-        futs = [pool.submit(_check_one, c) for c in configs]
-        try:
-            for fut in _cf.as_completed(futs, timeout=10):
-                try:
-                    name, info = fut.result()
-                    dbms_status_info[name] = info
-                    if info["connected"]:
-                        reachable_names.add(name)
-                except Exception:
-                    pass
-        except (TimeoutError, Exception):
-            # Some checks didn't finish in time; pre-populated entries
-            # remain as disconnected — that's fine
-            pass
+    _dbms_names_str = ", ".join(c.name for c in configs)
+    with _scan_console.status(
+        f"  [dim]Connecting to DBMS ([cyan]{_dbms_names_str}[/cyan]) ...[/dim]",
+        spinner="dots",
+    ):
+        with _cf.ThreadPoolExecutor(max_workers=len(configs)) as pool:
+            futs = [pool.submit(_check_one, c) for c in configs]
+            try:
+                for fut in _cf.as_completed(futs, timeout=10):
+                    try:
+                        name, info = fut.result()
+                        dbms_status_info[name] = info
+                        if info["connected"]:
+                            reachable_names.add(name)
+                    except Exception:
+                        pass
+            except (TimeoutError, Exception):
+                # Some checks didn't finish in time; pre-populated entries
+                # remain as disconnected — that's fine
+                pass
 
     # default_dbms: if user passed --dbms, use those; otherwise None (= all reachable)
     default_dbms = None
@@ -3948,6 +4660,15 @@ def _enter_interactive(args) -> int:
 
     # ----- Start background HTTP server (playground always available) --------
     from .interactive import ReportServer, _APIHandler
+    from .config import load_raw_config as _load_raw_cfg
+
+    # Read playground settings from config
+    try:
+        _raw_cfg = _load_raw_cfg(args.config)
+        _pg_cfg = _raw_cfg.get("playground", {})
+        _traceless = _pg_cfg.get("traceless", True)
+    except Exception:
+        _traceless = True
 
     bg_server = ReportServer(
         output_dir, port=args.port,
@@ -3955,6 +4676,7 @@ def _enter_interactive(args) -> int:
         all_configs=all_configs,
         database=args.database,
         baseline=args.baseline,
+        traceless=_traceless,
     )
     try:
         bg_server.start()
@@ -3973,9 +4695,6 @@ def _enter_interactive(args) -> int:
     # Auto-open Playground in browser when server starts successfully
     if bg_server and bg_server.running:
         pg_url = f"{bg_server.base_url}/playground.html"
-        console.print(
-            f"\n  [green]●[/green] Playground: "
-            f"[bold link={pg_url}]{pg_url}[/bold link]")
         # Open in IDE browser
         try:
             import subprocess as _sp
@@ -3985,7 +4704,8 @@ def _enter_interactive(args) -> int:
             pass
 
     # Clear terminal before entering interactive mode
-    console.clear()
+    # Use ANSI escape: clear screen + move cursor to top-left
+    print("\033[2J\033[H", end="", flush=True)
 
     # Helper: ensure bg_server is running before showing menu
     def _ensure_bg_server():
@@ -4034,7 +4754,62 @@ def _enter_interactive(args) -> int:
 
     # ----- launch selected session -----------------------------------------
     while True:
-        if mode == "playground":
+        if mode == "config":
+            # Config editor mode
+            result = _select_config_editor(args.config)
+            if result is None:
+                # Quit
+                if bg_server:
+                    bg_server.stop()
+                console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                return 0
+            if result == "saved":
+                # Reload configs after save
+                all_configs = load_config(args.config)
+                configs = filter_configs(all_configs, None)
+                # Re-run connectivity check with spinner
+                dbms_status_info = {
+                    c.name: {"connected": False, "host": c.host, "port": c.port,
+                             "version": None, "latency_ms": None}
+                    for c in configs
+                }
+                _reload_names_str = ", ".join(c.name for c in configs)
+                with _scan_console.status(
+                    f"  [dim]Reconnecting to DBMS ([cyan]{_reload_names_str}[/cyan]) ...[/dim]",
+                    spinner="dots",
+                ):
+                    with _cf.ThreadPoolExecutor(max_workers=len(configs)) as pool:
+                        futs = [pool.submit(_check_one, c) for c in configs]
+                        try:
+                            for fut in _cf.as_completed(futs, timeout=10):
+                                try:
+                                    name, info = fut.result()
+                                    dbms_status_info[name] = info
+                                    if info["connected"]:
+                                        reachable_names.add(name)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                default_dbms = [c.name for c in configs]
+            print("\033[2J\033[H", end="", flush=True)
+            _ensure_bg_server()
+            mode, selected_configs = _select_mode(
+                configs, args.database,
+                reachable_names=reachable_names,
+                default_dbms=default_dbms,
+                baseline=args.baseline,
+                server_url=bg_server.base_url if bg_server and bg_server.running else "",
+                dbms_status=dbms_status_info,
+            )
+            if mode is None:
+                console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                return 0
+            if selected_configs:
+                default_dbms = [c.name for c in selected_configs]
+            continue
+
+        elif mode == "playground":
             # Use existing bg_server or create new one if needed
             from . import __version__
 
@@ -4066,6 +4841,7 @@ def _enter_interactive(args) -> int:
                     all_configs=all_configs,
                     database=args.database,
                     baseline=args.baseline,
+                    traceless=_traceless,
                 )
 
             # Start server if it's not already running

@@ -539,6 +539,18 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .db-info { font-size: 12px; color: var(--fg2); margin-left: 8px;
   background: var(--bg3); padding: 4px 10px; border-radius: 12px; }
 
+/* Sandbox toggle */
+.toggle-switch { position: relative; display: inline-block; width: 36px; height: 20px;
+  cursor: pointer; vertical-align: middle; }
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+.toggle-slider { position: absolute; inset: 0; background: var(--bg3); border-radius: 20px;
+  border: 1px solid var(--border); transition: all 0.2s; }
+.toggle-slider::before { content: ''; position: absolute; width: 14px; height: 14px;
+  left: 2px; bottom: 2px; background: var(--fg2); border-radius: 50%; transition: all 0.2s; }
+.toggle-switch input:checked + .toggle-slider { background: var(--accent); border-color: var(--accent); }
+.toggle-switch input:checked + .toggle-slider::before { transform: translateX(16px); background: #fff; }
+.sandbox-hint { font-size: 11px; color: var(--fg2); margin-left: 6px; }
+
 /* Results area */
 .results-area { flex: 1; padding: 20px 28px; }
 
@@ -650,10 +662,18 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .progress-dbms-item .bar-pct { font-size: 14px; font-weight: 600;
   color: var(--fg2); width: 42px; text-align: right; flex-shrink: 0;
   font-variant-numeric: tabular-nums; }
+.progress-dbms-item.running .bar-fill { width: 100%;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  background-size: 200% 100%; animation: shimmer 1.5s ease-in-out infinite; }
+.progress-dbms-item.active .bar-fill { background: linear-gradient(90deg, var(--accent), #388bfd);
+  transition: width 0.3s ease; }
+.progress-dbms-item.active .bar-pct { color: var(--blue); }
 .progress-dbms-item.done .bar-fill { background: linear-gradient(90deg, var(--green), #56d364); }
 .progress-dbms-item.done .bar-pct { color: var(--green); }
 .progress-dbms-item.error .bar-fill { background: linear-gradient(90deg, var(--red), #f87171); }
 .progress-dbms-item.error .bar-pct { color: var(--red); }
+@keyframes shimmer { 0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; } }
 
 /* Empty state */
 .empty-state { text-align: center; padding: 100px 20px; color: var(--fg2); }
@@ -670,6 +690,27 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
   transition: opacity 0.3s; pointer-events: none;
   box-shadow: 0 4px 20px rgba(0,0,0,0.4); }
 .toast-error { background: var(--red); }
+
+/* EXPLAIN Tabs */
+.explain-container { display: flex; flex-direction: column; max-height: 400px; }
+.explain-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border);
+  padding: 0 4px; flex-shrink: 0; position: sticky; top: 0;
+  background: var(--bg2); z-index: 1; }
+.explain-tab { padding: 6px 14px; font-size: 12px; font-weight: 500; color: var(--fg2);
+  cursor: pointer; background: none; border: none; border-bottom: 2px solid transparent;
+  transition: all 0.15s; font-family: inherit; white-space: nowrap; }
+.explain-tab:hover { color: var(--fg); background: var(--bg3); }
+.explain-tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+.explain-tab.has-error { color: var(--red); opacity: 0.7; }
+.explain-tab.has-error.active { opacity: 1; }
+.explain-tab-contents { overflow: auto; flex: 1; }
+.explain-tab-content { display: none; }
+.explain-tab-content.active { display: block; }
+.explain-format-error { color: var(--fg2); font-style: italic; padding: 10px 12px;
+  font-size: 13px; background: var(--bg); border-radius: 4px; border: 1px dashed var(--border); }
+.explain-json-block { background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+  padding: 12px 16px; font-family: 'SF Mono', Consolas, 'Courier New', monospace;
+  font-size: 12px; line-height: 1.6; white-space: pre; overflow: auto; color: var(--fg); }
 </style>
 </head>
 <body>
@@ -702,6 +743,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
       <label>Baseline:</label>
       <!-- chips populated by JS -->
     </div>
+    <div class="dbms-selector" id="sandbox-selector">
+      <label>Traceless:</label>
+      <label class="toggle-switch">
+        <input type="checkbox" id="sandbox-toggle" checked onchange="SANDBOX_MODE = this.checked">
+        <span class="toggle-slider"></span>
+      </label>
+      <span class="sandbox-hint">Temp DB per execution, auto-drop after done</span>
+    </div>
     </div>
   </div>
 
@@ -721,6 +770,7 @@ let DBMS_LIST = [];
 let ACTIVE_DBMS = new Set();
 let BASELINE_DBMS = '';
 let DATABASE = '';
+let SANDBOX_MODE = true;
 let _currentAbortController = null;
 
 function showToast(msg, type) {
@@ -761,6 +811,11 @@ function loadDbms() {
       BASELINE_DBMS = r.baseline;
     } else if (!BASELINE_DBMS && DBMS_LIST.length > 0) {
       BASELINE_DBMS = DBMS_LIST[0].name;
+    }
+    // Apply traceless setting from config
+    if (r.traceless != null) {
+      SANDBOX_MODE = r.traceless;
+      document.getElementById('sandbox-toggle').checked = SANDBOX_MODE;
     }
     renderChips();
     renderBaselineChips();
@@ -865,7 +920,7 @@ function executeSql() {
       dbmsList.map(n => '<div class="progress-dbms-item running" id="progress-item-' + esc(n) + '">' +
         '<span class="dbms-label">' + esc(n) + '</span>' +
         '<div class="bar-track"><div class="bar-fill" id="progress-bar-' + esc(n) + '"></div></div>' +
-        '<span class="bar-pct" id="progress-pct-' + esc(n) + '">0%</span></div>').join('') +
+        '<span class="bar-pct" id="progress-pct-' + esc(n) + '"></span></div>').join('') +
     '</div>';
   area.appendChild(progressContainer);
 
@@ -879,7 +934,7 @@ function executeSql() {
   fetch(base + '/api/execute/stream', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ sql: sql, dbms: dbmsList }),
+    body: JSON.stringify({ sql: sql, dbms: dbmsList, sandbox: SANDBOX_MODE }),
     signal: abortCtrl.signal
   }).then(response => {
     if (!response.ok) {
@@ -945,6 +1000,10 @@ function executeSql() {
               const pct = Math.round((parsed.stmt_index / parsed.stmt_total) * 100);
               const item = document.getElementById('progress-item-' + parsed.name);
               if (item) {
+                // Switch from shimmer animation to real progress
+                if (item.classList.contains('running')) {
+                  item.className = 'progress-dbms-item active';
+                }
                 const bar = document.getElementById('progress-bar-' + parsed.name);
                 if (bar) bar.style.width = pct + '%';
                 const pctLabel = document.getElementById('progress-pct-' + parsed.name);
@@ -1234,6 +1293,8 @@ function renderResults(results, originalSql) {
         // Use different style for matched errors (same error code across DBMS)
         const errorClass = (!skipDiff && isDiff) ? 'result-error' : 'result-error-match';
         body.innerHTML = '<div class="' + errorClass + '">' + esc(sr.error) + '</div>';
+      } else if (sr.explain_formats && sr.explain_formats.length > 0) {
+        body.appendChild(buildExplainTabs(sr));
       } else if (sr.columns && sr.rows) {
         const table = buildTable(sr, (!skipDiff && name !== refName && refResult) ? refResult : null);
         body.appendChild(table);
@@ -1273,8 +1334,10 @@ function hasDiff(a, b) {
     // Fallback to comparing error messages if error_code is not available
     return a.error !== b.error;
   }
-  // Compare columns
-  if (JSON.stringify(a.columns) !== JSON.stringify(b.columns)) return true;
+  // Compare columns (case-insensitive — Oracle returns uppercase column names)
+  const aCols = (a.columns || []).map(c => c.toLowerCase());
+  const bCols = (b.columns || []).map(c => c.toLowerCase());
+  if (JSON.stringify(aCols) !== JSON.stringify(bCols)) return true;
   // Compare rows
   if (JSON.stringify(a.rows) !== JSON.stringify(b.rows)) return true;
   // Compare affected_rows for non-SELECT
@@ -1305,6 +1368,104 @@ function isSkipDiff(sql) {
   return SKIP_DIFF_PATTERNS.some(p => p.test(sql));
 }
 
+function buildExplainTabs(sr) {
+  const container = document.createElement('div');
+  container.className = 'explain-container';
+
+  const tabs = document.createElement('div');
+  tabs.className = 'explain-tabs';
+
+  const contents = document.createElement('div');
+  contents.className = 'explain-tab-contents';
+
+  sr.explain_formats.forEach((fmt, i) => {
+    // Tab button
+    const tab = document.createElement('button');
+    tab.className = 'explain-tab' + (i === 0 ? ' active' : '') + (fmt.error ? ' has-error' : '');
+    tab.textContent = fmt.format + (fmt.elapsed_ms != null ? ' (' + fmtElapsed(fmt.elapsed_ms) + ')' : '');
+    tab.onclick = () => {
+      tabs.querySelectorAll('.explain-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      contents.querySelectorAll('.explain-tab-content').forEach(c => c.classList.remove('active'));
+      contents.children[i].classList.add('active');
+    };
+    tabs.appendChild(tab);
+
+    // Tab content
+    const content = document.createElement('div');
+    content.className = 'explain-tab-content' + (i === 0 ? ' active' : '');
+    if (fmt.error) {
+      content.innerHTML = '<div class="explain-format-error">' + esc(fmt.error) + '</div>';
+    } else if (fmt.columns && fmt.rows) {
+      // Detect special content: JSON or tree-style output → render as formatted block
+      const fmtBlock = tryFormatExplainBlock(fmt);
+      if (fmtBlock !== null) {
+        const pre = document.createElement('pre');
+        pre.className = 'explain-json-block';
+        pre.textContent = fmtBlock;
+        content.appendChild(pre);
+      } else {
+        content.appendChild(buildTable(fmt, null));
+      }
+    } else {
+      content.innerHTML = '<div class="explain-format-error">No data returned</div>';
+    }
+    contents.appendChild(content);
+  });
+
+  container.appendChild(tabs);
+  container.appendChild(contents);
+  return container;
+}
+
+function tryFormatExplainBlock(fmt) {
+  // Detect EXPLAIN results that should be rendered as a preformatted block
+  // rather than a table. Covers: JSON format, TREE format, and other
+  // single-column text outputs with structure (indentation/newlines).
+  if (!fmt.rows || fmt.rows.length === 0) return null;
+
+  // Concatenate all cell values into a single text block
+  const allText = fmt.rows.map(r => r.join('')).join('\n');
+  const trimmed = allText.trim();
+
+  // 1. JSON detection: starts/ends with { } or [ ]
+  if ((trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+      (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+    try {
+      const obj = JSON.parse(trimmed);
+      return JSON.stringify(obj, null, 2);
+    } catch (e) {
+      // Not valid JSON but looks like it — show as-is
+      return trimmed;
+    }
+  }
+
+  // 2. Tree format detection: contains "-> " (MySQL TREE / EXPLAIN ANALYZE output)
+  if (trimmed.includes('-> ')) {
+    // If already has proper newlines with indentation, return as-is
+    if (/\n\s+->/.test(trimmed)) {
+      return trimmed;
+    }
+    // DB driver may return tree output without proper newlines.
+    // Insert newline before each "-> " that is preceded by ")  " or similar
+    // Pattern: after closing paren + spaces, a new "-> " starts a child node.
+    let formatted = trimmed;
+    // Split before "-> " when preceded by ")  " (end of cost info + spaces)
+    formatted = formatted.replace(/\)\s{2,}(->)/g, ')\n    $1');
+    // Also handle cases where nodes are separated by just spaces
+    formatted = formatted.replace(/([^\n])\s{4,}(->)/g, '$1\n    $2');
+    return formatted;
+  }
+
+  // 3. Single-column result: EXPLAIN often returns 1 column with text content
+  //    that includes newlines or should be shown as preformatted text
+  if (fmt.columns && fmt.columns.length === 1) {
+    return trimmed;
+  }
+
+  return null;
+}
+
 function buildTable(sr, refSr) {
   const table = document.createElement('table');
   table.className = 'data-table';
@@ -1315,7 +1476,7 @@ function buildTable(sr, refSr) {
   (sr.columns || []).forEach((col, ci) => {
     const th = document.createElement('th');
     const refCol = refSr && refSr.columns ? refSr.columns[ci] : col;
-    if (refSr && col !== refCol) {
+    if (refSr && col.toLowerCase() !== refCol.toLowerCase()) {
       th.innerHTML = '<span class="cell-diff">' + esc(col) + '</span>';
     } else {
       th.textContent = col;
