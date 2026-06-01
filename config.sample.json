@@ -2,6 +2,14 @@
   "playground": {
     "traceless": true
   },
+  "tdsql": {
+    "source_dir": "/data/workspace/SQLEngine",
+    "port_base": 5886,
+    "parallel_jobs": 20,
+    "compiler": "clang",
+    "linker_debug": "lld",
+    "linker_release": "mold"
+  },
   "mtr": {
     "test_dir": "/data/workspace/SQLEngine/bld/mysql-test",
     "skip_list": "/data/workspace/SQLEngine/mysql-test/collections/disabled.def",

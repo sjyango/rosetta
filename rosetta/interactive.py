@@ -2462,11 +2462,35 @@ class MtrInteractiveSession:
         console.print(plan_table)
 
         # Configuration panel (same as CLI mode)
+        # Try to detect SQLEngine current git branch
+        def _get_git_branch(path: str) -> Optional[str]:
+            try:
+                result = subprocess.run(
+                    ["git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True, text=True, timeout=2,
+                )
+                if result.returncode == 0:
+                    branch = result.stdout.strip()
+                    if branch:
+                        # Also get short commit hash for context
+                        sha_result = subprocess.run(
+                            ["git", "-C", path, "rev-parse", "--short", "HEAD"],
+                            capture_output=True, text=True, timeout=2,
+                        )
+                        sha = sha_result.stdout.strip() if sha_result.returncode == 0 else ""
+                        return f"{branch} ({sha})" if sha else branch
+            except Exception:
+                pass
+            return None
+
+        _branch = _get_git_branch(test_dir)
         info_lines = [
             f"[bold]Config [/bold]   : {os.path.abspath(_config_path)}",
             f"[bold]Test dir[/bold]  : {test_dir}",
             f"[bold]Log dir[/bold]   : {os.path.abspath(log_dir)}",
         ]
+        if _branch:
+            info_lines.append(f"[bold]Branch[/bold]    : [cyan]{_branch}[/cyan]")
         if _suite_names:
             info_lines.append(f"[bold]Suite[/bold]     : {_suite_names}")
         if _cases:

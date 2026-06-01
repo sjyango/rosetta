@@ -95,6 +95,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_result_subparser(subparsers)
     _add_interactive_subparser(subparsers)
     _add_update_subparser(subparsers)
+    _add_tdsql_subparser(subparsers)
 
     return parser
 
@@ -587,6 +588,69 @@ def _add_update_subparser(subparsers):
     _add_global_options(update_parser)
 
 
+def _add_tdsql_subparser(subparsers):
+    """Add the 'tdsql' subcommand group (build/uninstall/install/reinstall)."""
+    tdsql_parser = subparsers.add_parser(
+        "tdsql",
+        help="TDSQL build/install management",
+        description="Build, uninstall, install, or reinstall TDSQL instances",
+    )
+    _add_global_options(tdsql_parser)
+
+    tdsql_sub = tdsql_parser.add_subparsers(dest="tdsql_action")
+
+    def _add_build_options(p):
+        """Shared build-time flags for `tdsql build` and `tdsql reinstall`."""
+        p.add_argument(
+            "--mode", choices=["debug", "release", "asan"], default="debug",
+            help="Build mode (default: debug)")
+        p.add_argument(
+            "--compiler", choices=["clang", "gcc"], default=None,
+            help="C/C++ compiler (default: from config)")
+        p.add_argument(
+            "--linker", choices=["mold", "lld", "bfd"], default=None,
+            help="Linker (default: lld for debug, mold otherwise)")
+        p.add_argument(
+            "--jobs", "-j", type=int, default=None,
+            help="Parallel compile threads (default: from config)")
+        p.add_argument(
+            "--build-ut", dest="build_ut", action="store_true", default=False,
+            help="Build unit tests (default: skip UT for faster builds)")
+        p.add_argument(
+            "--with-lance", dest="with_lance",
+            choices=["on", "off"], default=None,
+            help="Build the lance duckdb extension (default: leave as-is)")
+        p.add_argument(
+            "--enable-lsan", dest="enable_lsan",
+            action="store_true", default=False,
+            help="Enable LeakSanitizer (only effective with --mode=asan)")
+        p.add_argument(
+            "--verbose", dest="build_verbose",
+            action="store_true", default=False,
+            help="Print full cmake/cargo command lines during build")
+
+    # rosetta tdsql build
+    build_p = tdsql_sub.add_parser("build", help="Compile TDSQL from source")
+    _add_build_options(build_p)
+
+    # rosetta tdsql uninstall
+    tdsql_sub.add_parser("uninstall", help="Stop and remove TDSQL instance")
+
+    # rosetta tdsql deploy
+    tdsql_sub.add_parser("deploy", help="Uninstall + Install (redeploy instance)")
+
+    # rosetta tdsql install
+    install_p = tdsql_sub.add_parser("install", help="Install and start TDSQL instance")
+    install_p.add_argument(
+        "--port-base", type=int, default=None,
+        help="Port base for cluster (default: from config)")
+
+    # rosetta tdsql reinstall
+    reinstall_p = tdsql_sub.add_parser(
+        "reinstall", help="Build + uninstall + install in one step")
+    _add_build_options(reinstall_p)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """
     Main entry point for the rosetta CLI.
@@ -697,6 +761,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif args.command == "update":
             from .update_cmd import handle_update
             result = handle_update(args, output)
+        elif args.command == "tdsql":
+            from .tdsql_cmd import handle_tdsql
+            result = handle_tdsql(args, output)
         else:
             result = CommandResult.failure(
                 f"Unknown command: {args.command}",

@@ -2640,12 +2640,13 @@ def _select_mode(configs, database: str,
     from prompt_toolkit.layout.controls import FormattedTextControl
 
     MODES = [
-        ("mtr",        "MTR mode",        "run native MySQL MTR tests"),
-        ("test",       "Test mode",       "run .test compatibility tests"),
-        ("playground", "Playground mode",  "run SQL Playground in browser"),
-        ("bench",      "Benchmark mode",   "run JSON performance benchmarks"),
-        ("config",     "Config",           "edit database and MTR settings"),
-        (None,         "Quit",             "exit"),
+        ("mtr",        "MTR MODE",        "run native MySQL MTR tests"),
+        ("test",       "TEST MODE",       "run .test compatibility tests"),
+        ("playground", "PLAYGROUND MODE",  "run SQL Playground in browser"),
+        ("bench",      "BENCHMARK MODE",   "run JSON performance benchmarks"),
+        ("tdsql",      "TDSQL MODE",       "build / install / manage TDSQL"),
+        ("config",     "CONFIG",           "edit database and MTR settings"),
+        (None,         "QUIT",             "exit"),
     ]
 
     # Row layout: row 0 = DBMS multiselect, rows 1..N = mode items
@@ -2757,6 +2758,7 @@ def _select_mode(configs, database: str,
         "test": 2,         # cross-DBMS comparison needs at least 2
         "playground": 2,   # cross-DBMS comparison needs at least 2
         "bench": 2,        # cross-DBMS comparison needs at least 2
+        "tdsql": 0,        # TDSQL management doesn't need DBMS
         "config": 0,       # config editing doesn't need DBMS
     }
     warn_msg = [""]  # mutable warning message shown in UI
@@ -2782,8 +2784,8 @@ def _select_mode(configs, database: str,
                     f"{min_req} DBMS ({len(selected)} selected)")
             event.app.invalidate()
             return
-        # Baseline DBMS must be selected and reachable (skip for config mode)
-        if key != "config" and baseline:
+        # Baseline DBMS must be selected and reachable (skip for config/tdsql modes)
+        if key not in ("config", "tdsql") and baseline:
             selected_names = {c.name for c in selected}
             if baseline not in selected_names:
                 warn_msg[0] = (
@@ -3722,6 +3724,453 @@ def _select_config_editor(config_path: str) -> Optional[str]:
     _tty_write("\033[u\033[J")
 
     return result_val[0]
+
+
+# ---------------------------------------------------------------------------
+# TDSQL interactive action selector
+# ---------------------------------------------------------------------------
+
+def _post_build_selector(console) -> str:
+    """After successful build, let user choose next action.
+
+    Returns "deploy" to uninstall+install, or "back" to return to menu.
+    """
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    OPTIONS = [
+        ("deploy", "Deploy", "Uninstall current + Install new build"),
+        ("back",   "Back to menu",        "Return without deploying"),
+    ]
+
+    sel = [0]
+    result = [None]
+
+    def _get_text():
+        lines = []
+        lines.append(("", "\n"))
+        lines.append(("green bold", "  ✓ Build succeeded! "))
+        lines.append(("", "What would you like to do next?\n\n"))
+        for i, (key, label, hint) in enumerate(OPTIONS):
+            is_sel = (i == sel[0])
+            icon = "◆" if is_sel else "◇"
+            style = "bold cyan" if is_sel else "dim"
+            lines.append((style, f"    {icon} {label}"))
+            if is_sel:
+                lines.append(("dim", f"  — {hint}"))
+            lines.append(("", "\n"))
+        lines.append(("", "\n"))
+        return lines
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("k")
+    def _up(event):
+        sel[0] = (sel[0] - 1) % len(OPTIONS)
+        event.app.invalidate()
+
+    @kb.add("down")
+    @kb.add("j")
+    def _down(event):
+        sel[0] = (sel[0] + 1) % len(OPTIONS)
+        event.app.invalidate()
+
+    @kb.add("enter")
+    @kb.add(" ")
+    def _confirm(event):
+        result[0] = OPTIONS[sel[0]][0]
+        event.app.exit()
+
+    @kb.add("q")
+    @kb.add("escape")
+    def _quit(event):
+        result[0] = "back"
+        event.app.exit()
+
+    control = FormattedTextControl(_get_text)
+    app = Application(
+        layout=Layout(HSplit([Window(content=control)])),
+        key_bindings=kb,
+        full_screen=False,
+    )
+
+    try:
+        app.run()
+    except (EOFError, KeyboardInterrupt):
+        return "back"
+
+    return result[0] or "back"
+
+
+def _select_tdsql_action(config_path: str) -> Optional[str]:
+    """Interactive TDSQL management menu.
+
+    Shows build mode selector + action buttons (Build/Uninstall/Install/Reinstall).
+    Executes selected action with live log output.
+
+    Returns "back" to return to main menu, None to quit.
+    """
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from rich.console import Console as _RichConsole
+
+    from .cli.tdsql_cmd import _load_tdsql_config, _do_build, _do_uninstall, _do_install
+
+    cfg = _load_tdsql_config(config_path)
+
+    # State
+    BUILD_MODES = ["debug", "release", "asan"]
+    COMPILERS = ["clang", "gcc"]
+    LINKERS = ["mold", "lld", "bfd"]
+    JOBS_PRESETS = [4, 8, 16, 20, 32, 64]
+
+    mode_idx = [0]      # default: debug
+    comp_idx = [COMPILERS.index(cfg["compiler"])
+                if cfg["compiler"] in COMPILERS else 0]
+    # default linker depends on build mode (debug→lld, release/asan→mold)
+    _default_linker = cfg["linker_debug"] if BUILD_MODES[mode_idx[0]] == "debug" \
+        else cfg["linker_release"]
+    link_idx = [LINKERS.index(_default_linker)
+                if _default_linker in LINKERS else 0]
+    jobs_idx = [JOBS_PRESETS.index(cfg["parallel_jobs"])
+                if cfg["parallel_jobs"] in JOBS_PRESETS else 3]
+    build_ut = [False]
+    with_lance = [False]
+    enable_lsan = [False]
+    verbose = [False]
+
+    sel = [0]
+    result = [None]
+
+    FIELDS = [
+        {"label": "Build Mode",  "type": "choice"},
+        {"label": "Compiler",    "type": "choice"},
+        {"label": "Linker",      "type": "choice"},
+        {"label": "Concurrency", "type": "choice"},
+        {"label": "Build UT",    "type": "toggle", "var": "build_ut"},
+        {"label": "With Lance",  "type": "toggle", "var": "with_lance"},
+        {"label": "Enable LSAN", "type": "toggle", "var": "enable_lsan"},
+        {"label": "Verbose",     "type": "toggle", "var": "verbose"},
+        {"label": "Build",       "type": "action"},
+        {"label": "Deploy",      "type": "action"},
+        {"label": "Reinstall",   "type": "action"},
+        {"label": "Back",        "type": "action"},
+        {"label": "Quit",        "type": "action"},
+    ]
+
+    # Field index helpers
+    IDX_BUILD_MODE = 0
+    IDX_COMPILER = 1
+    IDX_LINKER = 2
+    IDX_JOBS = 3
+    IDX_BUILD_UT = 4
+    IDX_WITH_LANCE = 5
+    IDX_ENABLE_LSAN = 6
+    IDX_VERBOSE = 7
+
+    TOGGLE_VARS = {
+        IDX_BUILD_UT: build_ut,
+        IDX_WITH_LANCE: with_lance,
+        IDX_ENABLE_LSAN: enable_lsan,
+        IDX_VERBOSE: verbose,
+    }
+
+    def _is_lsan_active():
+        """LSAN only meaningful in asan mode."""
+        return BUILD_MODES[mode_idx[0]] == "asan"
+
+    FIELD_HINTS = {
+        IDX_BUILD_MODE:  "debug=fast iter, release=perf, asan=leak/UB detection",
+        IDX_COMPILER:    "clang (default) | gcc — clang has better diagnostics",
+        IDX_LINKER:      "mold (fast, release) | lld (debug) | bfd (fallback)",
+        IDX_JOBS:        "Parallel compile threads — higher = faster but more RAM",
+        IDX_BUILD_UT:    "Compile unit tests (slower, larger binary)",
+        IDX_WITH_LANCE:  "Build the lance duckdb extension (requires Rust)",
+        IDX_ENABLE_LSAN: "Enable LeakSanitizer (only effective when Build Mode=asan)",
+        IDX_VERBOSE:     "Print full cmake/cargo command lines during build",
+        8:  "Compile TDSQL from source",
+        9:  f"Uninstall + Install (deploy to port {cfg['port_base'] + 5000})",
+        10: "Build + Uninstall + Install in one step",
+        11: "Return to main menu",
+        12: "Exit Rosetta",
+    }
+
+    _BOX_W = 60
+
+    def _display_width(s):
+        from prompt_toolkit.utils import get_cwidth
+        return sum(get_cwidth(ch) for ch in s)
+
+    def _box_top():
+        return ("dim cyan", "  ╭" + "─" * _BOX_W + "╮\n")
+
+    def _box_mid():
+        return ("dim cyan", "  ├" + "─" * _BOX_W + "┤\n")
+
+    def _box_bot():
+        return ("dim cyan", "  ╰" + "─" * _BOX_W + "╯\n")
+
+    def _box_row(fragments):
+        vis_w = sum(_display_width(t) for _, t in fragments)
+        pad = max(0, _BOX_W - vis_w)
+        row = [("dim cyan", "  │")]
+        row.extend(fragments)
+        row.append(("", " " * pad))
+        row.append(("dim cyan", "│\n"))
+        return row
+
+    def _get_text():
+        lines = []
+
+        # ASCII Logo
+        lines.append(("", "\n"))
+        for logo_line in LOGO_LINES:
+            lines.append(("bold cyan", f"    {logo_line}\n"))
+        lines.append(("", "\n"))
+        from . import __version__
+        lines.append(("dim", f"  {LOGO_SUBTITLE}"))
+        lines.append(("dim", f"  v{__version__}"))
+        lines.append(("bold white", "  TDSQL Mode\n"))
+        lines.append(("", "\n"))
+
+        # Box top
+        lines.append(_box_top())
+
+        # Hint bar
+        lines.extend(_box_row([
+            ("dim", "  ↑↓ navigate  ←→ change  Enter confirm  q back")
+        ]))
+        lines.append(_box_mid())
+
+        # Fields
+        label_width = max(len(f["label"]) for f in FIELDS if f["type"] != "action")
+
+        for i, field in enumerate(FIELDS):
+            is_sel = (i == sel[0])
+
+            if field["type"] == "action":
+                if field["label"] == "Quit":
+                    icon = "○"
+                else:
+                    icon = "◆" if is_sel else "◇"
+                style = "bold cyan" if is_sel else "dim"
+                lines.extend(_box_row([(style, f"  {icon} {field['label']}")]))
+            elif field["type"] == "toggle":
+                # On/Off toggle; LSAN is dimmed when not in asan mode
+                padded = f"{field['label']:<{label_width}s}"
+                var = TOGGLE_VARS[i]
+                val = "On" if var[0] else "Off"
+                # LSAN only effective in asan mode — visually deemphasize otherwise
+                disabled = (i == IDX_ENABLE_LSAN and not _is_lsan_active())
+                if is_sel:
+                    frags = [
+                        ("bold cyan", f"  {padded}  "),
+                        ("bold yellow", f"◄ {val} ►"),
+                    ]
+                    if disabled:
+                        frags.append(("dim italic", "  (asan only)"))
+                else:
+                    label_style = "dim italic" if disabled else "dim"
+                    val_style = "dim" if disabled else ""
+                    frags = [
+                        (label_style, f"  {padded}  "),
+                        (val_style, val),
+                    ]
+                lines.extend(_box_row(frags))
+            else:
+                # Choice field (build mode / compiler / linker / jobs)
+                padded = f"{field['label']:<{label_width}s}"
+                if i == IDX_BUILD_MODE:
+                    val = BUILD_MODES[mode_idx[0]]
+                elif i == IDX_COMPILER:
+                    val = COMPILERS[comp_idx[0]]
+                elif i == IDX_LINKER:
+                    val = LINKERS[link_idx[0]]
+                elif i == IDX_JOBS:
+                    val = str(JOBS_PRESETS[jobs_idx[0]])
+                else:
+                    val = ""
+                frags = []
+                if is_sel:
+                    frags.append(("bold cyan", f"  {padded}  "))
+                    frags.append(("bold yellow", f"◄ {val} ►"))
+                else:
+                    frags.append(("dim", f"  {padded}  "))
+                    frags.append(("", val))
+                lines.extend(_box_row(frags))
+
+        # Hint
+        lines.append(_box_mid())
+        hint = FIELD_HINTS.get(sel[0], "")
+        lines.extend(_box_row([("dim italic", f"  \U0001f4a1 {hint}")]))
+        lines.append(_box_bot())
+
+        return lines
+
+    # Key bindings
+    kb = KeyBindings()
+
+    @kb.add("up")
+    def _up(event):
+        sel[0] = (sel[0] - 1) % len(FIELDS)
+        event.app.invalidate()
+
+    @kb.add("down")
+    def _down(event):
+        sel[0] = (sel[0] + 1) % len(FIELDS)
+        event.app.invalidate()
+
+    @kb.add("left")
+    def _left(event):
+        i = sel[0]
+        if i == IDX_BUILD_MODE:
+            mode_idx[0] = (mode_idx[0] - 1) % len(BUILD_MODES)
+        elif i == IDX_COMPILER:
+            comp_idx[0] = (comp_idx[0] - 1) % len(COMPILERS)
+        elif i == IDX_LINKER:
+            link_idx[0] = (link_idx[0] - 1) % len(LINKERS)
+        elif i == IDX_JOBS:
+            jobs_idx[0] = (jobs_idx[0] - 1) % len(JOBS_PRESETS)
+        elif i in TOGGLE_VARS:
+            TOGGLE_VARS[i][0] = not TOGGLE_VARS[i][0]
+        event.app.invalidate()
+
+    @kb.add("right")
+    def _right(event):
+        i = sel[0]
+        if i == IDX_BUILD_MODE:
+            mode_idx[0] = (mode_idx[0] + 1) % len(BUILD_MODES)
+        elif i == IDX_COMPILER:
+            comp_idx[0] = (comp_idx[0] + 1) % len(COMPILERS)
+        elif i == IDX_LINKER:
+            link_idx[0] = (link_idx[0] + 1) % len(LINKERS)
+        elif i == IDX_JOBS:
+            jobs_idx[0] = (jobs_idx[0] + 1) % len(JOBS_PRESETS)
+        elif i in TOGGLE_VARS:
+            TOGGLE_VARS[i][0] = not TOGGLE_VARS[i][0]
+        event.app.invalidate()
+
+    @kb.add("enter")
+    @kb.add(" ")
+    def _confirm(event):
+        i = sel[0]
+        # On choice/toggle fields, Enter cycles forward
+        if i == IDX_BUILD_MODE:
+            mode_idx[0] = (mode_idx[0] + 1) % len(BUILD_MODES)
+            event.app.invalidate()
+        elif i == IDX_COMPILER:
+            comp_idx[0] = (comp_idx[0] + 1) % len(COMPILERS)
+            event.app.invalidate()
+        elif i == IDX_LINKER:
+            link_idx[0] = (link_idx[0] + 1) % len(LINKERS)
+            event.app.invalidate()
+        elif i == IDX_JOBS:
+            jobs_idx[0] = (jobs_idx[0] + 1) % len(JOBS_PRESETS)
+            event.app.invalidate()
+        elif i in TOGGLE_VARS:
+            TOGGLE_VARS[i][0] = not TOGGLE_VARS[i][0]
+            event.app.invalidate()
+        elif FIELDS[i]["label"] == "Back":
+            result[0] = "back"
+            event.app.exit()
+        elif FIELDS[i]["label"] == "Quit":
+            result[0] = None
+            event.app.exit()
+        else:
+            result[0] = FIELDS[i]["label"].lower()
+            event.app.exit()
+
+    @kb.add("q")
+    @kb.add("escape")
+    def _quit(event):
+        result[0] = "back"
+        event.app.exit()
+
+    # Build and run application
+    control = FormattedTextControl(_get_text)
+    app = Application(
+        layout=Layout(HSplit([Window(content=control)])),
+        key_bindings=kb,
+        full_screen=False,
+    )
+
+    try:
+        app.run()
+    except (EOFError, KeyboardInterrupt):
+        return "back"
+
+    if result[0] == "back":
+        return "back"
+    if result[0] is None:
+        return None  # Quit
+
+    # Execute the selected action
+    console = _RichConsole(stderr=True)
+    action = result[0]
+    mode = BUILD_MODES[mode_idx[0]]
+
+    # Pack user-selected options into an overrides dict for _do_build
+    build_overrides = {
+        "compiler": COMPILERS[comp_idx[0]],
+        "linker": LINKERS[link_idx[0]],
+        "parallel_jobs": JOBS_PRESETS[jobs_idx[0]],
+        "build_ut": build_ut[0],
+        "with_lance": with_lance[0],  # bool → maps to --with-lance=on/off
+        "enable_lsan": enable_lsan[0] and (mode == "asan"),
+        "verbose": verbose[0],
+    }
+
+    if action == "build":
+        rc = _do_build(cfg, mode, overrides=build_overrides)
+        if rc == 0:
+            # Build succeeded — ask next step via selector
+            next_action = _post_build_selector(console)
+            if next_action == "deploy":
+                rc2 = _do_uninstall(cfg)
+                if rc2 == 0:
+                    _do_install(cfg)
+                console.print("\n  [dim]Press Enter to continue...[/dim]")
+                try:
+                    input()
+                except (EOFError, KeyboardInterrupt):
+                    pass
+        else:
+            # Build failed
+            console.print("\n  [dim]Press Enter to return to menu...[/dim]")
+            try:
+                input()
+            except (EOFError, KeyboardInterrupt):
+                pass
+    elif action == "deploy":
+        rc = _do_uninstall(cfg)
+        if rc == 0:
+            _do_install(cfg)
+        console.print("\n  [dim]Press Enter to continue...[/dim]")
+        try:
+            input()
+        except (EOFError, KeyboardInterrupt):
+            pass
+    elif action == "reinstall":
+        rc = _do_build(cfg, mode, overrides=build_overrides)
+        if rc == 0:
+            rc = _do_uninstall(cfg)
+        if rc == 0:
+            _do_install(cfg)
+        console.print("\n  [dim]Press Enter to continue...[/dim]")
+        try:
+            input()
+        except (EOFError, KeyboardInterrupt):
+            pass
+
+    return "continue"  # Stay in TDSQL menu
+
 
 def _select_mtr_params(
     mode: str = "row",
@@ -4791,6 +5240,38 @@ def _enter_interactive(args) -> int:
                         except Exception:
                             pass
                 default_dbms = [c.name for c in configs]
+            print("\033[2J\033[H", end="", flush=True)
+            _ensure_bg_server()
+            mode, selected_configs = _select_mode(
+                configs, args.database,
+                reachable_names=reachable_names,
+                default_dbms=default_dbms,
+                baseline=args.baseline,
+                server_url=bg_server.base_url if bg_server and bg_server.running else "",
+                dbms_status=dbms_status_info,
+            )
+            if mode is None:
+                console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                return 0
+            if selected_configs:
+                default_dbms = [c.name for c in selected_configs]
+            continue
+
+        elif mode == "tdsql":
+            # TDSQL management mode — loop in TDSQL menu until Back/Quit
+            while True:
+                print("\033[2J\033[H", end="", flush=True)
+                tdsql_result = _select_tdsql_action(args.config)
+                if tdsql_result is None:
+                    # User chose Quit
+                    if bg_server:
+                        bg_server.stop()
+                    console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                    return 0
+                if tdsql_result == "back":
+                    break  # Return to main menu
+                # "continue" — loop back to TDSQL menu
+            # Back to main menu
             print("\033[2J\033[H", end="", flush=True)
             _ensure_bg_server()
             mode, selected_configs = _select_mode(

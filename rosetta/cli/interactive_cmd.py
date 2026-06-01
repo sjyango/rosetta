@@ -177,20 +177,17 @@ def handle_interactive(args, output: "OutputFormatter") -> CommandResult:
         elapsed_total = f"{_time.time() - _start_time:.1f}s"
 
         if not reachable_configs:
-            all_enabled_names = [
-                f"{c.name} ({c.host}:{c.port})"
-                for c in enabled_configs]
-            _status_console.print()
-            return CommandResult.failure(
-                "No reachable DBMS found within "
-                f"{elapsed_total}.\n"
-                f"All enabled: {', '.join(all_enabled_names)}\n"
-                "Tip: use --dbms to specify targets "
-                "(e.g. --dbms tdsql,mysql)\n"
-                'Or set "enabled": true for available DBMS.')
+            # No DBMS reachable — still allow entering interactive mode
+            # so user can access TDSQL management, Config, etc.
+            down_names = [f"{c.name}" for c in enabled_configs]
+            _status_console.print(
+                f"  [yellow]⚠[/yellow] No DBMS reachable: "
+                f"[red]{', '.join(down_names)}[/red]")
+            _status_console.print(
+                f"  [dim]Entering interactive mode (TDSQL/Config available)...[/dim]")
 
         # Warn about enabled-but-down DBMS (non-fatal in auto-detect mode)
-        if unreachable_enabled:
+        elif unreachable_enabled:
             down_names = [f"{c.name}" for c in unreachable_enabled]
             _status_console.print(
                 f"  [yellow]⚠[/yellow] Down: [red]{', '.join(down_names)}[/red]")
@@ -200,10 +197,10 @@ def handle_interactive(args, output: "OutputFormatter") -> CommandResult:
             f"  [green]✓[/green] [bold green]{len(reachable_configs)} DBMS ready[/bold green]: "
             f"[cyan]{detected_names}[/cyan]  [dim]{elapsed_total}[/dim]")
 
-        configs = reachable_configs
-    
+        configs = reachable_configs if reachable_configs else enabled_configs
+
     if not configs:
-        return CommandResult.failure("No databases selected")
+        return CommandResult.failure("No databases configured")
     
     # Start interactive session
     # Note: For JSON output mode, we still launch interactive but inform user
