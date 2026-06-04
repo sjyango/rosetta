@@ -42,6 +42,6 @@ ENV MYSQL_HOST=11.142.154.110 \
     MYSQL_USER=with_ugmatclusdrxhadd \
     MYSQL_PASSWORD=Xe#RGXP8$a0XQQ \
     MYSQL_DATABASE=rf5otpny \
-    ROSETTA_CONFIG=/app/rosetta_config.json
+    ROSETTA_CONFIG=/app/with_config.json
 
-CMD ["python", "-m", "rosetta.playground_server", "--config", "/app/rosetta_config.json", "--port", "8000", "--output-dir", "/app/output"]
+CMD ["python", "-m", "rosetta.playground_server", "--config", "/app/with_config.json", "--port", "8000", "--output-dir", "/app/output"]

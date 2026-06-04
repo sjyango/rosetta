@@ -985,7 +985,9 @@ class PlaygroundServer:
 
 def main():
     parser = argparse.ArgumentParser(description="Rosetta Playground Server for With Platform")
-    parser.add_argument("-c", "--config", default="rosetta_config.json", help="DBMS config file")
+    parser.add_argument("-c", "--config",
+                        default=os.environ.get("ROSETTA_CONFIG", "with_config.json"),
+                        help="DBMS config file (env: ROSETTA_CONFIG)")
     parser.add_argument("-p", "--port", type=int, default=19527, help="HTTP port")
     parser.add_argument("-d", "--database", default="cross_dbms_test_db", help="Default database")
     parser.add_argument("-o", "--output-dir", default="results", help="Results directory")

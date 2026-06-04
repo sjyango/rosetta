@@ -1,0 +1,115 @@
+{
+  "_comment": "══════════════════════════════════════════════════════════",
+  "_comment2": "  Rosetta Playground — With Platform 专用配置文件",
+  "_comment3": "  所有 DBMS 部署在 AnyDev 容器 (21.6.101.185) 上",
+  "_comment4": "  With 容器通过 TCP 远程连接执行 SQL 并比对 diff",
+  "_comment5": "══════════════════════════════════════════════════════════",
+
+  "playground": {
+    "traceless": true,
+    "_note": "traceless=true 表示每次执行后自动清理临时数据库，不留痕迹"
+  },
+
+  "databases": [
+    {
+      "_comment": "────────── MySQL 8.0 ──────────",
+      "name": "mysql-8.0",
+      "type": "mysql",
+      "host": "21.6.101.185",
+      "port": 3306,
+      "user": "root",
+      "password": "",
+      "driver": "pymysql",
+      "skip_patterns": [],
+      "init_sql": [
+        "SET sql_mode='STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'",
+        "SET NAMES utf8mb4"
+      ],
+      "enabled": true
+    },
+    {
+      "_comment": "────────── MySQL 9.6 (Innovation Release) ──────────",
+      "name": "mysql-9.6",
+      "type": "mysql",
+      "host": "21.6.101.185",
+      "port": 3307,
+      "user": "root",
+      "password": "",
+      "driver": "pymysql",
+      "skip_patterns": [],
+      "init_sql": [
+        "SET sql_mode='STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'",
+        "SET NAMES utf8mb4"
+      ],
+      "enabled": true
+    },
+    {
+      "_comment": "────────── TDSQL ──────────",
+      "name": "tdsql",
+      "type": "tdsql",
+      "host": "21.6.101.185",
+      "port": 4000,
+      "user": "root",
+      "password": "",
+      "driver": "pymysql",
+      "skip_patterns": ["tdsql_", "ddl_recovery"],
+      "init_sql": [],
+      "enabled": false
+    },
+    {
+      "_comment": "────────── TiDB ──────────",
+      "name": "tidb",
+      "type": "tidb",
+      "host": "21.6.101.185",
+      "port": 4001,
+      "user": "root",
+      "password": "",
+      "driver": "pymysql",
+      "skip_patterns": ["tdsql_", "ddl_recovery"],
+      "init_sql": [],
+      "enabled": false
+    },
+    {
+      "_comment": "────────── OceanBase (MySQL 兼容模式) ──────────",
+      "name": "oceanbase",
+      "type": "oceanbase",
+      "host": "21.6.101.185",
+      "port": 2881,
+      "user": "root@mysql",
+      "password": "",
+      "driver": "pymysql",
+      "skip_patterns": ["tdsql_", "ddl_recovery"],
+      "init_sql": [],
+      "enabled": false
+    },
+    {
+      "_comment": "────────── Oracle 19c/21c ──────────",
+      "name": "oracle",
+      "type": "oracle",
+      "host": "21.6.101.185",
+      "port": 1521,
+      "user": "test_user",
+      "password": "",
+      "driver": "oracledb",
+      "service_name": "orclpdb1",
+      "skip_patterns": [],
+      "init_sql": [
+        "ALTER SESSION SET NLS_DATE_FORMAT='YYYY-MM-DD HH24:MI:SS'"
+      ],
+      "enabled": false
+    },
+    {
+      "_comment": "────────── PostgreSQL 15 ──────────",
+      "name": "postgres-15",
+      "type": "mysql",
+      "host": "21.6.101.185",
+      "port": 5432,
+      "user": "postgres",
+      "password": "",
+      "driver": "pymysql",
+      "skip_patterns": [],
+      "init_sql": [],
+      "enabled": false
+    }
+  ]
+}

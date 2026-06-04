@@ -30,8 +30,8 @@ ENV MYSQL_USER=with_ugmatclusdrxhadd
 ENV MYSQL_PASSWORD=Xe#RGXP8$a0XQQ
 ENV MYSQL_DATABASE=rf5otpny
 
-# Default config path
-ENV ROSETTA_CONFIG=/app/rosetta_config.json
+# Default config path (With platform 专用配置)
+ENV ROSETTA_CONFIG=/app/with_config.json
 
 # Run playground server
-CMD ["python", "-m", "rosetta.playground_server", "--config", "/app/rosetta_config.json", "--port", "19527", "--output-dir", "/app/results"]
+CMD ["python", "-m", "rosetta.playground_server", "--config", "/app/with_config.json", "--port", "19527", "--output-dir", "/app/results"]
