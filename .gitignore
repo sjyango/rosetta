@@ -11,3 +11,7 @@ benchmark/
 rosetta-skill.zip
 docs/
 .codebuddy/
+.agent/
+.claude/
+data/
+output/
