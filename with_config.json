@@ -1,19 +1,20 @@
 {
-  "_comment": "══════════════════════════════════════════════════════════",
-  "_comment2": "  Rosetta Playground — With Platform 专用配置文件",
-  "_comment3": "  所有 DBMS 部署在 AnyDev 容器 (21.6.101.185) 上",
-  "_comment4": "  With 容器通过 TCP 远程连接执行 SQL 并比对 diff",
-  "_comment5": "══════════════════════════════════════════════════════════",
+  "_comment": "══════════════════════════════════════════════════════════════",
+  "_comment2": " Rosetta Playground — With Platform 专用配置文件",
+  "_comment3": " 所有 DBMS 部署在 AnyDev 容器 (21.6.101.185) 上",
+  "_comment4": " With 容器通过 TCP 远程连接执行 SQL 并比对 diff",
+  "_comment5": " 实测验证时间: 2026-06-04",
+  "_comment6": "══════════════════════════════════════════════════════════════",
 
   "playground": {
     "traceless": true,
-    "_note": "traceless=true 表示每次执行后自动清理临时数据库，不留痕迹"
+    "_note": "每次执行后自动清理临时数据库，不留痕迹"
   },
 
   "databases": [
     {
-      "_comment": "────────── MySQL 8.0 ──────────",
-      "name": "mysql-8.0",
+      "_comment": "──── ✅ 已验证: MySQL 9.6.0 ────",
+      "name": "mysql-9.6",
       "type": "mysql",
       "host": "21.6.101.185",
       "port": 3306,
@@ -28,8 +29,8 @@
       "enabled": true
     },
     {
-      "_comment": "────────── MySQL 9.6 (Innovation Release) ──────────",
-      "name": "mysql-9.6",
+      "_comment": "──── ✅ 已验证: TXSQL 8.0.30 (Tencent MySQL fork) ────",
+      "name": "txsql-8.0",
       "type": "mysql",
       "host": "21.6.101.185",
       "port": 3307,
@@ -44,9 +45,9 @@
       "enabled": true
     },
     {
-      "_comment": "────────── TDSQL ──────────",
-      "name": "tdsql",
-      "type": "tdsql",
+      "_comment": "──── ✅ 已验证: TiDB 8.5.6 ────",
+      "name": "tidb-8.5",
+      "type": "tidb",
       "host": "21.6.101.185",
       "port": 4000,
       "user": "root",
@@ -54,36 +55,23 @@
       "driver": "pymysql",
       "skip_patterns": ["tdsql_", "ddl_recovery"],
       "init_sql": [],
-      "enabled": false
+      "enabled": true
     },
     {
-      "_comment": "────────── TiDB ──────────",
-      "name": "tidb",
-      "type": "tidb",
-      "host": "21.6.101.185",
-      "port": 4001,
-      "user": "root",
-      "password": "",
-      "driver": "pymysql",
-      "skip_patterns": ["tdsql_", "ddl_recovery"],
-      "init_sql": [],
-      "enabled": false
-    },
-    {
-      "_comment": "────────── OceanBase (MySQL 兼容模式) ──────────",
+      "_comment": "──── ⚠ OceanBase 待修复认证 ────",
       "name": "oceanbase",
       "type": "oceanbase",
       "host": "21.6.101.185",
       "port": 2881,
-      "user": "root@mysql",
+      "user": "root",
       "password": "",
       "driver": "pymysql",
-      "skip_patterns": ["tdsql_", "ddl_recovery"],
+      "skip_patterns": [],
       "init_sql": [],
       "enabled": false
     },
     {
-      "_comment": "────────── Oracle 19c/21c ──────────",
+      "_comment": "──── ⬜ 预留: Oracle ────",
       "name": "oracle",
       "type": "oracle",
       "host": "21.6.101.185",
@@ -99,7 +87,7 @@
       "enabled": false
     },
     {
-      "_comment": "────────── PostgreSQL 15 ──────────",
+      "_comment": "──── ⬜ 预留: PostgreSQL ────",
       "name": "postgres-15",
       "type": "mysql",
       "host": "21.6.101.185",
