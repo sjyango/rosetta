@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+dist-skill/
+build/
+.eggs/
+results/
+dbms_config.json
+benchmark/
+rosetta-skill.zip
+docs/
+.codebuddy/
+.agent/
+.claude/
+data/
+output/

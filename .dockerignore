@@ -1,0 +1,59 @@
+# Version control
+.git
+.gitignore
+.github
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.eggs
+venv
+*.so
+
+# Build artifacts
+dist
+build
+*.egg
+
+# IDE
+.vscode
+.idea
+*.swp
+.claude
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Test files
+tests
+.pytest_cache
+pytest.ini
+
+# Documentation
+README.md
+*.md
+!SKILL.md
+
+# Environment
+.env
+*.env
+
+# Data / results (generated at runtime)
+data
+results
+output
+
+# Misc
+coverage
+.cache
+tmp
+temp
+node_modules
+vscode-extension
+skills

@@ -1,0 +1,5821 @@
+"""Command-line interface for Rosetta."""
+
+import argparse
+import concurrent.futures
+import http.server
+import logging
+import os
+import shutil
+import socket
+import socketserver
+import subprocess
+import sys
+import threading
+import time as _time
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+from .comparator import compare_outputs
+from .config import (DEFAULT_TEST_DB, filter_configs, generate_sample_config,
+                     load_config)
+from .executor import run_on_dbms
+from .models import CompareResult, DBMSConfig, Statement, StmtType, WorkloadMode
+from .mtr.parser import MtrParser
+from .paths import CONFIG_FILE, RESULTS_DIR
+from .reporter.html import write_html_report
+from .reporter.history import generate_index_html
+from .reporter.text import write_text_report
+from .ui import (ExecutionProgress, LOGO_LINES, LOGO_SUBTITLE, LOGO_WIDTH,
+                 RichLogHandler, console, flush_all,
+                 print_banner, print_error, print_info, print_phase,
+                 print_report_file, print_server_info, print_success,
+                 print_summary, print_warning)
+
+log = logging.getLogger("rosetta")
+
+
+class _SilentHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    """Threaded HTTPServer that silently handles connection errors."""
+    daemon_threads = True
+    request_queue_size = 128
+
+    def handle_error(self, request, client_address):
+        """Silently ignore connection reset/broken pipe errors."""
+        pass
+
+
+class _NoCacheHandler(http.server.SimpleHTTPRequestHandler):
+    """HTTP handler that disables caching for all responses."""
+
+    def log_message(self, format, *args):  # noqa: A002
+        pass  # Suppress request logs
+
+    def end_headers(self):  # noqa: N802
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        super().end_headers()
+
+
+def _tty_write(data: str):
+    """Write escape codes directly to /dev/tty.
+
+    In environments where sys.stdout is a pipe (e.g. IDE terminals),
+    prompt_toolkit writes to /dev/tty but sys.stdout does not reach the
+    terminal.  This helper ensures escape sequences actually reach the
+    terminal device.
+    """
+    try:
+        fd = os.open("/dev/tty", os.O_WRONLY)
+        try:
+            os.write(fd, data.encode())
+        finally:
+            os.close(fd)
+    except OSError:
+        sys.stdout.write(data)
+        sys.stdout.flush()
+
+
+class RosettaRunner:
+    """Orchestrates parsing, execution, comparison, and reporting."""
+
+    def __init__(self, test_file: str, configs: List[DBMSConfig],
+                 output_dir: str, database: str = DEFAULT_TEST_DB,
+                 baseline: Optional[str] = None,
+                 skip_explain: bool = True,
+                 skip_analyze: bool = True,
+                 skip_show_create: bool = True,
+                 output_format: str = "all"):
+        self.test_file = test_file
+        self.configs = configs
+        self.output_dir = output_dir
+        self.database = database
+        self.baseline = baseline
+        self.skip_explain_global = skip_explain
+        self.skip_analyze_global = skip_analyze
+        self.skip_show_create_global = skip_show_create
+        self.output_format = output_format
+        self.results: Dict[str, List[str]] = {}
+        self.failed_connections: set = set()
+
+    def _should_skip_stmt_global(self, stmt: Statement) -> bool:
+        """Check if a statement should be skipped globally.
+
+        Only uses global CLI flags (--skip-explain, --skip-analyze,
+        --skip-show-create).  Per-DBMS skip settings are NOT supported
+        because all DBMS must execute the same SQL list for fair comparison.
+        """
+        if stmt.stmt_type != StmtType.SQL:
+            return False
+
+        sql_upper = stmt.text.strip().upper()
+
+        if self.skip_explain_global and sql_upper.startswith("EXPLAIN"):
+            return True
+        if self.skip_analyze_global and sql_upper.startswith("ANALYZE"):
+            return True
+        if (self.skip_show_create_global
+                and sql_upper.startswith("SHOW CREATE")):
+            return True
+
+        return False
+
+    def _order_configs(self) -> List[DBMSConfig]:
+        """Order configs: baseline first, then 'mysql', then others."""
+        baseline_cfg = []
+        mysql_cfg = []
+        others = []
+        for c in self.configs:
+            if self.baseline and c.name == self.baseline:
+                baseline_cfg.append(c)
+            elif c.name == "mysql":
+                mysql_cfg.append(c)
+            else:
+                others.append(c)
+        return baseline_cfg + mysql_cfg + others
+
+    def _compare_all(self) -> Dict[str, CompareResult]:
+        """Compare results across all DBMS pairs."""
+        names = [n for n in self.results if n not in self.failed_connections]
+        comparisons = {}
+
+        # Build list of SQL types to skip from diff comparison
+        skip_sql_types = []
+        if self.skip_explain_global:
+            skip_sql_types.append("EXPLAIN")
+        if self.skip_analyze_global:
+            skip_sql_types.append("ANALYZE")
+        if self.skip_show_create_global:
+            skip_sql_types.append("SHOW CREATE")
+
+        if self.baseline and self.baseline in self.results:
+            for name in names:
+                if name == self.baseline:
+                    continue
+                key = f"{self.baseline}_vs_{name}"
+                comparisons[key] = compare_outputs(
+                    self.results[self.baseline],
+                    self.results[name],
+                    self.baseline, name,
+                    baseline_name=self.baseline,
+                    skip_sql_types=skip_sql_types or None,
+                )
+        else:
+            for i in range(len(names)):
+                for j in range(i + 1, len(names)):
+                    key = f"{names[i]}_vs_{names[j]}"
+                    comparisons[key] = compare_outputs(
+                        self.results[names[i]],
+                        self.results[names[j]],
+                        names[i], names[j],
+                        skip_sql_types=skip_sql_types or None,
+                    )
+
+        return comparisons
+
+    @staticmethod
+    def _estimate_total_commands(commands) -> int:
+        """Recursively estimate total commands including if/while bodies.
+
+        For while loops, attempts to estimate iteration count from the
+        condition (e.g. $i <= 1000). Falls back to 1 iteration if unknown.
+        """
+        import re
+        from .mtr.nodes import MtrCommandType
+
+        total = 0
+        for cmd in commands:
+            total += 1  # The command itself
+            if cmd.cmd_type == MtrCommandType.WHILE:
+                # Try to estimate loop iterations from condition
+                iterations = 1  # default fallback
+                if cmd.condition and cmd.condition.right_operand:
+                    try:
+                        iterations = int(cmd.condition.right_operand)
+                    except (ValueError, TypeError):
+                        pass
+                if cmd.body:
+                    body_cmds = RosettaRunner._estimate_total_commands(cmd.body)
+                    total += body_cmds * iterations
+            elif cmd.cmd_type == MtrCommandType.IF:
+                # Count the larger branch (body or else_body)
+                body_count = 0
+                else_count = 0
+                if cmd.body:
+                    body_count = RosettaRunner._estimate_total_commands(cmd.body)
+                if cmd.else_body:
+                    else_count = RosettaRunner._estimate_total_commands(cmd.else_body)
+                total += max(body_count, else_count)
+        return total
+
+    def _run_mtr_native(self) -> Dict[str, CompareResult]:
+        """Execute using the new rosetta.mtr module (full MTR syntax support).
+
+        Uses MtrParser + MtrExecutor + RosettaDBConnector to parse and
+        execute .test files with complete MTR directive support (variables,
+        conditionals, multi-connection, result processing, etc.).
+        """
+        from .mtr import MtrParser, MtrExecutor
+        from .mtr.adapter import RosettaDBConnector
+
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        # Parse with the new MTR parser
+        print_phase("Parse (MTR)", self.test_file)
+
+        # Auto-detect mysql-test directory for --source resolution
+        mysql_test_dir = self._detect_mysql_test_dir()
+
+        parser = MtrParser(self.test_file, mysql_test_dir=mysql_test_dir)
+        test = parser.parse()
+        n_cmds = self._estimate_total_commands(test.commands)
+        cmd_types = len(set(c.cmd_type.name for c in test.commands))
+        print_success(f"Parsed {n_cmds} commands ({cmd_types} types) "
+                      f"via rosetta.mtr")
+
+        # Execute on each DBMS (in parallel) with Live Table progress
+        configs = self._order_configs()
+        print_phase("Execute",
+                    f"{len(configs)} DBMS targets (parallel)")
+
+        # --- Live Table progress (same style as rosetta mtr) ---
+        from rich import box
+        from rich.console import Console
+        from rich.live import Live
+        from rich.table import Table
+        from rich.text import Text
+
+        # Track state for each DBMS
+        dbms_state: Dict[str, dict] = {
+            c.name: {
+                "status": "waiting",
+                "progress": 0,
+                "total": n_cmds,
+                "errors": 0,
+                "executed": 0,
+                "elapsed": 0.0,
+                "start_time": None,
+                "last_status": "",
+                "current_sql": "",
+            }
+            for c in configs
+        }
+        state_lock = threading.Lock()
+        run_start_time = _time.monotonic()
+
+        def _build_progress_table() -> Table:
+            table = Table(
+                show_header=True,
+                header_style="bold cyan",
+                expand=True,
+                padding=(0, 1),
+                box=box.ROUNDED,
+                show_edge=True,
+                show_lines=False,
+            )
+            table.add_column("DBMS", style="bold", width=10, no_wrap=True)
+            table.add_column("Progress", width=24, no_wrap=True)
+            table.add_column("Elapsed", justify="right", width=7, no_wrap=True)
+            table.add_column("Status", width=8, no_wrap=True, overflow="ellipsis")
+            table.add_column("Current SQL", ratio=1, overflow="ellipsis", style="dim", no_wrap=True)
+
+            for c in configs:
+                st = dbms_state[c.name]
+                # Elapsed time
+                if st["status"] == "done" and st["elapsed"] > 0:
+                    elapsed = st["elapsed"]
+                elif st["start_time"] is not None:
+                    elapsed = _time.monotonic() - st["start_time"]
+                else:
+                    elapsed = 0
+                mins, secs = divmod(int(elapsed), 60)
+                hours, mins = divmod(mins, 60)
+                if hours > 0:
+                    elapsed_str = f"{hours}h{mins:02d}m{secs:02d}s"
+                else:
+                    elapsed_str = f"{mins:02d}m{secs:02d}s"
+
+                # Progress display
+                pct = min(st.get("progress", 0), 100)
+                if st["status"] == "waiting":
+                    progress = Text("⏳ Waiting", style="dim")
+                elif st["status"] == "running":
+                    bar_filled = int(pct * 15 // 100)  # 15-char bar
+                    bar_empty = 15 - bar_filled
+                    bar_str = f"[yellow]{'█' * bar_filled}{'░' * bar_empty}[/yellow] {pct}%"
+                    progress = Text.from_markup(bar_str)
+                elif st["status"] == "done":
+                    if st["errors"] > 0:
+                        progress = Text(f"✅ {st['executed']} done ({st['errors']} err)", style="yellow bold")
+                    else:
+                        progress = Text("✅ Finished", style="green bold")
+                else:
+                    progress = Text(st["status"])
+
+                # Status text
+                status_text = st.get("last_status", "")
+
+                # Current SQL (only show when running)
+                current_sql = ""
+                if st["status"] == "running":
+                    current_sql = st.get("current_sql", "")
+
+                table.add_row(c.name, progress, elapsed_str, status_text, current_sql)
+
+            return table
+
+        # Track active executors for cancellation on Ctrl+C
+        active_executors = []
+        active_executors_lock = threading.Lock()
+
+        def _run_single(config):
+            """Execute on one DBMS using the new MTR engine."""
+            with state_lock:
+                dbms_state[config.name]["status"] = "running"
+                dbms_state[config.name]["start_time"] = _time.monotonic()
+
+            try:
+                connector = RosettaDBConnector(config,
+                                               database=self.database)
+
+                # Progress callback for the executor
+                def _on_mtr_progress(executed, has_error, cmd_info="", _name=config.name):
+                    with state_lock:
+                        st = dbms_state[_name]
+                        st["executed"] = executed
+                        if has_error:
+                            st["errors"] += 1
+                        if n_cmds > 0:
+                            st["progress"] = min(int(executed / n_cmds * 100), 100)
+                        err_str = f" ({st['errors']} err)" if st["errors"] else ""
+                        st["last_status"] = f"{executed}/{n_cmds}{err_str}"
+                        if cmd_info:
+                            st["current_sql"] = cmd_info
+
+                executor = MtrExecutor(connector,
+                                       mysql_test_dir=mysql_test_dir,
+                                       abort_on_error=False,
+                                       on_progress=_on_mtr_progress,
+                                       ignore_skip=(config.name != self.baseline))
+                connector.setup_default_connection(executor)
+
+                with active_executors_lock:
+                    active_executors.append(executor)
+
+                result = executor.execute(test)
+
+                # Update final status
+                with state_lock:
+                    st = dbms_state[config.name]
+                    st["elapsed"] = _time.monotonic() - (st["start_time"] or _time.monotonic())
+                    st["progress"] = 100
+                    st["executed"] = result.commands_executed
+                    st["status"] = "done"
+
+                    if result.skipped:
+                        st["last_status"] = f"SKIPPED: {result.skip_reason}"
+                    elif result.died:
+                        st["last_status"] = f"DIED: {result.die_reason}"
+                    elif result.errors:
+                        st["last_status"] = f"{result.commands_executed} done, {len(result.errors)} err"
+                    else:
+                        st["last_status"] = f"{result.commands_executed} done"
+
+                # Close all connections
+                try:
+                    executor.connections.close_all()
+                except Exception:
+                    pass
+
+                output = result.output_lines if not result.died else None
+            except Exception as e:
+                log.error("MTR execution failed for %s: %s",
+                          config.name, e)
+                output = None
+                with state_lock:
+                    st = dbms_state[config.name]
+                    st["status"] = "done"
+                    st["elapsed"] = _time.monotonic() - (st["start_time"] or _time.monotonic())
+                    st["progress"] = 100
+                    st["last_status"] = f"FAILED: {e}"
+
+            return config.name, output
+
+        # --- Suppress ALL stderr output during Live progress display ---
+        # Live renders to stderr; any stray write (logging, warnings,
+        # pymysql, traceback) corrupts the live table.
+        import io as _io
+
+        _saved_stderr = sys.stderr
+        _stderr_buffer = _io.StringIO()
+        sys.stderr = _stderr_buffer
+
+        # Recreate live_console with a direct reference to the real stderr,
+        # so that Rich Live output is not swallowed by the redirect above.
+        live_console = Console(file=_saved_stderr)
+
+        _saved_root_handlers = logging.root.handlers[:]
+        _saved_rosetta_handlers = log.handlers[:]
+        logging.root.handlers.clear()
+        log.handlers.clear()
+        log.addHandler(logging.NullHandler())
+
+        try:
+            with Live(
+                _build_progress_table(),
+                console=live_console,
+                refresh_per_second=2,
+                transient=False,
+            ) as live:
+                with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=len(configs)) as pool:
+                    futures = {pool.submit(_run_single, c): c for c in configs}
+
+                    interrupted = False
+                    while True:
+                        try:
+                            done_futures = {f for f in futures if f.done()}
+                            live.update(_build_progress_table())
+                            if len(done_futures) == len(futures):
+                                break
+                            _time.sleep(0.5)
+                        except KeyboardInterrupt:
+                            interrupted = True
+                            # Cancel all active executors (stops SQL execution)
+                            with active_executors_lock:
+                                for exc in active_executors:
+                                    exc.cancel()
+                            # Cancel pending futures
+                            for f in futures:
+                                f.cancel()
+                            # Update status for running DBMS
+                            with state_lock:
+                                for name, st in dbms_state.items():
+                                    if st["status"] == "running":
+                                        st["status"] = "done"
+                                        st["last_status"] = "CANCELLED"
+                                        st["progress"] = 100
+                            live.update(_build_progress_table())
+                            break
+
+                    for fut in futures:
+                        try:
+                            if fut.done() and not fut.cancelled():
+                                name, output = fut.result()
+                                if output is None:
+                                    self.failed_connections.add(name)
+                                else:
+                                    self.results[name] = output
+                        except Exception as e:
+                            m = futures[fut]
+                            self.failed_connections.add(m.name)
+                            log.error("MTR execution failed for %s: %s", m.name, e)
+
+                    if interrupted:
+                        live_console.print(
+                            "\n  [yellow]⚠ Interrupted by Ctrl+C. "
+                            "Partial results collected.[/yellow]\n")
+
+        finally:
+            # Restore stderr and logging handlers after Live progress display ends
+            sys.stderr = _saved_stderr
+            # Dump any captured stderr as debug log (for troubleshooting)
+            _captured = _stderr_buffer.getvalue()
+            if _captured.strip():
+                log.debug("Captured stderr during Live display:\n%s",
+                          _captured.strip())
+            log.handlers.clear()
+            log.handlers.extend(_saved_rosetta_handlers)
+            logging.root.handlers.clear()
+            logging.root.handlers.extend(_saved_root_handlers)
+
+        # Build statement list for report (from MTR commands)
+        self.statements = self._mtr_commands_to_statements(test)
+
+        # Write result files
+        print_phase("Reports")
+        test_name = Path(self.test_file).stem
+        for name, lines in self.results.items():
+            result_path = os.path.join(
+                self.output_dir, f"{test_name}.{name}.result"
+            )
+            with open(result_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+            print_report_file(result_path, label="result")
+
+        # Compare
+        comparisons = self._compare_all()
+
+        # Generate reports
+        self._generate_reports(test_name, comparisons)
+
+        return comparisons
+
+    def _detect_mysql_test_dir(self) -> Optional[str]:
+        """Auto-detect the mysql-test directory for --source resolution.
+
+        Looks for the mysql-test directory relative to the test file path.
+        """
+        # Walk up from the test file to find a directory containing
+        # either mysql-test/ or t/ subdirectory structure
+        test_dir = os.path.dirname(os.path.abspath(self.test_file))
+        for _ in range(5):  # Check up to 5 levels
+            # Check if current dir is mysql-test itself
+            if os.path.isfile(os.path.join(test_dir, "mysql-test-run.pl")):
+                return test_dir
+            # Check if there's a mysql-test subdirectory
+            mt_dir = os.path.join(test_dir, "mysql-test")
+            if os.path.isdir(mt_dir):
+                return mt_dir
+            # Check if we're inside a suite (t/ subdir)
+            if os.path.isdir(os.path.join(test_dir, "t")):
+                parent = os.path.dirname(test_dir)
+                if os.path.isfile(os.path.join(parent,
+                                               "mysql-test-run.pl")):
+                    return parent
+            test_dir = os.path.dirname(test_dir)
+        return None
+
+    def _mtr_commands_to_statements(self, test) -> list:
+        """Convert MtrTestFile commands to Statement objects for reports."""
+        from .mtr.nodes import MtrCommandType
+
+        stmts = []
+        for cmd in test.commands:
+            if cmd.cmd_type == MtrCommandType.SQL:
+                stmts.append(Statement(
+                    stmt_type=StmtType.SQL,
+                    text=cmd.argument,
+                    line_no=cmd.line_no,
+                ))
+            elif cmd.cmd_type == MtrCommandType.ECHO:
+                stmts.append(Statement(
+                    stmt_type=StmtType.ECHO,
+                    text=cmd.argument or "",
+                    line_no=cmd.line_no,
+                ))
+        return stmts
+
+    def run(self) -> Dict[str, CompareResult]:
+        """Execute the full pipeline: parse, execute, compare, report.
+
+        Always uses the new rosetta.mtr module for full MTR syntax support.
+        """
+        return self._run_mtr_native()
+
+    def run_diff_only(self) -> Dict[str, CompareResult]:
+        """Re-generate reports from existing .result files (no execution)."""
+        os.makedirs(self.output_dir, exist_ok=True)
+        test_name = Path(self.test_file).stem
+
+        print_phase("Load Results", "(diff-only mode)")
+
+        # Load existing .result files
+        for config in self.configs:
+            result_path = os.path.join(
+                self.output_dir, f"{test_name}.{config.name}.result"
+            )
+            if os.path.isfile(result_path):
+                with open(result_path, "r", encoding="utf-8") as f:
+                    self.results[config.name] = [
+                        line.rstrip("\n") for line in f
+                    ]
+                print_success(f"Loaded: {result_path}")
+            else:
+                print_warning(f"Not found: {result_path}")
+
+        if len(self.results) < 2:
+            print_error("Need at least 2 result files for comparison")
+            return {}
+
+        comparisons = self._compare_all()
+
+        print_phase("Reports")
+        self._generate_reports(test_name, comparisons)
+        return comparisons
+
+    def _generate_reports(self, test_name: str,
+                          comparisons: Dict[str, CompareResult]):
+        """Generate output reports based on format setting."""
+        fmt = self.output_format
+        sql_list = getattr(self, 'statements', None)
+
+        if fmt in ("text", "all"):
+            report_path = os.path.join(
+                self.output_dir, f"{test_name}.report.txt"
+            )
+            write_text_report(report_path, self.test_file, comparisons)
+            print_report_file(report_path, label="text")
+
+        if fmt in ("html", "all"):
+            html_path = os.path.join(
+                self.output_dir, f"{test_name}.html"
+            )
+            write_html_report(
+                html_path, self.test_file, comparisons,
+                baseline=self.baseline or "",
+                sql_list=sql_list,
+                raw_results=self.results,
+            )
+            print_report_file(html_path, label="html")
+
+
+def parse_args(argv=None):
+    """Parse command-line arguments."""
+    p = argparse.ArgumentParser(
+        prog="rosetta",
+        description=(
+            "Rosetta — Cross-DBMS SQL testing & benchmarking toolkit.\n"
+            "\n"
+            "Three operating modes:\n"
+            "  MTR         Run .test files against multiple databases "
+            "and diff results\n"
+            "  Benchmark   Compare query performance across databases "
+            "with latency/QPS reports\n"
+            "  Playground  Launch an interactive SQL playground "
+            "in the browser\n"
+            "\n"
+            "Use --interactive (-i) to enter a REPL that lets you "
+            "switch between modes.\n"
+            "Without -i, run a single MTR test (--test) or benchmark "
+            "(--benchmark)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+Examples:
+  # ── Setup ──────────────────────────────────────────────────
+  rosetta config init                            Initialize ~/.rosetta and generate config
+
+  # ── MTR (consistency test) ─────────────────────────────────
+  rosetta -t path/to/test.test --dbms tdsql,mysql
+  rosetta -t path/to/test.test --dbms tdsql,mysql,tidb -b tdsql
+  rosetta -t path/to/test.test --diff-only   Re-diff without execution
+  rosetta -t path/to/test.test --parse-only  Debug: show parsed stmts
+
+  # ── Benchmark ──────────────────────────────────────────────
+  rosetta --benchmark --bench-file bench.json --dbms tdsql,mysql
+  rosetta --benchmark --bench-file bench.json --concurrency 16 --duration 60
+
+  # ── Interactive / Playground ───────────────────────────────
+  rosetta -i --dbms tdsql,mysql -s           Choose mode at startup
+  rosetta -i --benchmark --dbms tdsql,mysql   Go straight to Benchmark
+  rosetta -i --dbms tdsql,mysql --port 8080   Custom server port
+
+  # ── Profiling ──────────────────────────────────────────────
+  rosetta --benchmark --bench-file b.json --profile --perf-freq 199
+""",
+    )
+
+    # -- Global options -------------------------------------------------------
+    general = p.add_argument_group(
+        "General", "Options shared across all modes")
+    general.add_argument(
+        "--config", "-c", default=CONFIG_FILE,
+        help=f"Path to DBMS config JSON (default: {CONFIG_FILE})")
+    general.add_argument(
+        "--dbms",
+        help="DBMS targets, comma-separated (e.g. tdsql,mysql,tidb). "
+             "Omit to use 'enabled' flag in config")
+    general.add_argument(
+        "--database", "-d", default=DEFAULT_TEST_DB,
+        help=f"Test database name (default: {DEFAULT_TEST_DB})")
+    general.add_argument(
+        "--output-dir", "-o", default=RESULTS_DIR,
+        help=f"Output directory for reports (default: {RESULTS_DIR})")
+    general.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="Enable verbose / debug logging")
+    general.add_argument(
+        "--gen-config",
+        help="Generate sample config at the given path and exit")
+
+    # -- Interactive / server -------------------------------------------------
+    ui = p.add_argument_group(
+        "Interactive & Server",
+        "Enter a REPL or serve HTML reports in the browser")
+    ui.add_argument(
+        "--interactive", "-i", action="store_true",
+        help="Enter interactive mode — choose MTR / Benchmark / "
+             "Playground, then run tasks in a loop")
+    ui.add_argument(
+        "--serve", "-s", action="store_true",
+        help="Start a local HTTP server to view HTML reports "
+             "after execution")
+    ui.add_argument(
+        "--port", "-p", type=int, default=19527,
+        help="HTTP server port (default: 19527)")
+
+    # -- MTR options ----------------------------------------------------------
+    mtr = p.add_argument_group(
+        "MTR (Consistency Test)",
+        "Run .test files and compare results across databases")
+    mtr.add_argument(
+        "--test", "-t",
+        help="Path to .test file")
+    mtr.add_argument(
+        "--baseline", "-b", default="tdsql",
+        help="Baseline DBMS name for diff (default: tdsql)")
+    mtr.add_argument(
+        "--include-explain", dest="skip_explain",
+        action="store_false", default=True,
+        help="Include EXPLAIN statements in comparison (default: skipped)")
+    mtr.add_argument(
+        "--include-analyze", dest="skip_analyze",
+        action="store_false", default=True,
+        help="Include ANALYZE TABLE statements in comparison (default: skipped)")
+    mtr.add_argument(
+        "--include-show-create", dest="skip_show_create",
+        action="store_false", default=True,
+        help="Include SHOW CREATE TABLE statements in comparison (default: skipped)")
+    mtr.add_argument(
+        "--parse-only", action="store_true",
+        help="Only parse .test file and print statements (no execution)")
+    mtr.add_argument(
+        "--diff-only", action="store_true",
+        help="Re-generate reports from existing .result files "
+             "(no DB execution)")
+
+    # -- Benchmark options ----------------------------------------------------
+    bench = p.add_argument_group(
+        "Benchmark",
+        "Compare query performance across databases with "
+        "latency / QPS reports")
+    bench.add_argument(
+        "--benchmark", action="store_true",
+        help="Enable benchmark mode")
+    bench.add_argument(
+        "--bench-file",
+        help="Benchmark definition file (.json or .sql)")
+    bench.add_argument(
+        "--iterations", type=int, default=100,
+        help="Iterations per query — serial mode (default: 100)")
+    bench.add_argument(
+        "--warmup", type=int, default=5,
+        help="Warmup iterations per query (default: 5)")
+    bench.add_argument(
+        "--concurrency", type=int, default=0,
+        help="Concurrent threads; 0 = serial, >0 = concurrent "
+             "(default: 0)")
+    bench.add_argument(
+        "--duration", type=float, default=30.0,
+        help="Duration in seconds — concurrent mode (default: 30)")
+    bench.add_argument(
+        "--ramp-up", type=float, default=0.0,
+        help="Ramp-up seconds — concurrent mode (default: 0)")
+    bench.add_argument(
+        "--query-timeout", type=int, default=5,
+        help="Query timeout in seconds; slow queries will be logged as outliers "
+             "(default: 5, 0 to disable)")
+    bench.add_argument(
+        "--flamegraph-min-ms", type=int, default=1000,
+        help="Minimum total duration (ms) to show flamegraph in serial mode "
+             "(default: 1000, 0 to always show)")
+    bench.add_argument(
+        "--bench-filter",
+        help="Run only queries matching these names "
+             "(comma-separated)")
+    bench.add_argument(
+        "--repeat", type=int, default=1,
+        help="Number of benchmark rounds; each round produces "
+             "a timestamped report (default: 1)")
+    bench.add_argument(
+        "--skip-setup", action="store_true", default=False,
+        help="Skip setup phase (reuse existing tables from previous run)")
+    bench.add_argument(
+        "--skip-teardown", action="store_true", default=False,
+        help="Skip teardown (keep tables for next run with --skip-setup)")
+    bench.add_argument(
+        "--no-parallel-dbms", dest="parallel_dbms",
+        action="store_false",
+        help="Run DBMS targets sequentially instead of in parallel")
+    bench.set_defaults(parallel_dbms=True)
+
+    # -- Profiling options ----------------------------------------------------
+    prof = p.add_argument_group(
+        "Profiling",
+        "CPU flame-graph capture via perf (benchmark mode)")
+    prof.add_argument(
+        "--profile", action="store_true", dest="profile",
+        default=False,
+        help="Enable flame-graph capture via perf")
+    prof.add_argument(
+        "--perf-freq", type=int, default=99,
+        help="perf sampling frequency in Hz (default: 99)")
+
+    return p.parse_args(argv)
+
+
+def main(argv=None):
+    """Main entry point for the rosetta command."""
+    # Configure logging to use rich handler
+    rich_handler = RichLogHandler()
+    rich_handler.setLevel(logging.WARNING)
+    logging.basicConfig(
+        level=logging.WARNING,
+        handlers=[rich_handler],
+    )
+
+    args = parse_args(argv)
+
+    if args.verbose:
+        # In verbose mode, use standard logging for everything
+        logging.root.handlers.clear()
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+
+    print_banner()
+
+    # Generate sample config
+    if args.gen_config:
+        generate_sample_config(args.gen_config)
+        print_success(f"Config written: {args.gen_config}")
+        flush_all()
+        return 0
+
+    # Benchmark mode (non-interactive)
+    if args.benchmark and not args.interactive:
+        return _run_benchmark(args)
+
+    # Interactive mode — show mode selection (MTR / Benchmark)
+    # If --benchmark is also set, skips selection and goes directly to bench mode
+    if args.interactive:
+        return _enter_interactive(args)
+
+    if not args.file:
+        print_error("--test is required. Use --help for usage.")
+        flush_all()
+        return 1
+
+    if not os.path.isfile(args.file):
+        print_error(f"Test file not found: {args.file}")
+        flush_all()
+        return 1
+
+    # Parse-only mode
+    if args.parse_only:
+        flush_all()
+        parser = MtrParser(args.file)
+        test = parser.parse()
+        for cmd in test.commands:
+            tag = cmd.cmd_type.name
+            text = cmd.argument or cmd.raw_text
+            print(f"L{cmd.line_no:4d} [{tag:12s}]: {text[:100]}")
+        print(f"\nTotal: {len(test.commands)} commands")
+        return 0
+
+    if not os.path.isfile(args.config):
+        print_error(
+            f"Config file not found: {args.config}\n"
+            f"Run 'rosetta config init' to create a sample config, "
+            f"or use '-c' to specify the config file path."
+        )
+        flush_all()
+        return 1
+
+    # Load and filter configs
+    all_configs = load_config(args.config)
+    if not all_configs:
+        print_error(f"No databases configured in {args.config}")
+        flush_all()
+        return 1
+
+    try:
+        configs = filter_configs(all_configs, args.dbms)
+    except ValueError as e:
+        print_error(str(e))
+        flush_all()
+        return 1
+
+    if not configs:
+        print_error("No databases selected for testing")
+        flush_all()
+        return 1
+
+    # Resolve output_dir to absolute path early so it does not depend on cwd
+    output_dir = os.path.abspath(args.output_dir)
+
+    # Create a timestamped sub-directory for this run
+    run_stamp = _time.strftime("%Y%m%d_%H%M%S")
+    test_name = Path(args.file).stem
+    run_dir = os.path.join(output_dir, f"{test_name}_{run_stamp}")
+
+    print_info("DBMS targets:",
+               ", ".join(c.name for c in configs))
+
+    # Run
+    runner = RosettaRunner(
+        test_file=args.file,
+        configs=configs,
+        output_dir=run_dir,
+        database=args.database,
+        baseline=args.baseline,
+        skip_explain=args.skip_explain,
+        skip_analyze=args.skip_analyze,
+        skip_show_create=args.skip_show_create,
+        output_format="all",
+    )
+
+    if args.diff_only:
+        # Copy .result files from latest run into the new run_dir
+        latest_link = os.path.join(output_dir, "latest")
+        source_dir = (os.path.realpath(latest_link)
+                      if os.path.islink(latest_link) else None)
+        if source_dir and os.path.isdir(source_dir):
+            os.makedirs(run_dir, exist_ok=True)
+            for f in os.listdir(source_dir):
+                if f.endswith(".result"):
+                    shutil.copy2(
+                        os.path.join(source_dir, f),
+                        os.path.join(run_dir, f))
+        comparisons = runner.run_diff_only()
+    else:
+        comparisons = runner.run()
+
+    if not comparisons:
+        flush_all()
+        return 1
+
+    # Update 'latest' symlink
+    latest_link = os.path.join(output_dir, "latest")
+    try:
+        if os.path.islink(latest_link):
+            os.remove(latest_link)
+        os.symlink(os.path.basename(run_dir), latest_link)
+    except OSError:
+        pass
+
+    # Generate history index page
+    generate_index_html(output_dir)
+
+    # Print rich summary table
+    all_pass = print_summary(comparisons, runner.failed_connections)
+
+    # Flush everything as one big panel
+    flush_all()
+
+    # Serve HTML report if requested
+    if args.serve:
+        html_file = f"{test_name}.html"
+        html_path = os.path.join(run_dir, html_file)
+
+        if os.path.isfile(html_path):
+            # Serve from output_dir root so history is accessible
+            relative_html = os.path.join(
+                os.path.basename(run_dir), html_file)
+            _serve_report(output_dir, relative_html, args.port,
+                          configs=configs, database=args.database)
+        else:
+            console.print(f"[yellow]HTML report not found: {html_path}[/yellow]")
+
+    return 0 if (all_pass and not runner.failed_connections) else 1
+
+
+def _run_benchmark(args) -> int:
+    """Execute the benchmark pipeline."""
+    from .benchmark import (BenchmarkLoader, run_benchmark,
+                            BUILTIN_TEMPLATES)
+    from .models import BenchmarkConfig, WorkloadMode
+    from .reporter.bench_text import write_bench_text_report
+    from .reporter.bench_html import write_bench_html_report
+    from .ui import BenchProgress, print_bench_summary
+
+    # Load DBMS configs
+    if not os.path.isfile(args.config):
+        print_error(
+            f"Config file not found: {args.config}\n"
+            f"Run 'rosetta config init' to create a sample config, "
+            f"or use '-c' to specify the config file path."
+        )
+        flush_all()
+        return 1
+
+    all_configs = load_config(args.config)
+    if not all_configs:
+        print_error(f"No databases configured in {args.config}")
+        flush_all()
+        return 1
+
+    try:
+        configs = filter_configs(all_configs, args.dbms)
+    except ValueError as e:
+        print_error(str(e))
+        flush_all()
+        return 1
+
+    if not configs:
+        print_error("No databases selected for benchmark")
+        flush_all()
+        return 1
+
+    # Load workload
+    json_extra_config = {}  # Extra config from JSON file
+    if not args.bench_file:
+        print_error("Missing --bench-file. Specify a benchmark definition file.")
+        flush_all()
+        return 1
+    try:
+        workload = BenchmarkLoader.from_file(args.bench_file)
+        # Read extra config fields from JSON file
+        if args.bench_file.endswith('.json'):
+            import json
+            with open(args.bench_file, 'r') as f:
+                json_data = json.load(f)
+                json_extra_config = {
+                    'database': json_data.get('database'),
+                    'skip_setup': json_data.get('skip_setup'),
+                    'skip_teardown': json_data.get('skip_teardown'),
+                }
+    except (FileNotFoundError, ValueError) as e:
+        print_error(str(e))
+        flush_all()
+        return 1
+
+    # Build benchmark config
+    if args.concurrency > 0:
+        mode = WorkloadMode.CONCURRENT
+    else:
+        mode = WorkloadMode.SERIAL
+
+    filter_queries = []
+    if args.bench_filter:
+        filter_queries = [
+            n.strip() for n in args.bench_filter.split(",") if n.strip()
+        ]
+
+    # Determine skip_setup and skip_teardown: CLI args override JSON config
+    json_skip_setup = json_extra_config.get('skip_setup')
+    json_skip_teardown = json_extra_config.get('skip_teardown')
+    
+    # Use JSON value as default, CLI arg overrides if explicitly set
+    # (CLI arg defaults to False, so only override if user explicitly passed it)
+    cli_skip_setup = getattr(args, 'skip_setup', False)
+    cli_skip_teardown = getattr(args, 'skip_teardown', False)
+    
+    # If JSON has the value and CLI didn't explicitly set it, use JSON value
+    final_skip_setup = cli_skip_setup if cli_skip_setup else (json_skip_setup if json_skip_setup is not None else False)
+    final_skip_teardown = cli_skip_teardown if cli_skip_teardown else (json_skip_teardown if json_skip_teardown is not None else False)
+    
+    bench_cfg = BenchmarkConfig(
+        mode=mode,
+        iterations=args.iterations,
+        warmup=args.warmup,
+        concurrency=args.concurrency if args.concurrency > 0 else 1,
+        duration=args.duration,
+        ramp_up=args.ramp_up,
+        filter_queries=filter_queries,
+        profile=getattr(args, 'profile', False),
+        perf_freq=getattr(args, 'perf_freq', 99),
+        query_timeout=args.query_timeout,
+        flamegraph_min_ms=getattr(args, 'flamegraph_min_ms', 1000),
+        skip_setup=final_skip_setup,
+        skip_teardown=final_skip_teardown,
+    )
+
+    # Apply filter to workload for display
+    display_workload = workload
+    if filter_queries:
+        try:
+            display_workload = BenchmarkLoader.filter_queries(
+                workload, filter_queries)
+        except ValueError as e:
+            print_error(str(e))
+            flush_all()
+            return 1
+
+    # Display plan
+    parallel_dbms = getattr(args, 'parallel_dbms', False)
+    output_dir = os.path.abspath(args.output_dir)
+    fmt = "all"
+
+    print_phase("Benchmark", workload.name)
+    print_info("Mode:", mode.name)
+    print_info("DBMS targets:",
+               ", ".join(c.name for c in configs))
+    if parallel_dbms and len(configs) > 1:
+        print_info("DBMS execution:", "[bold green]parallel[/bold green]")
+    elif not parallel_dbms and len(configs) > 1:
+        print_info("DBMS execution:", "sequential")
+    print_info("Queries:",
+               ", ".join(q.name for q in display_workload.queries))
+    if mode == WorkloadMode.SERIAL:
+        print_info("Iterations:",
+                    f"{bench_cfg.iterations}  Warmup: {bench_cfg.warmup}")
+    else:
+        print_info("Concurrency:",
+                    f"{bench_cfg.concurrency}  Duration: {bench_cfg.duration}s")
+    if filter_queries:
+        print_info("Filter:", ", ".join(filter_queries))
+    if bench_cfg.profile:
+        print_info("Profiling:",
+                    f"[bold red]🔥 perf flame graph[/bold red] "
+                    f"(freq: {bench_cfg.perf_freq} Hz)")
+    if bench_cfg.skip_setup:
+        print_info("Setup:", "[bold yellow]SKIPPED[/bold yellow] (reusing existing tables)")
+    if bench_cfg.skip_teardown:
+        print_info("Teardown:", "[bold yellow]SKIPPED[/bold yellow] (keeping tables)")
+
+    # ------------------------------------------------------------------
+    # Inner function: execute a single benchmark round
+    # ------------------------------------------------------------------
+    def _run_one_round() -> int:
+        """Run one benchmark round. Returns 0 on success."""
+        run_stamp = _time.strftime("%Y%m%d_%H%M%S")
+        run_dir = os.path.join(
+            output_dir,
+            f"bench_{workload.name}_{run_stamp}")
+        os.makedirs(run_dir, exist_ok=True)
+
+        # Execute benchmark
+        print_phase("Execute")
+
+        # Progress tracking (fresh each round)
+        progress_bars: Dict[str, BenchProgress] = {}
+        _progress_lock = threading.Lock()
+
+        n_queries = len(display_workload.queries)
+        is_concurrent = (mode == WorkloadMode.CONCURRENT)
+        if is_concurrent:
+            duration = bench_cfg.duration if bench_cfg.duration > 0 else 30.0
+            per_query = 100  # placeholder, not used for time-based
+        else:
+            duration = 0.0
+            per_query = bench_cfg.iterations + bench_cfg.warmup
+
+        # Create progress bars upfront (they will show "setup..." initially)
+        if parallel_dbms and len(configs) > 1:
+            for c in configs:
+                bp = BenchProgress(
+                    c.name, n_queries, per_query,
+                    is_concurrent=is_concurrent, duration=duration)
+                bp.__enter__()
+                bp.set_status("[yellow]正在setup...[/yellow]")
+                progress_bars[c.name] = bp
+
+        def on_setup_start(dbms_name):
+            with _progress_lock:
+                if dbms_name not in progress_bars:
+                    bp = BenchProgress(
+                        dbms_name, n_queries, per_query,
+                        is_concurrent=is_concurrent, duration=duration)
+                    bp.__enter__()
+                    bp.set_status("[yellow]正在setup...[/yellow]")
+                    progress_bars[dbms_name] = bp
+
+        def on_setup_done(dbms_name, success):
+            bp = progress_bars.get(dbms_name)
+            if bp:
+                if success:
+                    bp.set_status("[green]setup完毕[/green]")
+                else:
+                    bp.set_status("[red]setup失败 — 跳过该DBMS[/red]")
+                    # Close progress bar for failed DBMS
+                    bp.__exit__(None, None, None)
+                    bp.write_summary_to_buffer()
+
+        def on_dbms_start(dbms_name):
+            with _progress_lock:
+                if dbms_name not in progress_bars:
+                    bp = BenchProgress(
+                        dbms_name, n_queries, per_query,
+                        is_concurrent=is_concurrent, duration=duration)
+                    bp.__enter__()
+                    progress_bars[dbms_name] = bp
+
+        def on_progress(dbms_name, query_name, iteration, total,
+                        is_warmup=False):
+            bp = progress_bars.get(dbms_name)
+            if bp and not is_concurrent:
+                bp.advance(query_name=query_name, is_warmup=is_warmup)
+
+        def on_dbms_done(dbms_name, dbms_result):
+            bp = progress_bars.get(dbms_name)
+            if bp:
+                bp.set_status(
+                    f"[green]{dbms_result.total_queries} queries, "
+                    f"{dbms_result.overall_qps:.1f} QPS[/green]")
+                bp.__exit__(None, None, None)
+                bp.write_summary_to_buffer()
+
+        def on_profile_start(dbms_name, query_name):
+            bp = progress_bars.get(dbms_name)
+            if bp:
+                bp.set_status(f"[red]🔥 profiling {query_name}[/red]")
+
+        def on_profile_done(dbms_name, query_name, sample_count):
+            bp = progress_bars.get(dbms_name)
+            if bp:
+                bp.set_status(
+                    f"[dim]🔥 {query_name}: {sample_count} samples[/dim]")
+
+        # For concurrent mode, timer thread will be started after setup phase
+        timer_stop_event = None
+        timer_thread = None
+        query_phase_started = threading.Event()
+        timer_start_time = [None]  # Will be set in on_run_start
+
+        if is_concurrent:
+            timer_stop_event = threading.Event()
+
+            def _timer_update():
+                # Wait until query phase starts (all setups complete)
+                query_phase_started.wait()
+                while not timer_stop_event.is_set():
+                    # Check if we've exceeded the duration - stop updating progress
+                    # (actual benchmark may take longer due to cleanup)
+                    if timer_start_time[0] is not None:
+                        elapsed = _time.monotonic() - timer_start_time[0]
+                        if elapsed >= duration:
+                            break
+                    for dbms_name, bp in list(progress_bars.items()):
+                        bp.update_time(status="")
+                    _time.sleep(0.5)
+
+            timer_thread = threading.Thread(target=_timer_update, daemon=True)
+            timer_thread.start()
+
+        def on_run_start():
+            # Reset timers when query phase begins (all setups complete)
+            # Keep "setup完毕" status visible until queries actually start
+            with _progress_lock:
+                for bp in progress_bars.values():
+                    bp.reset_timer()
+            # Record start time for timer thread
+            timer_start_time[0] = _time.monotonic()
+            # Signal timer thread to start updating
+            query_phase_started.set()
+
+        # Determine database: JSON config takes precedence over default, CLI arg always wins
+        json_database = json_extra_config.get('database')
+        # If JSON specifies a database, use it; otherwise use CLI arg (which has default)
+        final_database = json_database if json_database else args.database
+        
+        try:
+            result = run_benchmark(
+                configs=configs,
+                workload=workload,
+                bench_cfg=bench_cfg,
+                database=final_database,
+                on_progress=on_progress,
+                on_dbms_start=on_dbms_start,
+                on_dbms_done=on_dbms_done,
+                on_profile_start=on_profile_start if bench_cfg.profile else None,
+                on_profile_done=on_profile_done if bench_cfg.profile else None,
+                on_run_start=on_run_start,
+                on_setup_start=on_setup_start,
+                on_setup_done=on_setup_done,
+                parallel_dbms=parallel_dbms,
+            )
+        finally:
+            # Stop timer thread
+            if timer_stop_event is not None:
+                timer_stop_event.set()
+                if timer_thread is not None:
+                    timer_thread.join(timeout=1.0)
+
+        # Generate reports
+        print_phase("Reports")
+
+        if fmt in ("text", "all"):
+            text_path = os.path.join(
+                run_dir, f"bench_{workload.name}.report.txt")
+            write_bench_text_report(text_path, result)
+            print_report_file(text_path, label="text")
+
+        if fmt in ("html", "all"):
+            html_path = os.path.join(
+                run_dir, f"bench_{workload.name}.html")
+            write_bench_html_report(html_path, result)
+            print_report_file(html_path, label="html")
+
+        # Save raw JSON data
+        json_path = os.path.join(run_dir, "bench_result.json")
+        _save_bench_json(json_path, result, bench_file=args.bench_file or "", database=final_database)
+        print_report_file(json_path, label="json")
+
+        # Update 'latest' symlink
+        latest_link = os.path.join(output_dir, "latest")
+        try:
+            if os.path.islink(latest_link):
+                os.remove(latest_link)
+            os.symlink(os.path.basename(run_dir), latest_link)
+        except OSError:
+            pass
+
+        # Generate history index
+        generate_index_html(output_dir)
+
+        # Print rich summary
+        print_bench_summary(result)
+        flush_all()
+
+        return run_dir
+
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
+    last_run_dir = None
+    try:
+        last_run_dir = _run_one_round()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted. Stopping.[/yellow]")
+        flush_all()
+
+    # Serve if requested (use the latest run)
+    if args.serve and fmt in ("html", "all") and last_run_dir:
+        html_file = f"bench_{workload.name}.html"
+        html_path = os.path.join(last_run_dir, html_file)
+        if os.path.isfile(html_path):
+            relative_html = os.path.join(
+                os.path.basename(last_run_dir), html_file)
+            _serve_report(output_dir, relative_html, args.port)
+
+    return 0
+
+
+def _save_bench_json(path: str, result, bench_file: str = "", database: str = ""):
+    """Save benchmark result as JSON for later analysis.
+    
+    Args:
+        path: Output file path
+        result: BenchmarkResult object
+        bench_file: Path to benchmark file (.json or .sql)
+        database: Database name used for this run
+    """
+    import json
+    data = {
+        "workload": result.workload_name,
+        "mode": result.mode.name,
+        "timestamp": result.timestamp,
+        "run_id": result.run_id or "",
+        "bench_file": bench_file,  # Store benchmark file path for rerun
+        "database": database,       # Store database name for rerun
+        "table_rows": result.table_rows,
+        "table_rows_detail": result.table_rows_detail or {},
+        "table_schema": result.table_schema or {},  # {table_name: CREATE TABLE stmt}
+        "setup_sql": list(result.setup_sql) if result.setup_sql else [],
+        "teardown_sql": list(result.teardown_sql) if result.teardown_sql else [],
+        "queries_sql": list(result.queries_sql) if result.queries_sql else [],
+        "config": {
+            "iterations": result.config.iterations,
+            "warmup": result.config.warmup,
+            "concurrency": result.config.concurrency,
+            "duration": result.config.duration,
+            "filter_queries": result.config.filter_queries,
+        },
+        "dbms_results": [],
+    }
+    for dr in result.dbms_results:
+        dbms_data = {
+            "dbms_name": dr.dbms_name,
+            "total_duration_s": round(dr.total_duration_s, 3),
+            "total_queries": dr.total_queries,
+            "total_errors": dr.total_errors,
+            "overall_qps": round(dr.overall_qps, 2),
+            "table_rows": dr.table_rows,
+            "table_rows_detail": dr.table_rows_detail or {},
+            "table_schema": dr.table_schema or {},  # {table_name: CREATE TABLE stmt}
+            "query_stats": [],
+        }
+        for qs in dr.query_stats:
+            dbms_data["query_stats"].append({
+                "query_name": qs.query_name,
+                "sql_template": qs.sql_template or "",
+                "total_executions": qs.total_executions,
+                "total_errors": qs.total_errors,
+                "min_ms": round(qs.min_ms, 3),
+                "max_ms": round(qs.max_ms, 3),
+                "avg_ms": round(qs.avg_ms, 3),
+                "p50_ms": round(qs.p50_ms, 3),
+                "p95_ms": round(qs.p95_ms, 3),
+                "p99_ms": round(qs.p99_ms, 3),
+                "qps": round(qs.qps, 2),
+                "latencies_ms": [round(l, 3) for l in qs.latencies_ms] if qs.latencies_ms else [],
+                "explain_plan": qs.explain_plan or "",
+                "explain_tree": qs.explain_tree or "",
+                "error_logs": qs.error_logs[:50] if qs.error_logs else [],
+            })
+        data["dbms_results"].append(dbms_data)
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def run_benchmark_with_progress(
+    configs: List[DBMSConfig],
+    workload,
+    bench_cfg,
+    database: str,
+    output_dir: str,
+    output_format: str = "all",
+    parallel_dbms: bool = True,
+    json_extra_config: Optional[dict] = None,
+    callbacks: Optional[dict] = None,
+    bench_file: str = "",
+) -> Tuple[str, object]:
+    """Core benchmark execution logic shared by CLI and Interactive modes.
+
+    Args:
+        configs: List of DBMS configurations
+        workload: Benchmark workload (from BenchmarkLoader)
+        bench_cfg: Benchmark configuration
+        database: Database name
+        output_dir: Output directory for reports
+        output_format: Output format (text, html, all)
+        parallel_dbms: Whether to run benchmarks in parallel
+        json_extra_config: Extra config from JSON file (database, skip_setup, skip_teardown)
+        callbacks: Optional callbacks for progress tracking:
+            - on_progress(dbms_name, query_name, iteration, total, is_warmup)
+            - on_dbms_start(dbms_name)
+            - on_dbms_done(dbms_name, dbms_result)
+            - on_profile_start(dbms_name, query_name)
+            - on_profile_done(dbms_name, query_name, sample_count)
+            - on_run_start()
+            - on_setup_start(dbms_name)
+            - on_setup_done(dbms_name, success)
+        bench_file: Path to benchmark file (.json or .sql) for rerun support
+
+    Returns:
+        Tuple of (run_dir, result)
+    """
+    from .benchmark import run_benchmark
+    from .reporter.bench_text import write_bench_text_report
+    from .reporter.bench_html import write_bench_html_report
+    from .reporter.history import generate_index_html
+
+    callbacks = callbacks or {}
+
+    # Create output directory
+    run_stamp = _time.strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join(
+        output_dir,
+        f"bench_{workload.name}_{run_stamp}"
+    )
+    os.makedirs(run_dir, exist_ok=True)
+
+    # Determine database from JSON config if provided
+    json_extra_config = json_extra_config or {}
+    json_database = json_extra_config.get('database')
+    final_database = json_database if json_database else database
+
+    # Execute benchmark
+    result = run_benchmark(
+        configs=configs,
+        workload=workload,
+        bench_cfg=bench_cfg,
+        database=final_database,
+        on_progress=callbacks.get('on_progress'),
+        on_dbms_start=callbacks.get('on_dbms_start'),
+        on_dbms_done=callbacks.get('on_dbms_done'),
+        on_profile_start=callbacks.get('on_profile_start'),
+        on_profile_done=callbacks.get('on_profile_done'),
+        on_run_start=callbacks.get('on_run_start'),
+        on_setup_start=callbacks.get('on_setup_start'),
+        on_setup_done=callbacks.get('on_setup_done'),
+        parallel_dbms=parallel_dbms,
+    )
+    # Set run_id for the result
+    result.run_id = os.path.basename(run_dir)
+
+    # Generate reports
+    report_files = []
+
+    if output_format in ("text", "all"):
+        text_path = os.path.join(run_dir, f"bench_{workload.name}.report.txt")
+        write_bench_text_report(text_path, result)
+        report_files.append(text_path)
+
+    if output_format in ("html", "all"):
+        html_path = os.path.join(run_dir, f"bench_{workload.name}.html")
+        write_bench_html_report(html_path, result)
+        report_files.append(html_path)
+
+    # Save JSON result
+    json_path = os.path.join(run_dir, "bench_result.json")
+    _save_bench_json(json_path, result, bench_file=bench_file, database=final_database)
+    report_files.append(json_path)
+
+    # Update latest symlink
+    latest_link = os.path.join(output_dir, "latest")
+    try:
+        if os.path.islink(latest_link):
+            os.remove(latest_link)
+        os.symlink(os.path.basename(run_dir), latest_link)
+    except OSError:
+        pass
+
+    # Generate history index
+    generate_index_html(output_dir)
+
+    return run_dir, result
+
+
+def _select_bench_params(
+    iterations: int = 100,
+    warmup: int = 5,
+    concurrency: int = 8,
+    duration: float = 30.0,
+    ramp_up: float = 0.0,
+    profile: bool = True,
+    skip_setup: bool = False,
+    skip_teardown: bool = False,
+    output_dir: str = "",
+) -> Optional[dict]:
+    """Show an interactive benchmark parameter configuration panel.
+
+    First, select mode (SERIAL, CONCURRENT, or RERUN), then configure parameters
+    based on the selected mode.
+
+    Returns a dict with mode-specific parameters, or ``None`` if cancelled.
+    For RERUN mode, returns {"mode": "rerun", "run_data": {...}}.
+    """
+    while True:
+        # Step 1: Mode selection
+        mode_result = _select_bench_mode()
+        if mode_result is None:
+            return None
+        if mode_result.get("action") == "back":
+            return {"action": "back"}
+
+        mode = mode_result["mode"]  # "serial", "concurrent", or "rerun"
+
+        # Step 2: Parameter configuration based on mode
+        if mode == "serial":
+            result = _select_serial_params(iterations, warmup, profile, skip_setup, skip_teardown)
+        elif mode == "concurrent":
+            result = _select_concurrent_params(concurrency, duration, ramp_up, profile, skip_setup, skip_teardown)
+        else:  # mode == "rerun"
+            # Load historical run parameters
+            run_selection = _select_rerun_run_id(output_dir)
+            if run_selection is None:
+                # User cancelled rerun selection — loop back to mode selection
+                continue
+            return {"mode": "rerun", "run_data": run_selection}
+
+        # If sub-config returned back, loop back to mode selection
+        if result is not None and result.get("action") == "back":
+            continue
+        return result
+
+
+def _select_bench_mode() -> Optional[dict]:
+    """Show mode selection dialog for benchmark.
+
+    Returns dict with "mode" key ("serial" or "concurrent"),
+    or None if cancelled.
+    """
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    MODES = [
+        ("serial", "SERIAL",
+         "Sequential execution, fixed iterations per query"),
+        ("concurrent", "CONCURRENT",
+         "Multi-threaded stress test with duration-based execution"),
+        ("rerun", "RERUN",
+         "Replay a historical benchmark run"),
+        ("back", "Back",
+         "return to main menu"),
+        ("quit", "Quit",
+         "exit"),
+    ]
+
+    BACK_IDX = 3
+    QUIT_IDX = 4
+
+    selected = [0]
+    result = [None]
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("k")
+    def _up(event):
+        selected[0] = (selected[0] - 1) % len(MODES)
+
+    @kb.add("down")
+    @kb.add("j")
+    def _down(event):
+        selected[0] = (selected[0] + 1) % len(MODES)
+
+    @kb.add("enter")
+    @kb.add("right")
+    @kb.add("l")
+    def _confirm(event):
+        key = MODES[selected[0]][0]
+        if key == "quit":
+            result[0] = None
+        elif key == "back":
+            result[0] = {"action": "back"}
+        else:
+            result[0] = {"mode": key}
+        event.app.exit()
+
+    @kb.add("c-c")
+    @kb.add("escape")
+    @kb.add("q")
+    def _cancel(event):
+        result[0] = None
+        event.app.exit()
+
+    @kb.add("b")
+    @kb.add("left")
+    @kb.add("h")
+    def _back(event):
+        result[0] = {"action": "back"}
+        event.app.exit()
+
+    # -- Dynamic hints for benchmark modes --
+    MODE_HINTS = {
+        "serial":     "Run each query N times sequentially, measure latency",
+        "concurrent": "Multiple threads for D seconds, measures QPS throughput",
+        "rerun":      "Replay a historical benchmark run with same parameters",
+        "back":       "Return to mode selection",
+        "quit":       "Exit Rosetta",
+    }
+
+    # Box drawing
+    _BENCH_BOX_W = 80
+
+    def _bench_dw(s):
+        from prompt_toolkit.utils import get_cwidth
+        return sum(get_cwidth(ch) for ch in s)
+
+    def _bench_box_top():
+        return ("dim cyan", "  \u256d" + "\u2500" * _BENCH_BOX_W + "\u256e\n")
+
+    def _bench_box_mid():
+        return ("dim cyan", "  \u251c" + "\u2500" * _BENCH_BOX_W + "\u2524\n")
+
+    def _bench_box_bot():
+        return ("dim cyan", "  \u2570" + "\u2500" * _BENCH_BOX_W + "\u256f\n")
+
+    def _bench_box_row(fragments):
+        vis_w = sum(_bench_dw(t) for _, t in fragments)
+        if vis_w > _BENCH_BOX_W:
+            overflow = vis_w - _BENCH_BOX_W
+            trimmed = list(fragments)
+            for idx in range(len(trimmed) - 1, -1, -1):
+                style, text = trimmed[idx]
+                tw = _bench_dw(text)
+                if tw >= overflow:
+                    while overflow > 0 and text:
+                        overflow -= _bench_dw(text[-1])
+                        text = text[:-1]
+                    trimmed[idx] = (style, text)
+                    break
+                else:
+                    overflow -= tw
+                    trimmed[idx] = (style, "")
+            fragments = trimmed
+            vis_w = sum(_bench_dw(t) for _, t in fragments)
+        pad = max(0, _BENCH_BOX_W - vis_w)
+        result = [("dim cyan", "  \u2502")]
+        result.extend(fragments)
+        result.append(("", " " * pad))
+        result.append(("dim cyan", "\u2502\n"))
+        return result
+
+    def _get_text():
+        lines = []
+
+        # \u2500\u2500 ASCII Logo \u2500\u2500
+        lines.append(("", "\n"))
+        for logo_line in LOGO_LINES:
+            lines.append(("bold cyan", f"    {logo_line}\n"))
+        lines.append(("", "\n"))
+        from . import __version__
+        lines.append(("dim", f"  {LOGO_SUBTITLE}"))
+        lines.append(("dim", f"  v{__version__}"))
+        lines.append(("bold white", "  Benchmark Mode\n"))
+        lines.append(("", "\n"))
+
+        # \u2500\u2500 Box top \u2500\u2500
+        lines.append(_bench_box_top())
+
+        # \u2500\u2500 Keyboard hints \u2500\u2500
+        lines.extend(_bench_box_row([
+            ("dim", "  \u2191\u2193 move  \u2192/Enter select  \u2190/b back  q quit")
+        ]))
+
+        # \u2500\u2500 Separator \u2500\u2500
+        lines.append(_bench_box_mid())
+
+        # \u2500\u2500 Mode list \u2500\u2500
+        for i, (mode_key, mode_name, mode_desc) in enumerate(MODES):
+            is_sel = (i == selected[0])
+            is_action = (i >= BACK_IDX)
+
+            if is_action:
+                icon = "\u25cb"  # \u25cb
+                if is_sel:
+                    lines.extend(_bench_box_row([
+                        ("bold cyan", f"  {icon} {mode_name}")
+                    ]))
+                else:
+                    lines.extend(_bench_box_row([
+                        ("dim", f"  {icon} {mode_name}")
+                    ]))
+            else:
+                icon = "\u25c6" if is_sel else "\u25c7"  # \u25c6 / \u25c7
+                if is_sel:
+                    lines.extend(_bench_box_row([
+                        ("bold cyan", f"  {icon} {mode_name}")
+                    ]))
+                else:
+                    lines.extend(_bench_box_row([
+                        ("", f"  {icon} {mode_name}")
+                    ]))
+
+        # \u2500\u2500 Dynamic hint separator \u2500\u2500
+        lines.append(_bench_box_mid())
+
+        # \u2500\u2500 Dynamic hint \u2500\u2500
+        cur_key = MODES[selected[0]][0]
+        hint = MODE_HINTS.get(cur_key, "")
+        lines.extend(_bench_box_row([
+            ("dim italic", f"  \U0001f4a1 {hint}")
+        ]))
+
+        # \u2500\u2500 Box bottom \u2500\u2500
+        lines.append(_bench_box_bot())
+
+        return lines
+
+    menu = Window(
+        content=FormattedTextControl(_get_text),
+        dont_extend_height=True,
+    )
+
+    app: Application = Application(
+        layout=Layout(HSplit([menu])),
+        key_bindings=kb,
+        full_screen=False,
+    )
+
+    _tty_write("\033[s")
+    app.run()
+    _tty_write("\033[u\033[J")
+
+    return result[0]
+
+
+def _select_serial_params(
+    iterations: int = 100,
+    warmup: int = 5,
+    profile: bool = True,
+    skip_setup: bool = False,
+    skip_teardown: bool = False,
+) -> Optional[dict]:
+    """Show parameter configuration for SERIAL mode."""
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.keys import Keys
+    from prompt_toolkit.filters import Condition
+
+    ITER_PRESETS = [10, 50, 100, 200, 500, 1000]
+    WARMUP_PRESETS = [0, 5, 10, 20, 50]
+    PROFILE_LABELS = {False: "Off", True: "On"}
+    SKIP_LABELS = {False: "Off", True: "On"}
+
+    custom_iter = [None]
+    custom_warmup = [None]
+
+    result = [None]
+    sel = [0]
+    it_idx = [ITER_PRESETS.index(iterations)
+              if iterations in ITER_PRESETS else 2]
+    wa_idx = [WARMUP_PRESETS.index(warmup)
+              if warmup in WARMUP_PRESETS else 1]
+    prof = [profile]
+    s_setup = [skip_setup]
+    s_teardown = [skip_teardown]
+
+    FIELDS = [
+        {"label": "Iterations", "type": "choice"},
+        {"label": "Warmup", "type": "choice"},
+        {"label": "Profile (flame graph)", "type": "toggle", "var": "prof"},
+        {"label": "Skip Setup (reuse tables)", "type": "toggle", "var": "s_setup"},
+        {"label": "Skip Teardown (keep tables)", "type": "toggle", "var": "s_teardown"},
+        {"label": "OK", "type": "action"},
+        {"label": "Back", "type": "action"},
+        {"label": "Quit", "type": "action"},
+    ]
+
+    ACTION_OK = len(FIELDS) - 3
+    ACTION_BACK = len(FIELDS) - 2
+    ACTION_QUIT = len(FIELDS) - 1
+
+    def _iter_val():
+        if custom_iter[0] is not None:
+            return custom_iter[0]
+        return ITER_PRESETS[it_idx[0]]
+
+    def _warmup_val():
+        if custom_warmup[0] is not None:
+            return custom_warmup[0]
+        return WARMUP_PRESETS[wa_idx[0]]
+
+    def _field_val(i):
+        if i == 0:
+            v = _iter_val()
+            if custom_iter[0] is not None:
+                return f"{v} (custom)"
+            return str(v)
+        elif i == 1:
+            v = _warmup_val()
+            if custom_warmup[0] is not None:
+                return f"{v} (custom)"
+            return str(v)
+        elif i == 2:
+            return PROFILE_LABELS[prof[0]]
+        elif i == 3:
+            return SKIP_LABELS[s_setup[0]]
+        elif i == 4:
+            return SKIP_LABELS[s_teardown[0]]
+        return ""
+
+    def _get_toggle_var(i):
+        """Get the toggle variable list for field index."""
+        if i == 2: return prof
+        if i == 3: return s_setup
+        if i == 4: return s_teardown
+        return None
+
+    def _toggle_right(i):
+        if i == 0:
+            if custom_iter[0] is not None:
+                custom_iter[0] = None
+            else:
+                if it_idx[0] == len(ITER_PRESETS) - 1:
+                    custom_iter[0] = _iter_val()
+                else:
+                    it_idx[0] += 1
+        elif i == 1:
+            if custom_warmup[0] is not None:
+                custom_warmup[0] = None
+            else:
+                if wa_idx[0] == len(WARMUP_PRESETS) - 1:
+                    custom_warmup[0] = _warmup_val()
+                else:
+                    wa_idx[0] += 1
+        else:
+            var = _get_toggle_var(i)
+            if var is not None:
+                var[0] = not var[0]
+
+    def _toggle_left(i):
+        if i == 0:
+            if custom_iter[0] is not None:
+                custom_iter[0] = None
+            else:
+                if it_idx[0] == 0:
+                    custom_iter[0] = _iter_val()
+                    it_idx[0] = 0
+                else:
+                    it_idx[0] -= 1
+        elif i == 1:
+            if custom_warmup[0] is not None:
+                custom_warmup[0] = None
+            else:
+                if wa_idx[0] == 0:
+                    custom_warmup[0] = _warmup_val()
+                    wa_idx[0] = 0
+                else:
+                    wa_idx[0] -= 1
+        else:
+            var = _get_toggle_var(i)
+            if var is not None:
+                var[0] = not var[0]
+
+    editing = [None]
+    edit_buf = [""]
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("k")
+    def _up(event):
+        if editing[0] is not None:
+            return
+        sel[0] = (sel[0] - 1) % len(FIELDS)
+
+    @kb.add("down")
+    @kb.add("j")
+    def _down(event):
+        if editing[0] is not None:
+            return
+        sel[0] = (sel[0] + 1) % len(FIELDS)
+
+    @kb.add("left")
+    @kb.add("h")
+    def _left(event):
+        if editing[0] is not None:
+            return
+        _toggle_left(sel[0])
+
+    @kb.add("right")
+    @kb.add("l")
+    def _right(event):
+        if editing[0] is not None:
+            return
+        _toggle_right(sel[0])
+
+    @kb.add("backspace")
+    def _backspace(event):
+        if editing[0] is not None:
+            edit_buf[0] = edit_buf[0][:-1]
+
+    @kb.add(Keys.Any, filter=Condition(lambda: editing[0] is not None))
+    def _type_char(event):
+        ch = event.data
+        if ch.isdigit():
+            edit_buf[0] += ch
+
+    @kb.add("enter")
+    def _confirm(event):
+        if editing[0] is not None:
+            idx = editing[0]
+            if edit_buf[0]:
+                try:
+                    n = int(edit_buf[0])
+                    if n >= 0:
+                        if idx == 0:
+                            custom_iter[0] = n
+                        else:
+                            custom_warmup[0] = n
+                except ValueError:
+                    pass
+            editing[0] = None
+            edit_buf[0] = ""
+            return
+
+        if sel[0] == 0 and custom_iter[0] is not None:
+            editing[0] = 0
+            edit_buf[0] = str(custom_iter[0])
+            return
+        if sel[0] == 1 and custom_warmup[0] is not None:
+            editing[0] = 1
+            edit_buf[0] = str(custom_warmup[0])
+            return
+
+        if sel[0] == ACTION_OK:
+            result[0] = {
+                "mode": "serial",
+                "iterations": _iter_val(),
+                "warmup": _warmup_val(),
+                "concurrency": 0,
+                "duration": 0.0,
+                "ramp_up": 0.0,
+                "profile": prof[0],
+                "skip_setup": s_setup[0],
+                "skip_teardown": s_teardown[0],
+            }
+            event.app.exit()
+            return
+        if sel[0] == ACTION_BACK:
+            result[0] = {"action": "back"}
+            event.app.exit()
+            return
+        if sel[0] == ACTION_QUIT:
+            result[0] = None
+            event.app.exit()
+            return
+
+    @kb.add("c-c")
+    @kb.add("escape")
+    def _cancel(event):
+        if editing[0] is not None:
+            editing[0] = None
+            edit_buf[0] = ""
+            return
+        result[0] = None
+        event.app.exit()
+
+    # -- Field hints --
+    _FIELD_HINTS = {
+        0: "Number of sequential iterations per query",
+        1: "Warmup iterations (not measured)",
+        2: "Capture flame graphs during execution",
+        3: "Reuse existing tables, skip CREATE/INSERT",
+        4: "Keep tables after benchmark completes",
+        5: "Confirm and start benchmark",
+        6: "Return to benchmark mode selection",
+        7: "Exit Rosetta",
+    }
+
+    _CFG_BOX_W = 80
+
+    def _cfg_dw(s):
+        from prompt_toolkit.utils import get_cwidth
+        return sum(get_cwidth(ch) for ch in s)
+
+    def _cfg_box_top():
+        return ("dim cyan", "  \u256d" + "\u2500" * _CFG_BOX_W + "\u256e\n")
+
+    def _cfg_box_mid():
+        return ("dim cyan", "  \u251c" + "\u2500" * _CFG_BOX_W + "\u2524\n")
+
+    def _cfg_box_bot():
+        return ("dim cyan", "  \u2570" + "\u2500" * _CFG_BOX_W + "\u256f\n")
+
+    def _cfg_box_row(fragments):
+        vis_w = sum(_cfg_dw(t) for _, t in fragments)
+        if vis_w > _CFG_BOX_W:
+            overflow = vis_w - _CFG_BOX_W
+            trimmed = list(fragments)
+            for idx in range(len(trimmed) - 1, -1, -1):
+                style, text = trimmed[idx]
+                tw = _cfg_dw(text)
+                if tw >= overflow:
+                    while overflow > 0 and text:
+                        overflow -= _cfg_dw(text[-1])
+                        text = text[:-1]
+                    trimmed[idx] = (style, text)
+                    break
+                else:
+                    overflow -= tw
+                    trimmed[idx] = (style, "")
+            fragments = trimmed
+            vis_w = sum(_cfg_dw(t) for _, t in fragments)
+        pad = max(0, _CFG_BOX_W - vis_w)
+        result = [("dim cyan", "  \u2502")]
+        result.extend(fragments)
+        result.append(("", " " * pad))
+        result.append(("dim cyan", "\u2502\n"))
+        return result
+
+    def _get_text():
+        lines = []
+
+        # Logo
+        lines.append(("", "\n"))
+        for logo_line in LOGO_LINES:
+            lines.append(("bold cyan", f"    {logo_line}\n"))
+        lines.append(("", "\n"))
+        from . import __version__
+        lines.append(("dim", f"  {LOGO_SUBTITLE}"))
+        lines.append(("dim", f"  v{__version__}"))
+        lines.append(("bold white", "  SERIAL Mode\n"))
+        lines.append(("", "\n"))
+
+        # If in editing mode, show inline input (outside box)
+        if editing[0] is not None:
+            idx = editing[0]
+            label = FIELDS[idx]["label"]
+            lines.append(("bold cyan", "  \u276f "))
+            lines.append(("bold cyan", label))
+            lines.append(("", "  "))
+            lines.append(("bold white", f"[ {edit_buf[0]}\u258c ]"))
+            lines.append(("", "\n"))
+            lines.append(("dim",
+                         "     Type a number, Enter to confirm, "
+                         "Esc to cancel\n"))
+            return lines
+
+        # Box top
+        lines.append(_cfg_box_top())
+
+        # Keyboard hints
+        lines.extend(_cfg_box_row([
+            ("dim", "  \u2190\u2192 change  Enter confirm/custom  \u2191\u2193 move  Esc cancel")
+        ]))
+
+        # Separator
+        lines.append(_cfg_box_mid())
+
+        # Fields
+        for i, field in enumerate(FIELDS):
+            is_sel = (i == sel[0])
+
+            if field["type"] == "action":
+                if field["label"] == "Quit":
+                    icon = "\u25cb"
+                else:
+                    icon = "\u25c6" if is_sel else "\u25c7"
+                if is_sel:
+                    lines.extend(_cfg_box_row([
+                        ("bold cyan", f"  {icon} {field['label']}")
+                    ]))
+                else:
+                    lines.extend(_cfg_box_row([
+                        ("dim", f"  {icon} {field['label']}")
+                    ]))
+                continue
+
+            frags = []
+            if is_sel:
+                frags.append(("bold cyan", f"  {field['label']}  "))
+            else:
+                frags.append(("dim", f"  {field['label']}  "))
+
+            val_str = _field_val(i)
+            if field["type"] == "choice":
+                if is_sel:
+                    frags.append(("bold yellow", f"\u25c4 {val_str} \u25ba"))
+                else:
+                    frags.append(("", val_str))
+            else:
+                toggle_var = _get_toggle_var(i)
+                toggle_on = toggle_var[0] if toggle_var else False
+                if toggle_on:
+                    frags.append(("bold green" if is_sel else "green",
+                                  f"\u25cf {val_str}"))
+                else:
+                    frags.append(("dim", f"\u25cb {val_str}"))
+
+            lines.extend(_cfg_box_row(frags))
+
+        # Dynamic hint separator
+        lines.append(_cfg_box_mid())
+
+        # Dynamic hint
+        hint = _FIELD_HINTS.get(sel[0], "")
+        lines.extend(_cfg_box_row([
+            ("dim italic", f"  \U0001f4a1 {hint}")
+        ]))
+
+        # Box bottom
+        lines.append(_cfg_box_bot())
+
+        return lines
+
+    menu = Window(
+        content=FormattedTextControl(_get_text),
+        dont_extend_height=True,
+    )
+
+    app: Application = Application(
+        layout=Layout(HSplit([menu])),
+        key_bindings=kb,
+        full_screen=False,
+    )
+
+    _tty_write("\033[s")
+    app.run()
+    _tty_write("\033[u\033[J")
+
+    return result[0]
+
+
+def _select_concurrent_params(
+    concurrency: int = 8,
+    duration: float = 30.0,
+    ramp_up: float = 0.0,
+    profile: bool = True,
+    skip_setup: bool = False,
+    skip_teardown: bool = False,
+) -> Optional[dict]:
+    """Show parameter configuration for CONCURRENT mode."""
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.keys import Keys
+    from prompt_toolkit.filters import Condition
+
+    CONCURRENCY_PRESETS = [1, 2, 4, 8, 16, 32, 64]
+    DURATION_PRESETS = [10.0, 30.0, 60.0, 120.0, 300.0]
+    RAMPUP_PRESETS = [0.0, 1.0, 2.0, 5.0, 10.0]
+    PROFILE_LABELS = {False: "Off", True: "On"}
+    SKIP_LABELS = {False: "Off", True: "On"}
+
+    custom_concurrency = [None]
+    custom_duration = [None]
+    custom_rampup = [None]
+
+    result = [None]
+    sel = [0]
+    cc_idx = [CONCURRENCY_PRESETS.index(concurrency)
+              if concurrency in CONCURRENCY_PRESETS else 3]
+    dur_idx = [DURATION_PRESETS.index(duration)
+               if duration in DURATION_PRESETS else 1]
+    ramp_idx = [RAMPUP_PRESETS.index(ramp_up)
+                if ramp_up in RAMPUP_PRESETS else 0]
+    prof = [profile]
+    s_setup = [skip_setup]
+    s_teardown = [skip_teardown]
+
+    FIELDS = [
+        {"label": "Concurrency (threads)", "type": "choice"},
+        {"label": "Duration (seconds)", "type": "choice"},
+        {"label": "Ramp-up (seconds)", "type": "choice"},
+        {"label": "Profile (flame graph)", "type": "toggle", "var": "prof"},
+        {"label": "Skip Setup (reuse tables)", "type": "toggle", "var": "s_setup"},
+        {"label": "Skip Teardown (keep tables)", "type": "toggle", "var": "s_teardown"},
+        {"label": "OK", "type": "action"},
+        {"label": "Back", "type": "action"},
+        {"label": "Quit", "type": "action"},
+    ]
+
+    ACTION_OK = len(FIELDS) - 3
+    ACTION_BACK = len(FIELDS) - 2
+    ACTION_QUIT = len(FIELDS) - 1
+
+    def _concurrency_val():
+        if custom_concurrency[0] is not None:
+            return custom_concurrency[0]
+        return CONCURRENCY_PRESETS[cc_idx[0]]
+
+    def _duration_val():
+        if custom_duration[0] is not None:
+            return custom_duration[0]
+        return DURATION_PRESETS[dur_idx[0]]
+
+    def _rampup_val():
+        if custom_rampup[0] is not None:
+            return custom_rampup[0]
+        return RAMPUP_PRESETS[ramp_idx[0]]
+
+    def _field_val(i):
+        if i == 0:
+            v = _concurrency_val()
+            if custom_concurrency[0] is not None:
+                return f"{v} (custom)"
+            return str(v)
+        elif i == 1:
+            v = _duration_val()
+            if custom_duration[0] is not None:
+                return f"{v} (custom)"
+            return str(v)
+        elif i == 2:
+            v = _rampup_val()
+            if custom_rampup[0] is not None:
+                return f"{v} (custom)"
+            return str(v)
+        elif i == 3:
+            return PROFILE_LABELS[prof[0]]
+        elif i == 4:
+            return SKIP_LABELS[s_setup[0]]
+        elif i == 5:
+            return SKIP_LABELS[s_teardown[0]]
+        return ""
+
+    def _get_toggle_var(i):
+        if i == 3: return prof
+        if i == 4: return s_setup
+        if i == 5: return s_teardown
+        return None
+
+    def _toggle_right(i):
+        if i == 0:
+            if custom_concurrency[0] is not None:
+                custom_concurrency[0] = None
+            else:
+                if cc_idx[0] == len(CONCURRENCY_PRESETS) - 1:
+                    custom_concurrency[0] = _concurrency_val()
+                else:
+                    cc_idx[0] += 1
+        elif i == 1:
+            if custom_duration[0] is not None:
+                custom_duration[0] = None
+            else:
+                if dur_idx[0] == len(DURATION_PRESETS) - 1:
+                    custom_duration[0] = _duration_val()
+                else:
+                    dur_idx[0] += 1
+        elif i == 2:
+            if custom_rampup[0] is not None:
+                custom_rampup[0] = None
+            else:
+                if ramp_idx[0] == len(RAMPUP_PRESETS) - 1:
+                    custom_rampup[0] = _rampup_val()
+                else:
+                    ramp_idx[0] += 1
+        else:
+            var = _get_toggle_var(i)
+            if var is not None:
+                var[0] = not var[0]
+
+    def _toggle_left(i):
+        if i == 0:
+            if custom_concurrency[0] is not None:
+                custom_concurrency[0] = None
+            else:
+                if cc_idx[0] == 0:
+                    custom_concurrency[0] = _concurrency_val()
+                    cc_idx[0] = 0
+                else:
+                    cc_idx[0] -= 1
+        elif i == 1:
+            if custom_duration[0] is not None:
+                custom_duration[0] = None
+            else:
+                if dur_idx[0] == 0:
+                    custom_duration[0] = _duration_val()
+                    dur_idx[0] = 0
+                else:
+                    dur_idx[0] -= 1
+        elif i == 2:
+            if custom_rampup[0] is not None:
+                custom_rampup[0] = None
+            else:
+                if ramp_idx[0] == 0:
+                    custom_rampup[0] = _rampup_val()
+                    ramp_idx[0] = 0
+                else:
+                    ramp_idx[0] -= 1
+        else:
+            var = _get_toggle_var(i)
+            if var is not None:
+                var[0] = not var[0]
+
+    editing = [None]
+    edit_buf = [""]
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("k")
+    def _up(event):
+        if editing[0] is not None:
+            return
+        sel[0] = (sel[0] - 1) % len(FIELDS)
+
+    @kb.add("down")
+    @kb.add("j")
+    def _down(event):
+        if editing[0] is not None:
+            return
+        sel[0] = (sel[0] + 1) % len(FIELDS)
+
+    @kb.add("left")
+    @kb.add("h")
+    def _left(event):
+        if editing[0] is not None:
+            return
+        _toggle_left(sel[0])
+
+    @kb.add("right")
+    @kb.add("l")
+    def _right(event):
+        if editing[0] is not None:
+            return
+        _toggle_right(sel[0])
+
+    @kb.add("backspace")
+    def _backspace(event):
+        if editing[0] is not None:
+            edit_buf[0] = edit_buf[0][:-1]
+
+    @kb.add(Keys.Any, filter=Condition(lambda: editing[0] is not None))
+    def _type_char(event):
+        ch = event.data
+        if ch.isdigit() or ch == '.':
+            edit_buf[0] += ch
+
+    @kb.add("enter")
+    def _confirm(event):
+        if editing[0] is not None:
+            idx = editing[0]
+            if edit_buf[0]:
+                try:
+                    if idx == 0:
+                        n = int(edit_buf[0])
+                        if n >= 1:
+                            custom_concurrency[0] = n
+                    elif idx == 1:
+                        n = float(edit_buf[0])
+                        if n > 0:
+                            custom_duration[0] = n
+                    elif idx == 2:
+                        n = float(edit_buf[0])
+                        if n >= 0:
+                            custom_rampup[0] = n
+                except ValueError:
+                    pass
+            editing[0] = None
+            edit_buf[0] = ""
+            return
+
+        if sel[0] == 0 and custom_concurrency[0] is not None:
+            editing[0] = 0
+            edit_buf[0] = str(custom_concurrency[0])
+            return
+        if sel[0] == 1 and custom_duration[0] is not None:
+            editing[0] = 1
+            edit_buf[0] = str(custom_duration[0])
+            return
+        if sel[0] == 2 and custom_rampup[0] is not None:
+            editing[0] = 2
+            edit_buf[0] = str(custom_rampup[0])
+            return
+
+        if sel[0] == ACTION_OK:
+            result[0] = {
+                "mode": "concurrent",
+                "iterations": 100,
+                "warmup": 5,
+                "concurrency": _concurrency_val(),
+                "duration": _duration_val(),
+                "ramp_up": _rampup_val(),
+                "profile": prof[0],
+                "skip_setup": s_setup[0],
+                "skip_teardown": s_teardown[0],
+            }
+            event.app.exit()
+            return
+        if sel[0] == ACTION_BACK:
+            result[0] = {"action": "back"}
+            event.app.exit()
+            return
+        if sel[0] == ACTION_QUIT:
+            result[0] = None
+            event.app.exit()
+            return
+
+    @kb.add("c-c")
+    @kb.add("escape")
+    def _cancel(event):
+        if editing[0] is not None:
+            editing[0] = None
+            edit_buf[0] = ""
+            return
+        result[0] = None
+        event.app.exit()
+
+    # -- Field hints --
+    _FIELD_HINTS = {
+        0: "Number of concurrent threads",
+        1: "Total test duration in seconds",
+        2: "Gradual thread ramp-up period",
+        3: "Capture flame graphs during execution",
+        4: "Reuse existing tables, skip CREATE/INSERT",
+        5: "Keep tables after benchmark completes",
+        6: "Confirm and start benchmark",
+        7: "Return to benchmark mode selection",
+        8: "Exit Rosetta",
+    }
+
+    _CFG_BOX_W = 80
+
+    def _cfg_dw(s):
+        from prompt_toolkit.utils import get_cwidth
+        return sum(get_cwidth(ch) for ch in s)
+
+    def _cfg_box_top():
+        return ("dim cyan", "  \u256d" + "\u2500" * _CFG_BOX_W + "\u256e\n")
+
+    def _cfg_box_mid():
+        return ("dim cyan", "  \u251c" + "\u2500" * _CFG_BOX_W + "\u2524\n")
+
+    def _cfg_box_bot():
+        return ("dim cyan", "  \u2570" + "\u2500" * _CFG_BOX_W + "\u256f\n")
+
+    def _cfg_box_row(fragments):
+        vis_w = sum(_cfg_dw(t) for _, t in fragments)
+        if vis_w > _CFG_BOX_W:
+            overflow = vis_w - _CFG_BOX_W
+            trimmed = list(fragments)
+            for idx in range(len(trimmed) - 1, -1, -1):
+                style, text = trimmed[idx]
+                tw = _cfg_dw(text)
+                if tw >= overflow:
+                    while overflow > 0 and text:
+                        overflow -= _cfg_dw(text[-1])
+                        text = text[:-1]
+                    trimmed[idx] = (style, text)
+                    break
+                else:
+                    overflow -= tw
+                    trimmed[idx] = (style, "")
+            fragments = trimmed
+            vis_w = sum(_cfg_dw(t) for _, t in fragments)
+        pad = max(0, _CFG_BOX_W - vis_w)
+        result = [("dim cyan", "  \u2502")]
+        result.extend(fragments)
+        result.append(("", " " * pad))
+        result.append(("dim cyan", "\u2502\n"))
+        return result
+
+    def _get_text():
+        lines = []
+
+        # Logo
+        lines.append(("", "\n"))
+        for logo_line in LOGO_LINES:
+            lines.append(("bold cyan", f"    {logo_line}\n"))
+        lines.append(("", "\n"))
+        from . import __version__
+        lines.append(("dim", f"  {LOGO_SUBTITLE}"))
+        lines.append(("dim", f"  v{__version__}"))
+        lines.append(("bold white", "  CONCURRENT Mode\n"))
+        lines.append(("", "\n"))
+
+        # If in editing mode, show inline input (outside box)
+        if editing[0] is not None:
+            idx = editing[0]
+            label = FIELDS[idx]["label"]
+            lines.append(("bold cyan", "  \u276f "))
+            lines.append(("bold cyan", label))
+            lines.append(("", "  "))
+            lines.append(("bold white", f"[ {edit_buf[0]}\u258c ]"))
+            lines.append(("", "\n"))
+            lines.append(("dim",
+                         "     Type a number, Enter to confirm, "
+                         "Esc to cancel\n"))
+            return lines
+
+        # Box top
+        lines.append(_cfg_box_top())
+
+        # Keyboard hints
+        lines.extend(_cfg_box_row([
+            ("dim", "  \u2190\u2192 change  Enter confirm/custom  \u2191\u2193 move  Esc cancel")
+        ]))
+
+        # Separator
+        lines.append(_cfg_box_mid())
+
+        # Fields
+        for i, field in enumerate(FIELDS):
+            is_sel = (i == sel[0])
+
+            if field["type"] == "action":
+                if field["label"] == "Quit":
+                    icon = "\u25cb"
+                else:
+                    icon = "\u25c6" if is_sel else "\u25c7"
+                if is_sel:
+                    lines.extend(_cfg_box_row([
+                        ("bold cyan", f"  {icon} {field['label']}")
+                    ]))
+                else:
+                    lines.extend(_cfg_box_row([
+                        ("dim", f"  {icon} {field['label']}")
+                    ]))
+                continue
+
+            frags = []
+            if is_sel:
+                frags.append(("bold cyan", f"  {field['label']}  "))
+            else:
+                frags.append(("dim", f"  {field['label']}  "))
+
+            val_str = _field_val(i)
+            if field["type"] == "choice":
+                if is_sel:
+                    frags.append(("bold yellow", f"\u25c4 {val_str} \u25ba"))
+                else:
+                    frags.append(("", val_str))
+            else:
+                toggle_var = _get_toggle_var(i)
+                toggle_on = toggle_var[0] if toggle_var else False
+                if toggle_on:
+                    frags.append(("bold green" if is_sel else "green",
+                                  f"\u25cf {val_str}"))
+                else:
+                    frags.append(("dim", f"\u25cb {val_str}"))
+
+            lines.extend(_cfg_box_row(frags))
+
+        # Dynamic hint separator
+        lines.append(_cfg_box_mid())
+
+        # Dynamic hint
+        hint = _FIELD_HINTS.get(sel[0], "")
+        lines.extend(_cfg_box_row([
+            ("dim italic", f"  \U0001f4a1 {hint}")
+        ]))
+
+        # Box bottom
+        lines.append(_cfg_box_bot())
+
+        return lines
+
+    menu = Window(
+        content=FormattedTextControl(_get_text),
+        dont_extend_height=True,
+    )
+
+    app: Application = Application(
+        layout=Layout(HSplit([menu])),
+        key_bindings=kb,
+        full_screen=False,
+    )
+
+    _tty_write("\033[s")
+    app.run()
+    _tty_write("\033[u\033[J")
+
+    return result[0]
+
+
+def _select_mode(configs, database: str,
+                 reachable_names: set = None,
+                 default_dbms: list = None,
+                 baseline: str = "tdsql",
+                 server_url: str = "",
+                 dbms_status: dict = None) -> tuple:
+    """Show a combined DBMS + Mode selector.
+
+    DBMS is the first row (multiselect checkboxes).
+    Modes are rows below it.  ↑↓ moves between rows; when on the DBMS row,
+    ←→ moves sub-cursor and Space toggles.
+
+    Args:
+        configs: all available (enabled) DBMSConfig objects
+        database: default database name
+        reachable_names: set of DBMS names that are reachable (connectable).
+            If None, all are assumed reachable.
+        default_dbms: list of DBMS names to pre-select. If None, all reachable
+            are selected.
+        server_url: if provided, display the web UI URL on the page.
+
+    Returns ``(mode, selected_configs)`` or ``(None, None)`` on cancel.
+    """
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    MODES = [
+        ("mtr",        "MTR MODE",        "run native MySQL MTR tests"),
+        ("test",       "TEST MODE",       "run .test compatibility tests"),
+        ("playground", "PLAYGROUND MODE",  "run SQL Playground in browser"),
+        ("bench",      "BENCHMARK MODE",   "run JSON performance benchmarks"),
+        ("tdsql",      "TDSQL MODE",       "build / install / manage TDSQL"),
+        ("config",     "CONFIG",           "edit database and MTR settings"),
+        (None,         "QUIT",             "exit"),
+    ]
+
+    # Row layout: row 0 = DBMS multiselect, rows 1..N = mode items
+    DBMS_ROW = 0
+    TOTAL_ROWS = 1 + len(MODES)
+
+    # --- Determine reachability ---
+    if reachable_names is None:
+        reachable_names = {c.name for c in configs}
+
+    # --- State: initialize checkboxes ---
+    # Options: individual DBMS names + "all"
+    dbms_names = [c.name for c in configs]  # preserve order
+
+    if default_dbms is not None:
+        dbms_state = {name: (name in default_dbms and name in reachable_names)
+                      for name in dbms_names}
+    else:
+        dbms_state = {name: (name in reachable_names) for name in dbms_names}
+
+    # "all" means all reachable DBMS are selected
+    def _is_all():
+        return all(dbms_state[n] for n in dbms_names if n in reachable_names)
+
+    # Options list for display: individual DBMS + "all"
+    dbms_options = dbms_names + ["all"]
+
+    sel = [1]               # selected row; start on first mode (MTR)
+    dbms_cursor = [0]       # sub-cursor within DBMS row
+    result = [None, None]
+
+    # -- key bindings -------------------------------------------------------
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("k")
+    def _up(event):
+        sel[0] = (sel[0] - 1) % TOTAL_ROWS
+        event.app.invalidate()
+
+    @kb.add("down")
+    @kb.add("j")
+    def _down(event):
+        sel[0] = (sel[0] + 1) % TOTAL_ROWS
+        event.app.invalidate()
+
+    @kb.add("left")
+    def _left(event):
+        if sel[0] == DBMS_ROW:
+            dbms_cursor[0] = max(0, dbms_cursor[0] - 1)
+        event.app.invalidate()
+
+    @kb.add("right")
+    @kb.add("l")
+    def _right(event):
+        if sel[0] == DBMS_ROW:
+            dbms_cursor[0] = min(len(dbms_options) - 1, dbms_cursor[0] + 1)
+            event.app.invalidate()
+        else:
+            _do_confirm(event)
+
+    @kb.add("space")
+    def _toggle(event):
+        warn_msg[0] = ""  # clear warning on interaction
+        if sel[0] == DBMS_ROW:
+            idx = dbms_cursor[0]
+            if 0 <= idx < len(dbms_options):
+                opt = dbms_options[idx]
+                if opt == "all":
+                    # Toggle all reachable
+                    if _is_all():
+                        # Deselect all EXCEPT baseline
+                        for k in dbms_state:
+                            if k != baseline:
+                                dbms_state[k] = False
+                    else:
+                        for k in dbms_state:
+                            if k in reachable_names:
+                                dbms_state[k] = True
+                elif opt == baseline:
+                    # Baseline cannot be deselected
+                    if dbms_state.get(opt, False):
+                        warn_msg[0] = (
+                            f"Baseline \"{baseline}\" cannot be deselected")
+                    else:
+                        dbms_state[opt] = True
+                elif opt in reachable_names:
+                    dbms_state[opt] = not dbms_state[opt]
+                # unreachable DBMS can't be toggled
+        event.app.invalidate()
+
+    @kb.add("a")
+    def _all_sel(event):
+        for k in dbms_state:
+            if k in reachable_names:
+                dbms_state[k] = True
+        event.app.invalidate()
+
+    @kb.add("n")
+    def _none_sel(event):
+        for k in dbms_state:
+            if k != baseline:
+                dbms_state[k] = False
+        event.app.invalidate()
+
+    # Minimum DBMS requirements per mode
+    MODE_MIN_DBMS = {
+        "mtr": 1,          # MTR only needs baseline (tdsql)
+        "test": 2,         # cross-DBMS comparison needs at least 2
+        "playground": 2,   # cross-DBMS comparison needs at least 2
+        "bench": 2,        # cross-DBMS comparison needs at least 2
+        "tdsql": 0,        # TDSQL management doesn't need DBMS
+        "config": 0,       # config editing doesn't need DBMS
+    }
+    warn_msg = [""]  # mutable warning message shown in UI
+
+    def _do_confirm(event):
+        if sel[0] == DBMS_ROW:
+            return  # can't confirm on DBMS row, just toggle
+        mode_idx = sel[0] - 1
+        key = MODES[mode_idx][0]
+        if key is None:  # Quit
+            result[0] = None
+            result[1] = None
+            event.app.exit()
+            return
+        selected = [c for c in configs if dbms_state.get(c.name, False)]
+        min_req = MODE_MIN_DBMS.get(key, 1)
+        if len(selected) < min_req:
+            if len(selected) == 0:
+                warn_msg[0] = f"Please select at least {min_req} DBMS"
+            else:
+                warn_msg[0] = (
+                    f"{MODES[mode_idx][1]} requires at least "
+                    f"{min_req} DBMS ({len(selected)} selected)")
+            event.app.invalidate()
+            return
+        # Baseline DBMS must be selected and reachable (skip for config/tdsql modes)
+        if key not in ("config", "tdsql") and baseline:
+            selected_names = {c.name for c in selected}
+            if baseline not in selected_names:
+                warn_msg[0] = (
+                    f"Baseline DBMS \"{baseline}\" must be selected")
+                event.app.invalidate()
+                return
+            if baseline not in reachable_names:
+                warn_msg[0] = (
+                    f"Baseline \"{baseline}\" is unreachable, "
+                    f"please check its service")
+                event.app.invalidate()
+                return
+        warn_msg[0] = ""
+        result[0] = key
+        result[1] = selected
+        event.app.exit()
+
+    @kb.add("enter")
+    def _confirm(event):
+        _do_confirm(event)
+
+    @kb.add("c-c")
+    @kb.add("escape")
+    @kb.add("q")
+    def _cancel(event):
+        result[0] = None
+        result[1] = None
+        event.app.exit()
+
+    # -- layout -------------------------------------------------------------
+    # -- Dynamic hints for each mode/row --
+    MODE_HINTS = {
+        "mtr":        "Run native MySQL MTR test suites (row/col/pq)",
+        "test":       "Run .test files against multiple DBs and diff results",
+        "playground": "Launch an interactive SQL playground in the browser",
+        "bench":      "Compare query performance with latency/QPS reports",
+        "config":     "Edit database connections and MTR parameters",
+        None:         "Exit Rosetta",
+    }
+    DBMS_HINT = "Use Space to toggle, Baseline (*) must stay selected."
+
+    # Box drawing constants
+    BOX_W = 80  # number of ─ chars in border = inner display width in columns
+
+    def _display_width(s):
+        """Calculate terminal display width consistent with prompt_toolkit.
+
+        Uses prompt_toolkit's get_cwidth() which treats:
+        - East Asian Wide/Fullwidth (W/F): width 2 (CJK, emoji)
+        - Everything else (including Ambiguous): width 1
+
+        This ensures our padding aligns with prompt_toolkit's own cursor
+        positioning, which is the authoritative source of truth for how
+        text is laid out in the terminal when using prompt_toolkit.
+        """
+        from prompt_toolkit.utils import get_cwidth
+        return sum(get_cwidth(ch) for ch in s)
+
+    def _box_top():
+        return ("dim cyan", "  ╭" + "─" * BOX_W + "╮\n")
+
+    def _box_mid():
+        return ("dim cyan", "  ├" + "─" * BOX_W + "┤\n")
+
+    def _box_bot():
+        return ("dim cyan", "  ╰" + "─" * BOX_W + "╯\n")
+
+    def _box_row(fragments):
+        """Wrap content fragments in │...│ with right-padding.
+
+        Layout: "  │" + <fragments> + <padding spaces> + "│\\n"
+        The content + padding fills exactly BOX_W display columns.
+        """
+        vis_w = sum(_display_width(t) for _, t in fragments)
+        if vis_w > BOX_W:
+            # Truncate last fragment to fit within box
+            overflow = vis_w - BOX_W
+            trimmed = list(fragments)
+            for idx in range(len(trimmed) - 1, -1, -1):
+                style, text = trimmed[idx]
+                tw = _display_width(text)
+                if tw >= overflow:
+                    while overflow > 0 and text:
+                        overflow -= _display_width(text[-1])
+                        text = text[:-1]
+                    trimmed[idx] = (style, text)
+                    break
+                else:
+                    overflow -= tw
+                    trimmed[idx] = (style, "")
+            fragments = trimmed
+            vis_w = sum(_display_width(t) for _, t in fragments)
+        pad = max(0, BOX_W - vis_w)
+        result = [("dim cyan", "  │")]
+        result.extend(fragments)
+        result.append(("", " " * pad))
+        result.append(("dim cyan", "│\n"))
+        return result
+
+    def _get_content():
+        lines = []
+
+        # ── ASCII Logo ──
+        lines.append(("", "\n"))
+        for logo_line in LOGO_LINES:
+            lines.append(("bold cyan", f"    {logo_line}\n"))
+        lines.append(("", "\n"))
+        from . import __version__
+        lines.append(("dim", f"  {LOGO_SUBTITLE}"))
+        lines.append(("dim", f"  v{__version__}\n"))
+        lines.append(("", "\n"))
+
+        # ── Box top ──
+        lines.append(_box_top())
+
+        # ── Keyboard hints row ──
+        hint_text = "  ↑↓ navigate  ←→ select DBMS  Space toggle  Enter confirm"
+        lines.extend(_box_row([("dim", hint_text)]))
+
+        # ── DBMS separator ──
+        lines.append(_box_mid())
+
+        # ── DBMS capsule row ──
+        is_dbms_row = (sel[0] == DBMS_ROW)
+        dbms_frags = []
+        label_style = "bold cyan" if is_dbms_row else "dim"
+        dbms_frags.append((label_style, "  DBMS   "))
+
+        for idx, opt in enumerate(dbms_options):
+            is_cur_opt = (is_dbms_row and idx == dbms_cursor[0])
+            display_name = f"{opt}*" if (opt == baseline and opt != "all") else opt
+            capsule_text = f" {display_name} "
+
+            if opt == "all":
+                checked = _is_all()
+                is_reachable = True
+            else:
+                checked = dbms_state.get(opt, False)
+                is_reachable = (opt in reachable_names)
+
+            if not is_reachable:
+                style = "dim italic"
+            elif checked and is_cur_opt:
+                style = "bold reverse fg:ansiwhite bg:ansicyan"
+            elif checked:
+                style = "reverse fg:ansicyan"
+            elif is_cur_opt:
+                style = "bold underline fg:ansicyan"
+            else:
+                style = "dim"
+
+            dbms_frags.append((style, capsule_text))
+            dbms_frags.append(("", " "))
+
+        lines.extend(_box_row(dbms_frags))
+
+        # ── Mode separator ──
+        lines.append(_box_mid())
+
+        # ── Mode list ──
+        for i, (key, label, desc) in enumerate(MODES):
+            row_idx = i + 1
+            is_cur = (sel[0] == row_idx)
+            is_quit = (key is None)
+
+            mode_frags = []
+            if is_quit:
+                icon = "○"
+                if is_cur:
+                    mode_frags.append(("bold cyan", f"  {icon} {label}"))
+                else:
+                    mode_frags.append(("dim", f"  {icon} {label}"))
+            else:
+                icon = "◆" if is_cur else "◇"
+                if is_cur:
+                    mode_frags.append(("bold cyan", f"  {icon} {label}"))
+                else:
+                    mode_frags.append(("", f"  {icon} {label}"))
+
+            lines.extend(_box_row(mode_frags))
+
+        # ── Warning message (if any, inside box) ──
+        if warn_msg[0]:
+            lines.append(_box_mid())
+            warn_frags = [("bold red", f"  ⚠ {warn_msg[0]}")]
+            lines.extend(_box_row(warn_frags))
+
+        # ── Dynamic hint separator ──
+        lines.append(_box_mid())
+
+        # ── Dynamic hint row ──
+        if sel[0] == DBMS_ROW:
+            hint = DBMS_HINT
+        else:
+            mode_idx = sel[0] - 1
+            mode_key = MODES[mode_idx][0] if mode_idx < len(MODES) else None
+            hint = MODE_HINTS.get(mode_key, "")
+        hint_frags = [("dim italic", f"  💡 {hint}")]
+        lines.extend(_box_row(hint_frags))
+
+        # ── Box bottom ──
+        lines.append(_box_bot())
+
+        # ── DBMS Status table (outside box, same width) ──
+        if dbms_status:
+            lines.append(("", "\n"))
+
+            # Column widths — fits _ST_BOX_W = 80
+            _C_NAME = 12
+            _C_ADDR = 22
+            _C_VER = 34
+            _C_LAT = 8
+            _ST_BOX_W = 80  # same width as main menu box
+
+            # Table top
+            lines.append(("dim cyan", "  ╭" + "─" * _ST_BOX_W + "╮\n"))
+
+            # Header row
+            hdr = f"    {'Name':<{_C_NAME}s}{'Host':<{_C_ADDR}s}{'Version':<{_C_VER}s}{'Latency':>{_C_LAT}s}"
+            hdr_pad = _ST_BOX_W - _display_width(hdr)
+            lines.append(("dim cyan", "  │"))
+            lines.append(("dim bold", hdr))
+            lines.append(("", " " * max(0, hdr_pad)))
+            lines.append(("dim cyan", "│\n"))
+
+            # Header separator
+            lines.append(("dim cyan", "  ├" + "─" * _ST_BOX_W + "┤\n"))
+
+            # Data rows
+            for cfg in configs:
+                info = dbms_status.get(cfg.name, {})
+                is_conn = info.get("connected", False)
+                version = info.get("version") or ""
+                latency = info.get("latency_ms")
+                host = info.get("host", cfg.host)
+                port = info.get("port", cfg.port)
+
+                addr = f"{host}:{port}"
+                if len(addr) > _C_ADDR:
+                    addr = addr[:_C_ADDR - 1] + "~"
+                ver_short = version if len(version) <= _C_VER else version[:_C_VER - 2] + ".."
+                lat_str = f"{latency:.1f}ms" if latency is not None else "-"
+
+                if is_conn:
+                    st_mark = "*"
+                    st_style = "green"
+                else:
+                    st_mark = "!"
+                    st_style = "red"
+                    ver_short = "disconnected"
+                    lat_str = "-"
+
+                # Row: " <mark>  <name>  <addr>  <version>  <latency>"
+                row_text = f"  {cfg.name:<{_C_NAME}s}{addr:<{_C_ADDR}s}{ver_short:<{_C_VER}s}{lat_str:>{_C_LAT}s}"
+                full_row = f" {st_mark}" + row_text
+                row_pad = _ST_BOX_W - _display_width(full_row)
+
+                lines.append(("dim cyan", "  │"))
+                lines.append((st_style, f" {st_mark}"))
+                lines.append(("" if is_conn else "dim", row_text))
+                lines.append(("", " " * max(0, row_pad)))
+                lines.append(("dim cyan", "│\n"))
+
+            # Table bottom
+            lines.append(("dim cyan", "  ╰" + "─" * _ST_BOX_W + "╯\n"))
+
+            # Summary line below table
+            connected = sum(1 for v in dbms_status.values() if v["connected"])
+            total = len(dbms_status)
+            disconnected = total - connected
+            if disconnected > 0:
+                lines.append(("red", f"   Disconnected: {disconnected}"))
+
+        # ── Web UI URL (outside box) ──
+        if server_url:
+            lines.append(("", "\n"))
+            lines.append(("dim", "   Web UI:     "))
+            lines.append(("dim", f"{server_url}/index.html\n"))
+            lines.append(("dim", "   Playground: "))
+            lines.append(("dim", f"{server_url}/playground.html\n"))
+
+        # Config path
+        from .paths import CONFIG_FILE
+        lines.append(("dim", f"   Config:     {CONFIG_FILE}\n"))
+
+        return lines
+
+    # Place cursor at last line so prompt_toolkit scrolls to show full content.
+    from prompt_toolkit.data_structures import Point
+
+    def _get_cursor_pos():
+        content = _get_content()
+        total_lines = sum(1 for _, text in content if '\n' in text)
+        return Point(0, max(0, total_lines - 1))
+
+    ctrl = FormattedTextControl(_get_content, get_cursor_position=_get_cursor_pos,
+                                show_cursor=False)
+    menu = Window(content=ctrl)
+
+    app: Application = Application(
+        layout=Layout(HSplit([menu])),
+        key_bindings=kb,
+        full_screen=True,
+    )
+
+    app.run()
+
+    return tuple(result)
+
+
+
+def _select_config_editor(config_path: str) -> Optional[str]:
+    """Interactive config editor with tabbed navigation.
+
+    First layer: Tabs for each DBMS + MTR + Global (←→ to switch)
+    Second layer: Config fields within selected tab (↑↓ to navigate)
+
+    Returns "saved" if user saved changes, "back" if discarded, None if quit.
+    """
+    import json
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.utils import get_cwidth
+
+    from .config import load_raw_config, save_config
+
+    # Load current config
+    raw_config = load_raw_config(config_path)
+    databases = raw_config.get("databases", [])
+    mtr_config = raw_config.get("mtr", {})
+
+    # ── Build tab structure ──
+    # Each tab: {"name": str, "fields": [{"key", "type", "value", "hint", "label"}]}
+    tabs = []
+
+    DBMS_FIELDS = [
+        ("type",         "text",   "DBMS type: mysql, tdsql, tidb, oceanbase, oracle"),
+        ("host",         "text",   "Server hostname or IP address"),
+        ("port",         "number", "Server port number"),
+        ("user",         "text",   "Database username"),
+        ("password",     "text",   "Database password"),
+        ("driver",       "text",   "Python driver (pymysql / mysql.connector / oracledb)"),
+        ("service_name", "text",   "Oracle service name (e.g. orclpdb1)"),
+        ("enabled",      "toggle", "Whether this DBMS is active"),
+    ]
+
+    for db_idx, db in enumerate(databases):
+        tab_fields = []
+        db_type = db.get("type", "") or db.get("protocol", "mysql")
+        for key, ftype, hint in DBMS_FIELDS:
+            # Hide service_name for MySQL protocol configs
+            if key == "service_name" and db_type != "oracle":
+                continue
+            tab_fields.append({
+                "key": key, "type": ftype, "hint": hint,
+                "label": key.replace("_", " ").capitalize(),
+                "value": db.get(key, "" if ftype == "text" else (0 if ftype == "number" else True)),
+                "db_idx": db_idx,
+            })
+        tabs.append({"name": db.get("name", f"db{db_idx}"), "fields": tab_fields})
+
+    # MTR tab
+    MTR_FIELDS = [
+        ("test_dir",         "text",   "Path to mysql-test directory"),
+        ("skip_list",        "text",   "Path to skip list file (.def)"),
+        ("mysqld_opts",      "list",   "MySQL server options (one per line)"),
+        ("parallel",         "number", "Number of parallel MTR workers"),
+        ("retry",            "number", "Retry count for failed tests"),
+        ("retry_failure",    "number", "Retry count for test failures"),
+        ("max_test_fail",    "number", "Maximum allowed test failures"),
+        ("testcase_timeout", "number", "Timeout per test case (seconds)"),
+        ("suite_timeout",    "number", "Timeout per suite (seconds)"),
+        ("base_port",        "number", "Base port for MTR execution"),
+        ("total_port",       "number", "Total port range for MTR"),
+    ]
+    mtr_tab_fields = []
+    for key, ftype, hint in MTR_FIELDS:
+        raw_val = mtr_config.get(key, "" if ftype == "text" else ([] if ftype == "list" else 0))
+        if ftype == "list":
+            # Store list as newline-joined string for display/edit
+            display_val = ", ".join(raw_val) if isinstance(raw_val, list) else str(raw_val)
+        else:
+            display_val = raw_val
+        mtr_tab_fields.append({
+            "key": key, "type": ftype, "hint": hint,
+            "label": key.replace("_", " ").capitalize(),
+            "value": display_val,
+            "db_idx": None,
+        })
+    tabs.append({"name": "MTR", "fields": mtr_tab_fields})
+
+    # Global tab
+    playground_config = raw_config.get("playground", {})
+    global_fields = [
+        {"key": "baseline", "type": "text", "hint": "Baseline DBMS for comparisons",
+         "label": "Baseline", "value": raw_config.get("baseline", "tdsql"), "db_idx": None},
+        {"key": "traceless", "type": "toggle", "hint": "Auto-create temp DB per execution, drop after done",
+         "label": "Traceless", "value": playground_config.get("traceless", True), "db_idx": None},
+    ]
+    tabs.append({"name": "Global", "fields": global_fields})
+
+    # ── State ──
+    cur_tab = [0]
+    cur_field = [0]  # per-tab cursor (reset when switching tabs)
+    focus_level = [0]  # 0 = tab bar, 1 = field list, 2 = list editor
+    editing = [False]
+    edit_buf = [""]
+    result_val = [None]
+    saved_msg = [""]
+    # List editor state
+    list_items = [[]]   # current list being edited (mutable copy)
+    list_cursor = [0]   # cursor within expanded list
+    list_editing = [False]  # typing new/edit value for a list item
+
+    _CFG_BOX_W = 80
+
+    def _dw(s):
+        return sum(get_cwidth(ch) for ch in s)
+
+    def _box_top():
+        return ("dim cyan", "  \u256d" + "\u2500" * _CFG_BOX_W + "\u256e\n")
+
+    def _box_mid():
+        return ("dim cyan", "  \u251c" + "\u2500" * _CFG_BOX_W + "\u2524\n")
+
+    def _box_bot():
+        return ("dim cyan", "  \u2570" + "\u2500" * _CFG_BOX_W + "\u256f\n")
+
+    def _box_row(fragments):
+        vis_w = sum(_dw(t) for _, t in fragments)
+        if vis_w > _CFG_BOX_W:
+            overflow = vis_w - _CFG_BOX_W
+            trimmed = list(fragments)
+            for idx in range(len(trimmed) - 1, -1, -1):
+                style, text = trimmed[idx]
+                tw = _dw(text)
+                if tw >= overflow:
+                    while overflow > 0 and text:
+                        overflow -= _dw(text[-1])
+                        text = text[:-1]
+                    trimmed[idx] = (style, text)
+                    break
+                else:
+                    overflow -= tw
+                    trimmed[idx] = (style, "")
+            fragments = trimmed
+            vis_w = sum(_dw(t) for _, t in fragments)
+        pad = max(0, _CFG_BOX_W - vis_w)
+        r = [("dim cyan", "  \u2502")]
+        r.extend(fragments)
+        r.append(("", " " * pad))
+        r.append(("dim cyan", "\u2502\n"))
+        return r
+
+    def _cur_tab_fields():
+        """Fields for current tab + Save/Back/Quit actions."""
+        return tabs[cur_tab[0]]["fields"]
+
+    def _total_items():
+        """Total selectable items (fields + 3 actions)."""
+        return len(_cur_tab_fields()) + 3
+
+    def _get_text():
+        lines = []
+
+        # Logo
+        lines.append(("", "\n"))
+        for logo_line in LOGO_LINES:
+            lines.append(("bold cyan", f"    {logo_line}\n"))
+        lines.append(("", "\n"))
+        from . import __version__
+        lines.append(("dim", f"  {LOGO_SUBTITLE}"))
+        lines.append(("dim", f"  v{__version__}"))
+        lines.append(("bold white", "  Config Editor\n"))
+        lines.append(("", "\n"))
+
+        # ── Tab bar (first layer, inside box) ──
+        lines.append(_box_top())
+        tab_frags = [("", "  ")]
+        for i, tab in enumerate(tabs):
+            is_active = (i == cur_tab[0])
+            if is_active and focus_level[0] == 0:
+                # Focused on tab bar, current tab highlighted
+                tab_frags.append(("bold reverse fg:ansicyan", f" {tab['name']} "))
+            elif is_active:
+                # Tab bar not focused, but this is the selected tab
+                tab_frags.append(("bold bg:ansicyan fg:ansiblack", f" {tab['name']} "))
+            else:
+                tab_frags.append(("dim", f" {tab['name']} "))
+            if i < len(tabs) - 1:
+                tab_frags.append(("dim", " "))
+        lines.extend(_box_row(tab_frags))
+        lines.append(_box_mid())
+
+        # Edit mode
+        if editing[0]:
+            idx = cur_field[0]
+            tab_fields = _cur_tab_fields()
+            if idx < len(tab_fields):
+                field = tab_fields[idx]
+                lines.append(("bold cyan", f"  \u276f {field['label']}  "))
+                lines.append(("bold white", f"[ {edit_buf[0]}\u258c ]\n"))
+                lines.append(("dim", "     Type value, Enter confirm, Esc cancel\n"))
+            return lines
+
+        # ── Keyboard hints ──
+        lines.extend(_box_row([
+            ("dim", "  \u2190\u2192/Tab switch tab  \u2193 enter fields  \u2191\u2193 move  Enter edit  s save")
+        ]))
+        lines.append(_box_mid())
+
+        # ── Fields (second layer) ──
+        tab_fields = _cur_tab_fields()
+        LABEL_W = 22
+
+        for i, field in enumerate(tab_fields):
+            is_sel = (focus_level[0] in (1, 2) and i == cur_field[0])
+            frags = []
+            label_text = f"  {field['label']:<{LABEL_W}s}"
+            if is_sel:
+                frags.append(("bold cyan", label_text))
+            else:
+                frags.append(("dim", label_text))
+
+            val = field["value"]
+            if field["type"] == "toggle":
+                if val:
+                    frags.append(("bold green" if is_sel else "green", "\u25cf On"))
+                else:
+                    frags.append(("dim", "\u25cb Off"))
+            elif field["type"] == "number":
+                if is_sel:
+                    frags.append(("bold yellow", f"\u25c4 {val} \u25ba"))
+                else:
+                    frags.append(("", str(val)))
+            elif field["type"] == "list":
+                # Show truncated list summary or expanded if in list editor
+                if focus_level[0] == 2 and is_sel:
+                    # This field is being edited inline - show indicator
+                    frags.append(("bold cyan", "[editing below...]"))
+                else:
+                    display_val = str(val)
+                    if len(display_val) > 40:
+                        display_val = display_val[:37] + "..."
+                    if is_sel:
+                        frags.append(("bold", f"[{display_val}]"))
+                    else:
+                        frags.append(("dim", f"[{display_val}]"))
+            else:  # text
+                display_val = str(val)
+                if field["key"] == "password" and display_val:
+                    display_val = "\u2022" * min(len(display_val), 8)
+                if is_sel:
+                    frags.append(("bold", display_val if display_val else "(empty)"))
+                else:
+                    frags.append(("", display_val if display_val else "(empty)"))
+
+            lines.extend(_box_row(frags))
+
+            # Inline list expansion when in list editor mode
+            if field["type"] == "list" and focus_level[0] == 2 and is_sel:
+                # Show a scrollable window of max 8 visible items
+                _LIST_VISIBLE = 8
+                total_li = len(list_items[0])
+                cursor = list_cursor[0]
+
+                # Calculate visible window around cursor
+                if total_li <= _LIST_VISIBLE:
+                    vis_start = 0
+                    vis_end = total_li
+                else:
+                    half = _LIST_VISIBLE // 2
+                    vis_start = max(0, cursor - half)
+                    vis_end = vis_start + _LIST_VISIBLE
+                    if vis_end > total_li:
+                        vis_end = total_li
+                        vis_start = vis_end - _LIST_VISIBLE
+
+                # Scroll indicator (top)
+                if vis_start > 0:
+                    lines.extend(_box_row([("dim", f"      ... ({vis_start} more above)")]))
+
+                for li_idx in range(vis_start, vis_end):
+                    item = list_items[0][li_idx]
+                    li_sel = (li_idx == cursor)
+                    if list_editing[0] and li_sel:
+                        li_frags = [("bold cyan", f"      [{edit_buf[0]}")]
+                        li_frags.append(("bold white", "▌"))
+                        li_frags.append(("bold cyan", "]"))
+                    elif li_sel:
+                        li_frags = [("bold cyan", f"    > {item}")]
+                    else:
+                        li_frags = [("dim", f"      {item}")]
+                    lines.extend(_box_row(li_frags))
+
+                # Scroll indicator (bottom)
+                if vis_end < total_li:
+                    lines.extend(_box_row([("dim", f"      ... ({total_li - vis_end} more below)")]))
+
+                # List info + hint
+                li_hint = f"    [{cursor+1}/{total_li}]  Enter edit  a add  d delete  Esc done"
+                lines.extend(_box_row([("dim italic", f"  {li_hint}")]))
+
+        # Separator before actions
+        lines.append(_box_mid())
+
+        # Actions (Save / Back / Quit)
+        actions = [
+            ("Save", "Save changes to config.json"),
+            ("Back (discard)", "Return without saving"),
+            ("Quit", "Exit Rosetta"),
+        ]
+        for a_idx, (a_label, a_hint) in enumerate(actions):
+            item_idx = len(tab_fields) + a_idx
+            is_sel = (focus_level[0] == 1 and cur_field[0] == item_idx)
+            if a_label == "Quit":
+                icon = "\u25cb"
+            else:
+                icon = "\u25c6" if is_sel else "\u25c7"
+            style = "bold cyan" if is_sel else "dim"
+            lines.extend(_box_row([(style, f"  {icon} {a_label}")]))
+
+        # Dynamic hint
+        lines.append(_box_mid())
+        hint = ""
+        idx = cur_field[0]
+        tab_fields = _cur_tab_fields()
+        if idx < len(tab_fields):
+            hint = tab_fields[idx].get("hint", "")
+        else:
+            a_idx = idx - len(tab_fields)
+            if 0 <= a_idx < len(actions):
+                hint = actions[a_idx][1]
+        if saved_msg[0]:
+            hint = saved_msg[0]
+        lines.extend(_box_row([("dim italic", f"  \U0001f4a1 {hint}")]))
+        lines.append(_box_bot())
+
+        # Footer hint
+        lines.append(("dim", "  ←→ change value  |  Tab/←→ switch tab (on tab bar)  |  Esc back\n"))
+
+        return lines
+
+    # ── Key bindings ──
+    kb = KeyBindings()
+
+    @kb.add("left")
+    def _left(event):
+        if editing[0] or list_editing[0]:
+            return
+        if focus_level[0] == 0:
+            cur_tab[0] = (cur_tab[0] - 1) % len(tabs)
+            cur_field[0] = 0
+            saved_msg[0] = ""
+        elif focus_level[0] == 1:
+            tab_fields = _cur_tab_fields()
+            if cur_field[0] < len(tab_fields):
+                field = tab_fields[cur_field[0]]
+                if field["type"] == "number":
+                    v = int(field["value"]) if field["value"] else 0
+                    if v > 0:
+                        field["value"] = v - 1
+
+    @kb.add("right")
+    def _right(event):
+        if editing[0] or list_editing[0]:
+            return
+        if focus_level[0] == 0:
+            cur_tab[0] = (cur_tab[0] + 1) % len(tabs)
+            cur_field[0] = 0
+            saved_msg[0] = ""
+        elif focus_level[0] == 1:
+            tab_fields = _cur_tab_fields()
+            if cur_field[0] < len(tab_fields):
+                field = tab_fields[cur_field[0]]
+                if field["type"] == "number":
+                    field["value"] = int(field["value"]) + 1 if field["value"] else 1
+
+    @kb.add("tab")
+    def _tab_next(event):
+        if editing[0] or list_editing[0]:
+            return
+        if focus_level[0] == 2:
+            return
+        cur_tab[0] = (cur_tab[0] + 1) % len(tabs)
+        cur_field[0] = 0
+        focus_level[0] = 0
+        saved_msg[0] = ""
+
+    @kb.add("up")
+    @kb.add("k")
+    def _up(event):
+        if editing[0] or list_editing[0]:
+            return
+        if focus_level[0] == 2:
+            if list_cursor[0] > 0:
+                list_cursor[0] -= 1
+        elif focus_level[0] == 1:
+            if cur_field[0] > 0:
+                cur_field[0] -= 1
+            else:
+                focus_level[0] = 0
+        saved_msg[0] = ""
+
+    @kb.add("down")
+    @kb.add("j")
+    def _down(event):
+        if editing[0] or list_editing[0]:
+            return
+        if focus_level[0] == 2:
+            if list_cursor[0] < len(list_items[0]) - 1:
+                list_cursor[0] += 1
+        elif focus_level[0] == 0:
+            focus_level[0] = 1
+            cur_field[0] = 0
+        else:
+            if cur_field[0] < _total_items() - 1:
+                cur_field[0] += 1
+        saved_msg[0] = ""
+
+    @kb.add("space")
+    def _space(event):
+        if editing[0] or list_editing[0]:
+            edit_buf[0] += " "
+            return
+        if focus_level[0] == 1:
+            tab_fields = _cur_tab_fields()
+            if cur_field[0] < len(tab_fields):
+                field = tab_fields[cur_field[0]]
+                if field["type"] == "toggle":
+                    field["value"] = not field["value"]
+
+    @kb.add("a")
+    def _add_item(event):
+        if editing[0] or list_editing[0]:
+            edit_buf[0] += "a"
+            return
+        if focus_level[0] == 2:
+            # Add new item to list
+            list_items[0].append("")
+            list_cursor[0] = len(list_items[0]) - 1
+            list_editing[0] = True
+            edit_buf[0] = ""
+
+    @kb.add("d")
+    @kb.add("delete")
+    def _delete_item(event):
+        if editing[0] or list_editing[0]:
+            if event.data == "d":
+                edit_buf[0] += "d"
+            return
+        if focus_level[0] == 2 and list_items[0]:
+            # Delete current item
+            del list_items[0][list_cursor[0]]
+            if list_cursor[0] >= len(list_items[0]) and list_cursor[0] > 0:
+                list_cursor[0] -= 1
+
+    @kb.add("s")
+    def _save_shortcut(event):
+        if editing[0] or list_editing[0]:
+            edit_buf[0] += "s"
+            return
+        if focus_level[0] == 2:
+            return
+        _do_save()
+
+    def _do_save():
+        # Write back all field values to config
+        for tab in tabs:
+            for field in tab["fields"]:
+                val = field["value"]
+                # Convert list type back to array
+                if field["type"] == "list":
+                    if isinstance(val, str):
+                        val = [x.strip() for x in val.split(",") if x.strip()]
+                if field.get("db_idx") is not None:
+                    databases[field["db_idx"]][field["key"]] = val
+                elif field["key"] == "baseline":
+                    raw_config["baseline"] = val
+                elif field["key"] == "traceless":
+                    if "playground" not in raw_config:
+                        raw_config["playground"] = {}
+                    raw_config["playground"]["traceless"] = val
+                else:
+                    mtr_config[field["key"]] = val
+        raw_config["databases"] = databases
+        raw_config["mtr"] = mtr_config
+        save_config(config_path, raw_config)
+        saved_msg[0] = "Config saved successfully!"
+
+    @kb.add("enter")
+    def _enter(event):
+        if list_editing[0]:
+            # Confirm list item edit
+            list_items[0][list_cursor[0]] = edit_buf[0]
+            list_editing[0] = False
+            edit_buf[0] = ""
+            # Write back to field value
+            tab_fields = _cur_tab_fields()
+            field = tab_fields[cur_field[0]]
+            field["value"] = ", ".join(list_items[0])
+            return
+
+        if editing[0]:
+            # Confirm edit
+            tab_fields = _cur_tab_fields()
+            if cur_field[0] < len(tab_fields):
+                field = tab_fields[cur_field[0]]
+                val = edit_buf[0]
+                if field["type"] == "number":
+                    try:
+                        val = int(val)
+                    except ValueError:
+                        try:
+                            val = float(val)
+                        except ValueError:
+                            val = field["value"]
+                field["value"] = val
+            editing[0] = False
+            edit_buf[0] = ""
+            return
+
+        if focus_level[0] == 2:
+            # Edit current list item
+            if list_items[0]:
+                list_editing[0] = True
+                edit_buf[0] = list_items[0][list_cursor[0]]
+            return
+
+        tab_fields = _cur_tab_fields()
+        if focus_level[0] == 1 and cur_field[0] < len(tab_fields):
+            field = tab_fields[cur_field[0]]
+            if field["type"] == "toggle":
+                field["value"] = not field["value"]
+            elif field["type"] == "list":
+                # Enter list editor mode
+                val = field["value"]
+                if isinstance(val, str):
+                    list_items[0] = [x.strip() for x in val.split(",") if x.strip()]
+                elif isinstance(val, list):
+                    list_items[0] = list(val)
+                else:
+                    list_items[0] = []
+                list_cursor[0] = 0
+                focus_level[0] = 2
+            elif field["type"] in ("text", "number"):
+                editing[0] = True
+                edit_buf[0] = str(field["value"])
+        elif focus_level[0] == 1:
+            # Action buttons
+            a_idx = cur_field[0] - len(tab_fields)
+            if a_idx == 0:  # Save
+                _do_save()
+                result_val[0] = "saved"
+                event.app.exit()
+            elif a_idx == 1:  # Back
+                result_val[0] = "back"
+                event.app.exit()
+            elif a_idx == 2:  # Quit
+                result_val[0] = None
+                event.app.exit()
+
+    @kb.add("escape")
+    def _escape(event):
+        if list_editing[0]:
+            # Cancel list item edit
+            list_editing[0] = False
+            edit_buf[0] = ""
+            # Remove empty items that were being added
+            if list_items[0] and not list_items[0][list_cursor[0]]:
+                del list_items[0][list_cursor[0]]
+                if list_cursor[0] >= len(list_items[0]) and list_cursor[0] > 0:
+                    list_cursor[0] -= 1
+            return
+        if editing[0]:
+            editing[0] = False
+            edit_buf[0] = ""
+            return
+        if focus_level[0] == 2:
+            # Exit list editor, write back to field
+            tab_fields = _cur_tab_fields()
+            field = tab_fields[cur_field[0]]
+            field["value"] = ", ".join(list_items[0])
+            focus_level[0] = 1
+            return
+        result_val[0] = "back"
+        event.app.exit()
+
+    @kb.add("c-c")
+    @kb.add("q")
+    def _quit(event):
+        if editing[0] or list_editing[0]:
+            editing[0] = False
+            list_editing[0] = False
+            edit_buf[0] = ""
+            return
+        if focus_level[0] == 2:
+            # Exit list editor first
+            tab_fields = _cur_tab_fields()
+            field = tab_fields[cur_field[0]]
+            field["value"] = ", ".join(list_items[0])
+            focus_level[0] = 1
+            return
+        result_val[0] = None
+        event.app.exit()
+
+    @kb.add("backspace")
+    def _backspace(event):
+        if editing[0] or list_editing[0]:
+            edit_buf[0] = edit_buf[0][:-1]
+
+    @kb.add("<any>")
+    def _any_key(event):
+        if editing[0] or list_editing[0]:
+            data = event.data
+            # Accept single chars and pasted multi-char strings
+            if data and all(ch.isprintable() or ch == ' ' for ch in data):
+                edit_buf[0] += data
+
+    menu = Window(
+        content=FormattedTextControl(_get_text),
+        dont_extend_height=True,
+    )
+
+    app: Application = Application(
+        layout=Layout(HSplit([menu])),
+        key_bindings=kb,
+        full_screen=False,
+    )
+
+    _tty_write("\033[s")
+    app.run()
+    _tty_write("\033[u\033[J")
+
+    return result_val[0]
+
+
+# ---------------------------------------------------------------------------
+# TDSQL interactive action selector
+# ---------------------------------------------------------------------------
+
+def _post_build_selector(console) -> str:
+    """After successful build, let user choose next action.
+
+    Returns "deploy" to uninstall+install, or "back" to return to menu.
+    """
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    OPTIONS = [
+        ("deploy", "Deploy", "Uninstall current + Install new build"),
+        ("back",   "Back to menu",        "Return without deploying"),
+    ]
+
+    sel = [0]
+    result = [None]
+
+    def _get_text():
+        lines = []
+        lines.append(("", "\n"))
+        lines.append(("green bold", "  ✓ Build succeeded! "))
+        lines.append(("", "What would you like to do next?\n\n"))
+        for i, (key, label, hint) in enumerate(OPTIONS):
+            is_sel = (i == sel[0])
+            icon = "◆" if is_sel else "◇"
+            style = "bold cyan" if is_sel else "dim"
+            lines.append((style, f"    {icon} {label}"))
+            if is_sel:
+                lines.append(("dim", f"  — {hint}"))
+            lines.append(("", "\n"))
+        lines.append(("", "\n"))
+        return lines
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("k")
+    def _up(event):
+        sel[0] = (sel[0] - 1) % len(OPTIONS)
+        event.app.invalidate()
+
+    @kb.add("down")
+    @kb.add("j")
+    def _down(event):
+        sel[0] = (sel[0] + 1) % len(OPTIONS)
+        event.app.invalidate()
+
+    @kb.add("enter")
+    @kb.add(" ")
+    def _confirm(event):
+        result[0] = OPTIONS[sel[0]][0]
+        event.app.exit()
+
+    @kb.add("q")
+    @kb.add("escape")
+    def _quit(event):
+        result[0] = "back"
+        event.app.exit()
+
+    control = FormattedTextControl(_get_text)
+    app = Application(
+        layout=Layout(HSplit([Window(content=control)])),
+        key_bindings=kb,
+        full_screen=False,
+    )
+
+    try:
+        app.run()
+    except (EOFError, KeyboardInterrupt):
+        return "back"
+
+    return result[0] or "back"
+
+
+def _select_tdsql_action(config_path: str) -> Optional[str]:
+    """Interactive TDSQL management menu.
+
+    Shows build mode selector + action buttons (Build/Uninstall/Install/Reinstall).
+    Executes selected action with live log output.
+
+    Returns "back" to return to main menu, None to quit.
+    """
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from rich.console import Console as _RichConsole
+
+    from .cli.tdsql_cmd import _load_tdsql_config, _do_build, _do_uninstall, _do_install
+
+    cfg = _load_tdsql_config(config_path)
+
+    # State
+    BUILD_MODES = ["debug", "release", "asan"]
+    COMPILERS = ["clang", "gcc"]
+    LINKERS = ["mold", "lld", "bfd"]
+    JOBS_PRESETS = [4, 8, 16, 20, 32, 64]
+
+    mode_idx = [0]      # default: debug
+    comp_idx = [COMPILERS.index(cfg["compiler"])
+                if cfg["compiler"] in COMPILERS else 0]
+    # default linker depends on build mode (debug→lld, release/asan→mold)
+    _default_linker = cfg["linker_debug"] if BUILD_MODES[mode_idx[0]] == "debug" \
+        else cfg["linker_release"]
+    link_idx = [LINKERS.index(_default_linker)
+                if _default_linker in LINKERS else 0]
+    jobs_idx = [JOBS_PRESETS.index(cfg["parallel_jobs"])
+                if cfg["parallel_jobs"] in JOBS_PRESETS else 3]
+    build_ut = [False]
+    with_lance = [False]
+    enable_lsan = [False]
+    verbose = [False]
+
+    sel = [0]
+    result = [None]
+
+    FIELDS = [
+        {"label": "Build Mode",  "type": "choice"},
+        {"label": "Compiler",    "type": "choice"},
+        {"label": "Linker",      "type": "choice"},
+        {"label": "Concurrency", "type": "choice"},
+        {"label": "Build UT",    "type": "toggle", "var": "build_ut"},
+        {"label": "With Lance",  "type": "toggle", "var": "with_lance"},
+        {"label": "Enable LSAN", "type": "toggle", "var": "enable_lsan"},
+        {"label": "Verbose",     "type": "toggle", "var": "verbose"},
+        {"label": "Build",       "type": "action"},
+        {"label": "Deploy",      "type": "action"},
+        {"label": "Reinstall",   "type": "action"},
+        {"label": "Back",        "type": "action"},
+        {"label": "Quit",        "type": "action"},
+    ]
+
+    # Field index helpers
+    IDX_BUILD_MODE = 0
+    IDX_COMPILER = 1
+    IDX_LINKER = 2
+    IDX_JOBS = 3
+    IDX_BUILD_UT = 4
+    IDX_WITH_LANCE = 5
+    IDX_ENABLE_LSAN = 6
+    IDX_VERBOSE = 7
+
+    TOGGLE_VARS = {
+        IDX_BUILD_UT: build_ut,
+        IDX_WITH_LANCE: with_lance,
+        IDX_ENABLE_LSAN: enable_lsan,
+        IDX_VERBOSE: verbose,
+    }
+
+    def _is_lsan_active():
+        """LSAN only meaningful in asan mode."""
+        return BUILD_MODES[mode_idx[0]] == "asan"
+
+    FIELD_HINTS = {
+        IDX_BUILD_MODE:  "debug=fast iter, release=perf, asan=leak/UB detection",
+        IDX_COMPILER:    "clang (default) | gcc — clang has better diagnostics",
+        IDX_LINKER:      "mold (fast, release) | lld (debug) | bfd (fallback)",
+        IDX_JOBS:        "Parallel compile threads — higher = faster but more RAM",
+        IDX_BUILD_UT:    "Compile unit tests (slower, larger binary)",
+        IDX_WITH_LANCE:  "Build the lance duckdb extension (requires Rust)",
+        IDX_ENABLE_LSAN: "Enable LeakSanitizer (only effective when Build Mode=asan)",
+        IDX_VERBOSE:     "Print full cmake/cargo command lines during build",
+        8:  "Compile TDSQL from source",
+        9:  f"Uninstall + Install (deploy to port {cfg['port_base'] + 5000})",
+        10: "Build + Uninstall + Install in one step",
+        11: "Return to main menu",
+        12: "Exit Rosetta",
+    }
+
+    _BOX_W = 60
+
+    def _display_width(s):
+        from prompt_toolkit.utils import get_cwidth
+        return sum(get_cwidth(ch) for ch in s)
+
+    def _box_top():
+        return ("dim cyan", "  ╭" + "─" * _BOX_W + "╮\n")
+
+    def _box_mid():
+        return ("dim cyan", "  ├" + "─" * _BOX_W + "┤\n")
+
+    def _box_bot():
+        return ("dim cyan", "  ╰" + "─" * _BOX_W + "╯\n")
+
+    def _box_row(fragments):
+        vis_w = sum(_display_width(t) for _, t in fragments)
+        pad = max(0, _BOX_W - vis_w)
+        row = [("dim cyan", "  │")]
+        row.extend(fragments)
+        row.append(("", " " * pad))
+        row.append(("dim cyan", "│\n"))
+        return row
+
+    def _get_text():
+        lines = []
+
+        # ASCII Logo
+        lines.append(("", "\n"))
+        for logo_line in LOGO_LINES:
+            lines.append(("bold cyan", f"    {logo_line}\n"))
+        lines.append(("", "\n"))
+        from . import __version__
+        lines.append(("dim", f"  {LOGO_SUBTITLE}"))
+        lines.append(("dim", f"  v{__version__}"))
+        lines.append(("bold white", "  TDSQL Mode\n"))
+        lines.append(("", "\n"))
+
+        # Box top
+        lines.append(_box_top())
+
+        # Hint bar
+        lines.extend(_box_row([
+            ("dim", "  ↑↓ navigate  ←→ change  Enter confirm  q back")
+        ]))
+        lines.append(_box_mid())
+
+        # Fields
+        label_width = max(len(f["label"]) for f in FIELDS if f["type"] != "action")
+
+        for i, field in enumerate(FIELDS):
+            is_sel = (i == sel[0])
+
+            if field["type"] == "action":
+                if field["label"] == "Quit":
+                    icon = "○"
+                else:
+                    icon = "◆" if is_sel else "◇"
+                style = "bold cyan" if is_sel else "dim"
+                lines.extend(_box_row([(style, f"  {icon} {field['label']}")]))
+            elif field["type"] == "toggle":
+                # On/Off toggle; LSAN is dimmed when not in asan mode
+                padded = f"{field['label']:<{label_width}s}"
+                var = TOGGLE_VARS[i]
+                val = "On" if var[0] else "Off"
+                # LSAN only effective in asan mode — visually deemphasize otherwise
+                disabled = (i == IDX_ENABLE_LSAN and not _is_lsan_active())
+                if is_sel:
+                    frags = [
+                        ("bold cyan", f"  {padded}  "),
+                        ("bold yellow", f"◄ {val} ►"),
+                    ]
+                    if disabled:
+                        frags.append(("dim italic", "  (asan only)"))
+                else:
+                    label_style = "dim italic" if disabled else "dim"
+                    val_style = "dim" if disabled else ""
+                    frags = [
+                        (label_style, f"  {padded}  "),
+                        (val_style, val),
+                    ]
+                lines.extend(_box_row(frags))
+            else:
+                # Choice field (build mode / compiler / linker / jobs)
+                padded = f"{field['label']:<{label_width}s}"
+                if i == IDX_BUILD_MODE:
+                    val = BUILD_MODES[mode_idx[0]]
+                elif i == IDX_COMPILER:
+                    val = COMPILERS[comp_idx[0]]
+                elif i == IDX_LINKER:
+                    val = LINKERS[link_idx[0]]
+                elif i == IDX_JOBS:
+                    val = str(JOBS_PRESETS[jobs_idx[0]])
+                else:
+                    val = ""
+                frags = []
+                if is_sel:
+                    frags.append(("bold cyan", f"  {padded}  "))
+                    frags.append(("bold yellow", f"◄ {val} ►"))
+                else:
+                    frags.append(("dim", f"  {padded}  "))
+                    frags.append(("", val))
+                lines.extend(_box_row(frags))
+
+        # Hint
+        lines.append(_box_mid())
+        hint = FIELD_HINTS.get(sel[0], "")
+        lines.extend(_box_row([("dim italic", f"  \U0001f4a1 {hint}")]))
+        lines.append(_box_bot())
+
+        return lines
+
+    # Key bindings
+    kb = KeyBindings()
+
+    @kb.add("up")
+    def _up(event):
+        sel[0] = (sel[0] - 1) % len(FIELDS)
+        event.app.invalidate()
+
+    @kb.add("down")
+    def _down(event):
+        sel[0] = (sel[0] + 1) % len(FIELDS)
+        event.app.invalidate()
+
+    @kb.add("left")
+    def _left(event):
+        i = sel[0]
+        if i == IDX_BUILD_MODE:
+            mode_idx[0] = (mode_idx[0] - 1) % len(BUILD_MODES)
+        elif i == IDX_COMPILER:
+            comp_idx[0] = (comp_idx[0] - 1) % len(COMPILERS)
+        elif i == IDX_LINKER:
+            link_idx[0] = (link_idx[0] - 1) % len(LINKERS)
+        elif i == IDX_JOBS:
+            jobs_idx[0] = (jobs_idx[0] - 1) % len(JOBS_PRESETS)
+        elif i in TOGGLE_VARS:
+            TOGGLE_VARS[i][0] = not TOGGLE_VARS[i][0]
+        event.app.invalidate()
+
+    @kb.add("right")
+    def _right(event):
+        i = sel[0]
+        if i == IDX_BUILD_MODE:
+            mode_idx[0] = (mode_idx[0] + 1) % len(BUILD_MODES)
+        elif i == IDX_COMPILER:
+            comp_idx[0] = (comp_idx[0] + 1) % len(COMPILERS)
+        elif i == IDX_LINKER:
+            link_idx[0] = (link_idx[0] + 1) % len(LINKERS)
+        elif i == IDX_JOBS:
+            jobs_idx[0] = (jobs_idx[0] + 1) % len(JOBS_PRESETS)
+        elif i in TOGGLE_VARS:
+            TOGGLE_VARS[i][0] = not TOGGLE_VARS[i][0]
+        event.app.invalidate()
+
+    @kb.add("enter")
+    @kb.add(" ")
+    def _confirm(event):
+        i = sel[0]
+        # On choice/toggle fields, Enter cycles forward
+        if i == IDX_BUILD_MODE:
+            mode_idx[0] = (mode_idx[0] + 1) % len(BUILD_MODES)
+            event.app.invalidate()
+        elif i == IDX_COMPILER:
+            comp_idx[0] = (comp_idx[0] + 1) % len(COMPILERS)
+            event.app.invalidate()
+        elif i == IDX_LINKER:
+            link_idx[0] = (link_idx[0] + 1) % len(LINKERS)
+            event.app.invalidate()
+        elif i == IDX_JOBS:
+            jobs_idx[0] = (jobs_idx[0] + 1) % len(JOBS_PRESETS)
+            event.app.invalidate()
+        elif i in TOGGLE_VARS:
+            TOGGLE_VARS[i][0] = not TOGGLE_VARS[i][0]
+            event.app.invalidate()
+        elif FIELDS[i]["label"] == "Back":
+            result[0] = "back"
+            event.app.exit()
+        elif FIELDS[i]["label"] == "Quit":
+            result[0] = None
+            event.app.exit()
+        else:
+            result[0] = FIELDS[i]["label"].lower()
+            event.app.exit()
+
+    @kb.add("q")
+    @kb.add("escape")
+    def _quit(event):
+        result[0] = "back"
+        event.app.exit()
+
+    # Build and run application
+    control = FormattedTextControl(_get_text)
+    app = Application(
+        layout=Layout(HSplit([Window(content=control)])),
+        key_bindings=kb,
+        full_screen=False,
+    )
+
+    try:
+        app.run()
+    except (EOFError, KeyboardInterrupt):
+        return "back"
+
+    if result[0] == "back":
+        return "back"
+    if result[0] is None:
+        return None  # Quit
+
+    # Execute the selected action
+    console = _RichConsole(stderr=True)
+    action = result[0]
+    mode = BUILD_MODES[mode_idx[0]]
+
+    # Pack user-selected options into an overrides dict for _do_build
+    build_overrides = {
+        "compiler": COMPILERS[comp_idx[0]],
+        "linker": LINKERS[link_idx[0]],
+        "parallel_jobs": JOBS_PRESETS[jobs_idx[0]],
+        "build_ut": build_ut[0],
+        "with_lance": with_lance[0],  # bool → maps to --with-lance=on/off
+        "enable_lsan": enable_lsan[0] and (mode == "asan"),
+        "verbose": verbose[0],
+    }
+
+    if action == "build":
+        rc = _do_build(cfg, mode, overrides=build_overrides)
+        if rc == 0:
+            # Build succeeded — ask next step via selector
+            next_action = _post_build_selector(console)
+            if next_action == "deploy":
+                rc2 = _do_uninstall(cfg)
+                if rc2 == 0:
+                    _do_install(cfg)
+                console.print("\n  [dim]Press Enter to continue...[/dim]")
+                try:
+                    input()
+                except (EOFError, KeyboardInterrupt):
+                    pass
+        else:
+            # Build failed
+            console.print("\n  [dim]Press Enter to return to menu...[/dim]")
+            try:
+                input()
+            except (EOFError, KeyboardInterrupt):
+                pass
+    elif action == "deploy":
+        rc = _do_uninstall(cfg)
+        if rc == 0:
+            _do_install(cfg)
+        console.print("\n  [dim]Press Enter to continue...[/dim]")
+        try:
+            input()
+        except (EOFError, KeyboardInterrupt):
+            pass
+    elif action == "reinstall":
+        rc = _do_build(cfg, mode, overrides=build_overrides)
+        if rc == 0:
+            rc = _do_uninstall(cfg)
+        if rc == 0:
+            _do_install(cfg)
+        console.print("\n  [dim]Press Enter to continue...[/dim]")
+        try:
+            input()
+        except (EOFError, KeyboardInterrupt):
+            pass
+
+    return "continue"  # Stay in TDSQL menu
+
+
+def _select_mtr_params(
+    mode: str = "row",
+    parallel: int = 8,
+    optimistic: bool = False,
+    record: bool = False,
+    retry: int = 3,
+) -> Optional[dict]:
+    """Show parameter configuration for MTR native test mode.
+
+    Provides an interactive panel for configuring MTR execution parameters:
+      - Mode multi-select (row / col / pq / ps / all) as checkboxes
+      - Parallel workers
+      - Feature toggles (-o, -r)
+
+    Returns a dict with resolved parameters, or None if cancelled.
+    """
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.keys import Keys
+    from prompt_toolkit.filters import Condition
+
+    # --- Mode multi-select state ---
+    MODE_OPTIONS = ["row", "col", "pq", "ps", "all"]
+    MODE_DESCS = {
+        "row": "Row-store (default)",
+        "col":  "Column-store (ve-protocol)",
+        "pq":   "Parallel-query mode",
+        "ps":   "Prepared-statement (ps-protocol)",
+        "all":  "All modes above",
+    }
+    # Parse initial mode string into checkbox states
+    if mode == "all":
+        _initial = {"row": True, "col": True, "pq": True, "ps": True, "all": True}
+    else:
+        _initial = {"row": False, "col": False, "pq": False, "ps": False, "all": False}
+        if mode in _initial:
+            _initial[mode] = True
+    mode_checks = [_initial.copy()]   # {name: bool} per option
+    mode_cursor = [0]                 # which sub-option is highlighted (0-3)
+
+    # --- Other presets ---
+    PARALLEL_PRESETS = [1, 2, 4, 8, 16, 32]
+    RETRY_PRESETS = [0, 1, 3, 5, 10]
+    TOGGLE_LABELS = {False: "Off", True: "On"}
+
+    result = [None]
+    sel = [0]
+
+    # State
+    p_idx = [PARALLEL_PRESETS.index(parallel)
+             if parallel in PARALLEL_PRESETS else 3]
+    r_idx = [RETRY_PRESETS.index(retry)
+             if retry in RETRY_PRESETS else 2]
+    opt = [optimistic]
+    rec = [record]
+    sm = [False]
+
+    FIELDS = [
+        {"label": "Mode",                    "type": "multiselect"},
+        {"label": "Parallel Workers",         "type": "choice"},
+        {"label": "Retry",                    "type": "choice"},
+        {"label": "Suite Mode (-s)",              "type": "toggle", "var": "sm"},
+        {"label": "Optimistic Transaction (-o)", "type": "toggle", "var": "opt"},
+        {"label": "Record Mode (-r)",         "type": "toggle", "var": "rec"},
+        {"label": "OK",                       "type": "action"},
+        {"label": "Back",                     "type": "action"},
+        {"label": "Quit",                     "type": "action"},
+    ]
+
+    ACTION_OK = len(FIELDS) - 3
+    ACTION_BACK = len(FIELDS) - 2
+    ACTION_QUIT = len(FIELDS) - 1
+
+    def _parallel_val():
+        return PARALLEL_PRESETS[p_idx[0]]
+
+    def _retry_val():
+        return RETRY_PRESETS[r_idx[0]]
+
+    def _field_val(i):
+        if i == 1:
+            return str(_parallel_val())
+        elif i == 2:
+            return str(_retry_val())
+        elif i == 3:
+            return TOGGLE_LABELS[sm[0]]
+        elif i == 4:
+            return TOGGLE_LABELS[opt[0]]
+        elif i == 5:
+            return TOGGLE_LABELS[rec[0]]
+        return ""
+
+    def _get_toggle_var(i):
+        if i == 3: return sm
+        if i == 4: return opt
+        if i == 5: return rec
+        return None
+
+    def _resolve_mode():
+        """Return the mode string from checkbox state."""
+        mc = mode_checks[0]
+        if mc.get("all"):
+            return "all"
+        selected = [m for m in MODE_OPTIONS if mc.get(m)]
+        if len(selected) == 1:
+            return selected[0]
+        if len(selected) > 1:
+            # Multiple but not all → return comma-separated
+            return ",".join(selected)
+        return "row"  # fallback
+
+    def _toggle_mode_option():
+        """Toggle the sub-option under the cursor."""
+        key = MODE_OPTIONS[mode_cursor[0]]
+        mc = mode_checks[0]
+        if key == "all":
+            # Toggling "all" selects/deselects everything
+            new_val = not mc.get("all", False)
+            mc["all"] = new_val
+            mc["row"] = new_val
+            mc["col"] = new_val
+            mc["pq"] = new_val
+            mc["ps"] = new_val
+        else:
+            # Toggle individual option
+            mc[key] = not mc.get(key, False)
+            # If all individual options are on, auto-set "all"
+            if mc.get("row") and mc.get("col") and mc.get("pq") and mc.get("ps"):
+                mc["all"] = True
+            else:
+                mc["all"] = False
+
+    def _toggle_right(i):
+        if i == 0:
+            # Move cursor right among mode sub-options
+            mode_cursor[0] = (mode_cursor[0] + 1) % len(MODE_OPTIONS)
+        elif i == 1:
+            p_idx[0] = (p_idx[0] + 1) % len(PARALLEL_PRESETS)
+        elif i == 2:
+            r_idx[0] = (r_idx[0] + 1) % len(RETRY_PRESETS)
+        else:
+            var = _get_toggle_var(i)
+            if var is not None:
+                var[0] = not var[0]
+
+    def _toggle_left(i):
+        if i == 0:
+            mode_cursor[0] = (mode_cursor[0] - 1) % len(MODE_OPTIONS)
+        elif i == 1:
+            p_idx[0] = (p_idx[0] - 1) % len(PARALLEL_PRESETS)
+        elif i == 2:
+            r_idx[0] = (r_idx[0] - 1) % len(RETRY_PRESETS)
+        else:
+            var = _get_toggle_var(i)
+            if var is not None:
+                var[0] = not var[0]
+
+    # -- Dynamic hints for each field --
+    FIELD_HINTS = {
+        0: "row=Row-store, col=Column-store, pq=Parallel-query, ps=Prepared-statement",
+        1: "Number of concurrent workers for MTR execution",
+        2: "Number of retries for failed tests (0 = no retry)",
+        3: "Run with --suite flag for test-suite organization",
+        4: "Enable optimistic transaction mode (-o)",
+        5: "Record mode: regenerate .result files (-r)",
+        6: "Confirm and start MTR run",
+        7: "Return to mode selection",
+        8: "Exit Rosetta",
+    }
+
+    # Box drawing (reuse same approach as main menu)
+    _MTR_BOX_W = 80
+
+    def _mtr_display_width(s):
+        from prompt_toolkit.utils import get_cwidth
+        return sum(get_cwidth(ch) for ch in s)
+
+    def _mtr_box_top():
+        return ("dim cyan", "  \u256d" + "\u2500" * _MTR_BOX_W + "\u256e\n")
+
+    def _mtr_box_mid():
+        return ("dim cyan", "  \u251c" + "\u2500" * _MTR_BOX_W + "\u2524\n")
+
+    def _mtr_box_bot():
+        return ("dim cyan", "  \u2570" + "\u2500" * _MTR_BOX_W + "\u256f\n")
+
+    def _mtr_box_row(fragments):
+        vis_w = sum(_mtr_display_width(t) for _, t in fragments)
+        if vis_w > _MTR_BOX_W:
+            # Truncate: trim last fragment's text to fit
+            overflow = vis_w - _MTR_BOX_W
+            trimmed = list(fragments)
+            for idx in range(len(trimmed) - 1, -1, -1):
+                style, text = trimmed[idx]
+                tw = _mtr_display_width(text)
+                if tw >= overflow:
+                    # Trim characters from end until we fit
+                    while overflow > 0 and text:
+                        overflow -= _mtr_display_width(text[-1])
+                        text = text[:-1]
+                    trimmed[idx] = (style, text)
+                    break
+                else:
+                    overflow -= tw
+                    trimmed[idx] = (style, "")
+            fragments = trimmed
+            vis_w = sum(_mtr_display_width(t) for _, t in fragments)
+        pad = max(0, _MTR_BOX_W - vis_w)
+        result = [("dim cyan", "  \u2502")]
+        result.extend(fragments)
+        result.append(("", " " * pad))
+        result.append(("dim cyan", "\u2502\n"))
+        return result
+
+    def _get_text():
+        lines = []
+
+        # \u2500\u2500 ASCII Logo \u2500\u2500
+        lines.append(("", "\n"))
+        for logo_line in LOGO_LINES:
+            lines.append(("bold cyan", f"    {logo_line}\n"))
+        lines.append(("", "\n"))
+        from . import __version__
+        lines.append(("dim", f"  {LOGO_SUBTITLE}"))
+        lines.append(("dim", f"  v{__version__}"))
+        lines.append(("bold white", "  MTR Mode\n"))
+        lines.append(("", "\n"))
+
+        # \u2500\u2500 Box top \u2500\u2500
+        lines.append(_mtr_box_top())
+
+        # \u2500\u2500 Keyboard hints \u2500\u2500
+        hint_text = "  \u2191\u2193 navigate  \u2190\u2192 change  Space/Enter toggle  q quit"
+        lines.extend(_mtr_box_row([("dim", hint_text)]))
+
+        # \u2500\u2500 Separator \u2500\u2500
+        lines.append(_mtr_box_mid())
+
+        # \u2500\u2500 Fields \u2500\u2500
+        label_width = max(len(f["label"]) for f in FIELDS[:ACTION_OK])
+
+        for i, field in enumerate(FIELDS):
+            is_sel = (i == sel[0])
+            is_action = field["type"] == "action"
+
+            if is_action:
+                # Action buttons: OK / Back / Quit
+                if field["label"] == "Quit":
+                    icon = "\u25cb"
+                else:
+                    icon = "\u25c6" if is_sel else "\u25c7"
+                if is_sel:
+                    lines.extend(_mtr_box_row([
+                        ("bold cyan", f"  {icon} {field['label']}")
+                    ]))
+                else:
+                    lines.extend(_mtr_box_row([
+                        ("dim", f"  {icon} {field['label']}")
+                    ]))
+
+            elif field["type"] == "multiselect":
+                # \u2500\u2500 Mode capsule row \u2500\u2500
+                mc = mode_checks[0]
+                cur = mode_cursor[0]
+                frags = []
+                padded_label = f"{field['label']:<{label_width}s}"
+
+                if is_sel:
+                    frags.append(("bold cyan", f"  {padded_label}  "))
+                else:
+                    frags.append(("dim", f"  {padded_label}  "))
+
+                for idx, mkey in enumerate(MODE_OPTIONS):
+                    checked = mc.get(mkey, False)
+                    capsule_text = f" {mkey} "
+                    is_cur_opt = (is_sel and idx == cur)
+
+                    if not is_sel:
+                        style = "reverse fg:ansicyan" if checked else "dim"
+                    elif checked and is_cur_opt:
+                        style = "bold reverse fg:ansiwhite bg:ansicyan"
+                    elif checked:
+                        style = "reverse fg:ansicyan"
+                    elif is_cur_opt:
+                        style = "bold underline fg:ansicyan"
+                    else:
+                        style = "dim"
+
+                    frags.append((style, capsule_text))
+                    frags.append(("", " "))
+
+                lines.extend(_mtr_box_row(frags))
+
+            else:
+                # \u2500\u2500 Value fields (choice / toggle) \u2500\u2500
+                val = _field_val(i)
+                padded_label = f"{field['label']:<{label_width}s}"
+                frags = []
+
+                if is_sel:
+                    frags.append(("bold cyan", f"  {padded_label}  "))
+                else:
+                    frags.append(("dim", f"  {padded_label}  "))
+
+                if field["type"] == "choice":
+                    if is_sel:
+                        frags.append(("bold yellow", f"\u25c4 {val} \u25ba"))
+                    else:
+                        frags.append(("", val))
+                else:
+                    # Toggle
+                    toggle_var = _get_toggle_var(i)
+                    toggle_on = toggle_var[0] if toggle_var else (val == "On")
+                    if toggle_on:
+                        frags.append(("bold green" if is_sel else "green",
+                                      f"\u25cf {val}"))
+                    else:
+                        frags.append(("dim", f"\u25cb {val}"))
+
+                lines.extend(_mtr_box_row(frags))
+
+        # \u2500\u2500 Dynamic hint separator \u2500\u2500
+        lines.append(_mtr_box_mid())
+
+        # \u2500\u2500 Dynamic hint row \u2500\u2500
+        hint = FIELD_HINTS.get(sel[0], "")
+        lines.extend(_mtr_box_row([("dim italic", f"  \U0001f4a1 {hint}")]))
+
+        # \u2500\u2500 Box bottom \u2500\u2500
+        lines.append(_mtr_box_bot())
+
+        # \u2500\u2500 Stop hint (outside box) \u2500\u2500
+        lines.append(("", "\n"))
+        lines.append(("dim", "  Stop: ^C / q during run, or touch /tmp/.rosetta_mtr_cancel\n"))
+
+        return lines
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("k")
+    def _up(event):
+        sel[0] = (sel[0] - 1) % len(FIELDS)
+
+    @kb.add("down")
+    @kb.add("j")
+    def _down(event):
+        sel[0] = (sel[0] + 1) % len(FIELDS)
+
+    @kb.add("left")
+    @kb.add("h")
+    def _left(event):
+        _toggle_left(sel[0])
+
+    @kb.add("right")
+    @kb.add("l")
+    def _right(event):
+        _toggle_right(sel[0])
+
+    @kb.add("space")
+    def _space(event):
+        if sel[0] == 0:
+            # Mode multiselect: toggle the highlighted option
+            _toggle_mode_option()
+        else:
+            var = _get_toggle_var(sel[0])
+            if var is not None:
+                var[0] = not var[0]
+
+    @kb.add("enter")
+    def _confirm(event):
+        if sel[0] == 0:
+            # On mode multiselect: also toggle on Enter
+            _toggle_mode_option()
+            return
+        if sel[0] == ACTION_OK:
+            result[0] = {
+                "mode": _resolve_mode(),
+                "parallel": _parallel_val(),
+                "suite_mode": sm[0],
+                "optimistic": opt[0],
+                "record": rec[0],
+                "retry": _retry_val(),
+            }
+            event.app.exit()
+        elif sel[0] == ACTION_BACK:
+            result[0] = {"action": "back"}
+            event.app.exit()
+        elif sel[0] == ACTION_QUIT:
+            result[0] = None
+            event.app.exit()
+
+    @kb.add("c-c")
+    @kb.add("escape")
+    @kb.add("q")
+    def _cancel(event):
+        result[0] = None
+        event.app.exit()
+
+    menu = Window(
+        content=FormattedTextControl(_get_text),
+        dont_extend_height=True,
+    )
+
+    app: Application = Application(
+        layout=Layout(HSplit([menu])),
+        key_bindings=kb,
+        full_screen=False,
+    )
+
+    _tty_write("\033[s")
+    app.run()
+    _tty_write("\033[u\033[J")
+
+    return result[0]
+
+
+def _select_rerun_run_id(output_dir: str) -> Optional[dict]:
+    """Show an interactive RUN ID selector for rerun mode.
+
+    Args:
+        output_dir: Results directory to scan for historical runs
+
+    Returns:
+        dict with run metadata if selected, None if cancelled,
+        or {"manual": True} if user wants to manually input RUN ID
+    """
+    import sys
+
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    # Import _scan_runs from result_cmd
+    from .cli.result_cmd import _scan_runs
+
+    # Scan historical runs
+    runs = _scan_runs(output_dir)
+    
+    # Filter only benchmark runs (type == "bench")
+    bench_runs = [r for r in runs if r.get("type") == "bench"]
+    
+    if not bench_runs:
+        console.print("\n  [yellow]No benchmark runs found in history.[/yellow]")
+        console.print("  [dim]Run some benchmarks first before using RERUN mode.[/dim]\n")
+        return None
+
+    # Limit to last 20 runs for display
+    display_runs = bench_runs[:20]
+
+    # Build all run items
+    ALL_RUNS = []
+    for run in bench_runs:
+        ALL_RUNS.append({
+            "type": "run",
+            "id": run.get("id", ""),
+            "ts": run.get("timestamp", "")[:16],
+            "workload": run.get("workload", ""),
+            "mode": run.get("mode", ""),
+            "data": run,
+        })
+
+    # Pagination
+    PAGE_SIZE = 15
+    total_pages = max(1, (len(ALL_RUNS) + PAGE_SIZE - 1) // PAGE_SIZE)
+
+    # Column widths
+    COL_ID = 42
+    COL_WK = 22
+    COL_TS = 18
+    COL_MODE = 10
+
+    selected = [0]        # index within current page items (runs + back)
+    page = [0]            # current page (0-based)
+    result = [None]
+    editing = [False]
+    edit_buf = [""]
+
+    def _page_runs():
+        """Get run items for current page."""
+        start = page[0] * PAGE_SIZE
+        return ALL_RUNS[start:start + PAGE_SIZE]
+
+    def _page_items():
+        """Get all menu items for current page (runs + back)."""
+        items = list(_page_runs())
+        items.append({"type": "back"})
+        return items
+
+    # Key bindings
+    from prompt_toolkit.keys import Keys
+    from prompt_toolkit.filters import Condition
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("k")
+    def _up(event):
+        if editing[0]:
+            return
+        items = _page_items()
+        selected[0] = (selected[0] - 1) % len(items)
+
+    @kb.add("down")
+    @kb.add("j")
+    def _down(event):
+        if editing[0]:
+            return
+        items = _page_items()
+        selected[0] = (selected[0] + 1) % len(items)
+
+    @kb.add("left")
+    @kb.add("h")
+    def _prev_page(event):
+        if editing[0]:
+            return
+        if page[0] > 0:
+            page[0] -= 1
+            selected[0] = 0
+
+    @kb.add("right")
+    @kb.add("l")
+    def _next_page(event):
+        if editing[0]:
+            return
+        if page[0] < total_pages - 1:
+            page[0] += 1
+            selected[0] = 0
+
+    @kb.add("/")
+    def _start_search(event):
+        if not editing[0]:
+            editing[0] = True
+            edit_buf[0] = ""
+
+    @kb.add("backspace")
+    def _backspace(event):
+        if editing[0]:
+            edit_buf[0] = edit_buf[0][:-1]
+
+    @kb.add(Keys.Any, filter=Condition(lambda: editing[0]))
+    def _type_char(event):
+        ch = event.data
+        if ch.isalnum() or ch in ('_', '-', '.', '/'):
+            edit_buf[0] += ch
+
+    @kb.add("enter")
+    def _confirm(event):
+        if editing[0]:
+            run_id = edit_buf[0].strip()
+            if run_id:
+                from .cli.result_cmd import _resolve_run
+                resolved = _resolve_run(run_id, output_dir)
+                if resolved:
+                    result[0] = resolved
+                    event.app.exit()
+                else:
+                    edit_buf[0] = ""
+            else:
+                editing[0] = False
+                edit_buf[0] = ""
+            return
+
+        items = _page_items()
+        item = items[selected[0]]
+        if item["type"] == "run":
+            result[0] = item["data"]
+            event.app.exit()
+        else:  # back
+            result[0] = None
+            event.app.exit()
+
+    @kb.add("c-c")
+    @kb.add("escape")
+    @kb.add("q")
+    def _cancel(event):
+        if editing[0]:
+            editing[0] = False
+            edit_buf[0] = ""
+            return
+        result[0] = None
+        event.app.exit()
+
+    # Layout
+    def _get_menu_text():
+        lines = []
+        border_len = COL_ID + COL_WK + COL_TS + COL_MODE + 10
+
+        # Logo
+        lines.append(("", "\n"))
+        for logo_line in LOGO_LINES:
+            lines.append(("bold cyan", f"    {logo_line}\n"))
+        lines.append(("", "\n"))
+        from . import __version__
+        lines.append(("dim", f"  {LOGO_SUBTITLE}"))
+        lines.append(("dim", f"  v{__version__}"))
+        lines.append(("bold white", "  Rerun Mode\n"))
+        lines.append(("", "\n"))
+
+        lines.append(("bold white", "  Select Historical Run\n"))
+        lines.append(("dim", "  \u2191\u2193 move  \u2190\u2192 page  / search  Enter select  Esc/q back\n"))
+        lines.append(("", "\n"))
+
+        # If in editing mode, show inline input
+        if editing[0]:
+            lines.append(("bold cyan", "  \u276f "))
+            lines.append(("bold cyan", "RUN ID"))
+            lines.append(("", "  "))
+            lines.append(("bold white", f"[ {edit_buf[0]}\u258c ]"))
+            lines.append(("", "\n"))
+            lines.append(("dim",
+                         "     Type RUN ID, Enter to confirm, "
+                         "Esc to cancel\n"))
+            return lines
+
+        # Table header with box-style top border
+        lines.append(("dim cyan", "  \u256d" + "\u2500" * border_len + "\u256e\n"))
+        hdr = f"  {'RUN ID':<{COL_ID}} {'Workload':<{COL_WK}} {'Timestamp':<{COL_TS}} {'Mode':<{COL_MODE}}"
+        hdr_pad = border_len - len(hdr)
+        lines.append(("dim cyan", "  \u2502"))
+        lines.append(("dim bold", hdr))
+        lines.append(("", " " * max(0, hdr_pad)))
+        lines.append(("dim cyan", "\u2502\n"))
+        lines.append(("dim cyan", "  \u251c" + "\u2500" * border_len + "\u2524\n"))
+
+        items = _page_items()
+        for i, item in enumerate(items):
+            is_sel = (i == selected[0])
+
+            if item["type"] == "run":
+                rid = item["id"][:COL_ID]
+                wk = item["workload"][:COL_WK]
+                ts = item["ts"]
+                mode = item["mode"]
+                prefix = "\u25c6 " if is_sel else "  "
+                row = f"{prefix}{rid:<{COL_ID}} {wk:<{COL_WK}} {ts:<{COL_TS}} {mode:<{COL_MODE}}"
+                row_pad = border_len - len(row)
+                style = "bold cyan" if is_sel else ""
+                lines.append(("dim cyan", "  \u2502"))
+                lines.append((style, row))
+                lines.append(("", " " * max(0, row_pad)))
+                lines.append(("dim cyan", "\u2502\n"))
+            else:  # back
+                style = "bold cyan" if is_sel else "dim"
+                prefix = "\u25c6 " if is_sel else "  "
+                row = f"{prefix}\u2190 Back"
+                row_pad = border_len - len(row)
+                lines.append(("dim cyan", "  \u2502"))
+                lines.append((style, row))
+                lines.append(("", " " * max(0, row_pad)))
+                lines.append(("dim cyan", "\u2502\n"))
+
+        # Bottom border with page info
+        lines.append(("dim cyan", "  \u2570" + "\u2500" * border_len + "\u256f\n"))
+
+        # Page indicator
+        page_info = f"  Page {page[0]+1}/{total_pages}  ({len(ALL_RUNS)} runs)"
+        lines.append(("dim", f"{page_info}\n"))
+
+        return lines
+
+    menu = Window(
+        content=FormattedTextControl(_get_menu_text),
+        dont_extend_height=True,
+    )
+
+    app: Application = Application(
+        layout=Layout(HSplit([menu])),
+        key_bindings=kb,
+        full_screen=False,
+    )
+
+    _tty_write("\033[s")
+    app.run()
+    _tty_write("\033[u\033[J")
+
+    return result[0]
+
+
+def _select_dbms(configs: list) -> Optional[list]:
+    """Show a DBMS selection screen where users toggle which DBMS to use.
+
+    Returns ``None`` if user cancels, otherwise the selected (subset) configs.
+    """
+    import sys
+    from prompt_toolkit import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    state = {c.name: True for c in configs}
+    result = [None]
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    @kb.add("k")
+    def _up(event):
+        names = list(state.keys())
+        for i in range(1, len(names)):
+            if state[names[i]] and not state[names[i - 1]]:
+                state[names[i]], state[names[i - 1]] = state[names[i - 1]], state[names[i]]
+                break
+
+    @kb.add("down")
+    @kb.add("j")
+    def _down(event):
+        names = list(state.keys())
+        for i in range(len(names) - 2, -1, -1):
+            if state[names[i]] and not state[names[i + 1]]:
+                state[names[i]], state[names[i + 1]] = state[names[i + 1]], state[names[i]]
+                break
+
+    @kb.add("space")
+    def _toggle(event):
+        names = list(state.keys())
+        idx = s_idx[0]
+        if 0 <= idx < len(names):
+            state[names[idx]] = not state[names[idx]]
+
+    @kb.add("a")
+    def _select_all(event):
+        for k in state:
+            state[k] = True
+
+    @kb.add("n")
+    def _select_none(event):
+        for k in state:
+            state[k] = False
+
+    @kb.add("enter")
+    @kb.add("right")
+    @kb.add("l")
+    def _confirm(event):
+        selected = [c for c in configs if state[c.name]]
+        if selected:
+            result[0] = selected
+            event.app.exit()
+
+    @kb.add("c-c")
+    @kb.add("escape")
+    @kb.add("left")
+    @kb.add("h")
+    @kb.add("q")
+    def _cancel(event):
+        result[0] = None
+        event.app.exit()
+
+    s_idx = [0]
+
+    def _get_content():
+        lines = []
+        lines.append(("", "\n"))
+        for logo_line in LOGO_LINES:
+            lines.append(("bold cyan", f"  {logo_line}\n"))
+        lines.append(("", "\n"))
+        lines.append(("dim", f"  {LOGO_SUBTITLE}\n"))
+        from . import __version__
+        lines.append(("dim", f"  v{__version__}\n"))
+        lines.append(("", "\n\n"))
+        lines.append(("bold", "  Select DBMS targets:\n"))
+        lines.append(("dim", "  [Space] toggle | [a] all | [n] none | ↑↓ move\n\n"))
+
+        names = list(state.keys())
+        for i, name in enumerate(names):
+            enabled = state[name]
+            cursor = "▸ " if i == s_idx[0] else "  "
+            prefix = cursor + ("[bold cyan]" if i == s_idx[0] else "")
+            marker = "[green bold]✓[/green bold]" if enabled else "[dim]○[/dim]"
+            lines.append((prefix, f"{name}", f"  {marker}\n"))
+
+        lines.append(("", "\n"))
+        lines.append(("bold dim",
+                         "  [Enter/→] Confirm   "
+                         "[Space] Toggle   "
+                         "[Esc/←/h/q] Back   "
+                         "[a] All   [n] None\n"))
+        return lines
+
+    ctrl = FormattedTextControl(_get_content)
+    window = Window(content=ctrl)
+
+    app: Application = Application(
+        layout=Layout(window),
+        key_bindings=kb,
+        full_screen=False,
+        mouse_support=False,
+    )
+
+    @kb.add("tab")
+    def _next(event):
+        s_idx[0] = (s_idx[0] + 1) % len(state)
+        ctrl.content = _get_content()
+        app.invalidate()
+
+    @kb.add("s-tab")
+    def _prev(event):
+        s_idx[0] = (s_idx[0] - 1) % len(state)
+        ctrl.content = _get_content()
+        app.invalidate()
+
+    _tty_write("\033[s")
+    app.run()
+    _tty_write("\033[u\033[J")
+
+    return result[0]
+
+
+def _enter_interactive(args) -> int:
+    """Load config and launch the interactive session.
+
+    When --benchmark is not specified, prompts the user to choose between
+    MTR mode and Benchmark mode before entering the corresponding REPL.
+    """
+    from .interactive import BenchInteractiveSession, InteractiveSession
+
+    if not os.path.isfile(args.config):
+        print_error(
+            f"Config file not found: {args.config}\n"
+            f"Run 'rosetta config init' to create a sample config, "
+            f"or use '-c' to specify the config file path."
+        )
+        flush_all()
+        return 1
+
+    all_configs = load_config(args.config)
+    if not all_configs:
+        print_error(f"No databases configured in {args.config}")
+        flush_all()
+        return 1
+
+    try:
+        configs = filter_configs(all_configs, args.dbms)
+    except ValueError as e:
+        print_error(str(e))
+        flush_all()
+        return 1
+
+    if not configs:
+        print_error("No databases selected")
+        flush_all()
+        return 1
+
+    output_dir = os.path.abspath(args.output_dir)
+
+    # ----- Quick connectivity check (parallel) for mode selection page ------
+    import concurrent.futures as _cf
+    import time as _time
+    from .executor import check_port
+    from rich.console import Console as _RichConsole
+
+    _scan_console = _RichConsole(stderr=True)
+
+    def _check_one(cfg):
+        """Check connectivity and fetch version/latency for a DBMS."""
+        start = _time.time()
+        port_ok = check_port(cfg.host, cfg.port, timeout=2.0)
+        latency_ms = round((_time.time() - start) * 1000, 2)
+        if not port_ok:
+            return cfg.name, {"connected": False, "host": cfg.host,
+                              "port": cfg.port, "version": None,
+                              "latency_ms": None}
+        # Try to get version (with short timeout)
+        version = None
+        try:
+            protocol = getattr(cfg, 'protocol', 'mysql')
+            if protocol == "oracle":
+                import oracledb as _oracledb
+                _svc = getattr(cfg, 'service_name', '') or cfg.name
+                _dsn = _oracledb.makedsn(
+                    cfg.host, cfg.port,
+                    service_name=_svc)
+                conn = _oracledb.connect(
+                    user=cfg.user, password=cfg.password, dsn=_dsn,
+                    tcp_connect_timeout=8)
+                cur = conn.cursor()
+                cur.execute("SELECT banner FROM v$version WHERE ROWNUM = 1")
+            else:
+                import pymysql as _pymysql
+                conn = _pymysql.connect(
+                    host=cfg.host, port=cfg.port,
+                    user=cfg.user, password=cfg.password,
+                    connect_timeout=3)
+                cur = conn.cursor()
+                cur.execute("SELECT VERSION()")
+            row = cur.fetchone()
+            version = row[0] if row else "unknown"
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+        return cfg.name, {"connected": True, "host": cfg.host,
+                          "port": cfg.port, "version": version,
+                          "latency_ms": latency_ms}
+
+    reachable_names = set()
+    # Pre-populate all enabled DBMS as disconnected; connectivity check will update
+    dbms_status_info = {
+        c.name: {"connected": False, "host": c.host, "port": c.port,
+                 "version": None, "latency_ms": None}
+        for c in configs
+    }
+    _dbms_names_str = ", ".join(c.name for c in configs)
+    with _scan_console.status(
+        f"  [dim]Connecting to DBMS ([cyan]{_dbms_names_str}[/cyan]) ...[/dim]",
+        spinner="dots",
+    ):
+        with _cf.ThreadPoolExecutor(max_workers=len(configs)) as pool:
+            futs = [pool.submit(_check_one, c) for c in configs]
+            try:
+                for fut in _cf.as_completed(futs, timeout=10):
+                    try:
+                        name, info = fut.result()
+                        dbms_status_info[name] = info
+                        if info["connected"]:
+                            reachable_names.add(name)
+                    except Exception:
+                        pass
+            except (TimeoutError, Exception):
+                # Some checks didn't finish in time; pre-populated entries
+                # remain as disconnected — that's fine
+                pass
+
+    # default_dbms: if user passed --dbms, use those; otherwise None (= all reachable)
+    default_dbms = None
+    if args.dbms:
+        default_dbms = [n.strip() for n in args.dbms.split(",")]
+
+    # ----- Start background HTTP server (playground always available) --------
+    from .interactive import ReportServer, _APIHandler
+    from .config import load_raw_config as _load_raw_cfg
+
+    # Read playground settings from config
+    try:
+        _raw_cfg = _load_raw_cfg(args.config)
+        _pg_cfg = _raw_cfg.get("playground", {})
+        _traceless = _pg_cfg.get("traceless", True)
+    except Exception:
+        _traceless = True
+
+    bg_server = ReportServer(
+        output_dir, port=args.port,
+        configs=configs,
+        all_configs=all_configs,
+        database=args.database,
+        baseline=args.baseline,
+        traceless=_traceless,
+    )
+    try:
+        bg_server.start()
+    except OSError as e:
+        log.warning("Failed to start background server on port %s: %s",
+                    args.port, e)
+        bg_server = None
+
+    # Ensure server stops on any exit path
+    import atexit
+    def _stop_bg_server():
+        if bg_server and bg_server.running:
+            bg_server.stop()
+    atexit.register(_stop_bg_server)
+
+    # Auto-open Playground in browser when server starts successfully
+    if bg_server and bg_server.running:
+        pg_url = f"{bg_server.base_url}/playground.html"
+        # Open in IDE browser
+        try:
+            import subprocess as _sp
+            _sp.Popen(["code", "--open-url", pg_url],
+                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        except FileNotFoundError:
+            pass
+
+    # Clear terminal before entering interactive mode
+    # Use ANSI escape: clear screen + move cursor to top-left
+    print("\033[2J\033[H", end="", flush=True)
+
+    # Helper: ensure bg_server is running before showing menu
+    def _ensure_bg_server():
+        if bg_server and not bg_server.running:
+            try:
+                bg_server.start()
+            except OSError:
+                pass
+
+    # ----- mode selection (skip if --benchmark already set) -----------------
+    force_bench = getattr(args, "benchmark", False)
+
+    if force_bench:
+        mode = "bench"
+        selected_configs = configs
+    else:
+        mode, selected_configs = _select_mode(
+            configs, args.database,
+            reachable_names=reachable_names,
+            default_dbms=default_dbms,
+            baseline=args.baseline,
+            server_url=bg_server.base_url if bg_server and bg_server.running else "",
+            dbms_status=dbms_status_info,
+        )
+        if mode is None:
+            # User cancelled
+            if bg_server:
+                bg_server.stop()
+            console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+            return 0
+        # Persist user's DBMS selection for next menu re-entry
+        if selected_configs:
+            default_dbms = [c.name for c in selected_configs]
+
+    # Update server configs to match user's DBMS selection
+    if bg_server and selected_configs:
+        _APIHandler._configs = selected_configs
+        _APIHandler._database = args.database
+        _APIHandler._baseline = args.baseline
+
+    # ----- benchmark parameter configuration (interactive) ----------------
+    # Only in interactive benchmark mode — prompt for iterations/warmup/profile
+    bench_iterations = args.iterations
+    bench_warmup = args.warmup
+    bench_profile = getattr(args, 'profile', True)
+
+    # ----- launch selected session -----------------------------------------
+    while True:
+        if mode == "config":
+            # Config editor mode
+            result = _select_config_editor(args.config)
+            if result is None:
+                # Quit
+                if bg_server:
+                    bg_server.stop()
+                console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                return 0
+            if result == "saved":
+                # Reload configs after save
+                all_configs = load_config(args.config)
+                configs = filter_configs(all_configs, None)
+                # Re-run connectivity check with spinner
+                dbms_status_info = {
+                    c.name: {"connected": False, "host": c.host, "port": c.port,
+                             "version": None, "latency_ms": None}
+                    for c in configs
+                }
+                _reload_names_str = ", ".join(c.name for c in configs)
+                with _scan_console.status(
+                    f"  [dim]Reconnecting to DBMS ([cyan]{_reload_names_str}[/cyan]) ...[/dim]",
+                    spinner="dots",
+                ):
+                    with _cf.ThreadPoolExecutor(max_workers=len(configs)) as pool:
+                        futs = [pool.submit(_check_one, c) for c in configs]
+                        try:
+                            for fut in _cf.as_completed(futs, timeout=10):
+                                try:
+                                    name, info = fut.result()
+                                    dbms_status_info[name] = info
+                                    if info["connected"]:
+                                        reachable_names.add(name)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                default_dbms = [c.name for c in configs]
+            print("\033[2J\033[H", end="", flush=True)
+            _ensure_bg_server()
+            mode, selected_configs = _select_mode(
+                configs, args.database,
+                reachable_names=reachable_names,
+                default_dbms=default_dbms,
+                baseline=args.baseline,
+                server_url=bg_server.base_url if bg_server and bg_server.running else "",
+                dbms_status=dbms_status_info,
+            )
+            if mode is None:
+                console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                return 0
+            if selected_configs:
+                default_dbms = [c.name for c in selected_configs]
+            continue
+
+        elif mode == "tdsql":
+            # TDSQL management mode — loop in TDSQL menu until Back/Quit
+            while True:
+                print("\033[2J\033[H", end="", flush=True)
+                tdsql_result = _select_tdsql_action(args.config)
+                if tdsql_result is None:
+                    # User chose Quit
+                    if bg_server:
+                        bg_server.stop()
+                    console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                    return 0
+                if tdsql_result == "back":
+                    break  # Return to main menu
+                # "continue" — loop back to TDSQL menu
+            # Back to main menu
+            print("\033[2J\033[H", end="", flush=True)
+            _ensure_bg_server()
+            mode, selected_configs = _select_mode(
+                configs, args.database,
+                reachable_names=reachable_names,
+                default_dbms=default_dbms,
+                baseline=args.baseline,
+                server_url=bg_server.base_url if bg_server and bg_server.running else "",
+                dbms_status=dbms_status_info,
+            )
+            if mode is None:
+                console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                return 0
+            if selected_configs:
+                default_dbms = [c.name for c in selected_configs]
+            continue
+
+        elif mode == "playground":
+            # Use existing bg_server or create new one if needed
+            from . import __version__
+
+            # ASCII Logo
+            console.print()
+            for logo_line in LOGO_LINES:
+                console.print(f"  [bold cyan]{logo_line}[/bold cyan]")
+            console.print()
+            console.print(f"  [dim]{LOGO_SUBTITLE}[/dim]")
+            console.print(f"  [dim]v{__version__}[/dim]  [bold white]Playground Mode[/bold white]")
+
+            # DBMS info banner
+            dbms_names_str = ", ".join(c.name for c in selected_configs)
+            console.print(
+                f"\n  [dim]DBMS:[/dim] "
+                f"[bold]{dbms_names_str}[/bold]  "
+                f"[dim]Baseline:[/dim] "
+                f"[bold]{args.baseline}[/bold]  "
+                f"[dim]Database:[/dim] [bold]{args.database}[/bold]")
+
+            # Reuse bg_server if available, otherwise create new one
+            if bg_server and bg_server.running:
+                srv = bg_server
+            else:
+                from .interactive import ReportServer
+                srv = ReportServer(
+                    output_dir, port=args.port,
+                    configs=selected_configs,
+                    all_configs=all_configs,
+                    database=args.database,
+                    baseline=args.baseline,
+                    traceless=_traceless,
+                )
+
+            # Start server if it's not already running
+            if not srv.running:
+                try:
+                    srv.start()
+                except OSError as e:
+                    print_error(f"Failed to start server: {e}")
+                    flush_all()
+                    return 1
+
+            pg_url = f"{srv.base_url}/playground.html"
+            console.print(
+                f"  [dim]Playground:[/dim] "
+                f"[bold green]{pg_url}[/bold green]")
+            # Browser already opened when bg_server started
+
+            from prompt_toolkit import HTML as _HTML
+            from prompt_toolkit.history import InMemoryHistory as _IMH
+            from prompt_toolkit import PromptSession as _PS
+            from .interactive import _PROMPT_STYLE, _make_repl_bindings, _BackSignal
+
+            _pg_placeholder = _HTML(
+                "<placeholder>Type 'help', ← back, or 'quit'"
+                "</placeholder>")
+            _pg_prompt = _HTML(
+                '<prompt>rosetta</prompt> <path>▶</path> ')
+            _pg_session = _PS(
+                history=_IMH(),
+                style=_PROMPT_STYLE,
+                multiline=False,
+                key_bindings=_make_repl_bindings(),
+            )
+
+            console.print()
+            # Wait for user command
+            while True:
+                try:
+                    user_input = _pg_session.prompt(
+                        _pg_prompt,
+                        placeholder=_pg_placeholder,
+                    )
+                except (EOFError, KeyboardInterrupt):
+                    # Only stop server if it's not the shared bg_server
+                    if srv is not bg_server and srv.running:
+                        srv.stop()
+                    console.print(
+                        "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                    return 0
+
+                if isinstance(user_input, _BackSignal):
+                    break
+
+                user_input = user_input.strip()
+                if not user_input:
+                    continue
+
+                cmd = user_input.lower()
+
+                if cmd in ("back", "b"):
+                    break
+                elif cmd in ("quit", "exit", "q"):
+                    # Only stop server if it's not the shared bg_server
+                    if srv is not bg_server and srv.running:
+                        srv.stop()
+                    console.print(
+                        "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                    return 0
+                elif cmd == "help":
+                    console.print(
+                        "\n  [bold]Playground commands:[/bold]")
+                    console.print(
+                        f"  [green]open[/green]    "
+                        f"re-open playground in browser")
+                    console.print(
+                        f"  [green]back[/green]    "
+                        f"return to mode selection")
+                    console.print(
+                        f"  [green]quit[/green]    "
+                        f"exit rosetta\n")
+                elif cmd == "open":
+                    try:
+                        _sp.Popen(["code", "--open-url", pg_url],
+                                  stdout=_sp.DEVNULL,
+                                  stderr=_sp.DEVNULL)
+                        console.print(
+                            f"  [green]Opened:[/green] {pg_url}")
+                    except FileNotFoundError:
+                        console.print(
+                            f"  [dim]URL:[/dim] {pg_url}")
+                elif cmd:
+                    console.print(
+                        f"  [yellow]Unknown command:[/yellow] {cmd}")
+                    console.print(
+                        f"  [dim]Type 'help', 'back', "
+                        f"or 'quit'.[/dim]")
+
+            # Only stop server if it's not the shared bg_server
+            if srv is not bg_server and srv.running:
+                srv.stop()
+            console.clear()
+            _ensure_bg_server()
+            mode, selected_configs = _select_mode(configs, args.database, reachable_names=reachable_names, default_dbms=default_dbms, baseline=args.baseline,
+                                                 server_url=bg_server.base_url if bg_server and bg_server.running else "", dbms_status=dbms_status_info)
+            if mode is None:
+                console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                return 0
+            if selected_configs:
+                default_dbms = [c.name for c in selected_configs]
+            continue
+
+        elif mode == "test":
+            # selected_configs already chosen from top-level DBMS+Mode page
+            session = InteractiveSession(
+                configs=selected_configs,
+                output_dir=output_dir,
+                database=args.database,
+                baseline=args.baseline,
+                skip_explain=args.skip_explain,
+                skip_analyze=args.skip_analyze,
+                skip_show_create=args.skip_show_create,
+                output_format="all",
+                serve=args.serve,
+                port=args.port,
+                all_configs=all_configs,
+                report_server=bg_server,
+            )
+            reason = session.run()
+            if session._report_server and session._report_server is not bg_server:
+                session._report_server.stop()
+            if reason != "back":
+                break
+            console.clear()
+            _ensure_bg_server()
+            mode, selected_configs = _select_mode(configs, args.database, reachable_names=reachable_names, default_dbms=default_dbms, baseline=args.baseline,
+                                                 server_url=bg_server.base_url if bg_server and bg_server.running else "", dbms_status=dbms_status_info)
+            if mode is None:
+                console.print("\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                return 0
+            if selected_configs:
+                default_dbms = [c.name for c in selected_configs]
+            continue
+
+        elif mode == "mtr":
+            # --- MTR mode: params → repl (loop params ↔ repl) ---
+            while True:
+                params = _select_mtr_params()
+                if params is None:
+                    console.print(
+                        "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                    return 0
+                if params.get("action") == "back":
+                    # Back to mode selection
+                    console.clear()
+                    _ensure_bg_server()
+                    mode, selected_configs = _select_mode(configs, args.database, reachable_names=reachable_names, default_dbms=default_dbms, baseline=args.baseline,
+                                                 server_url=bg_server.base_url if bg_server and bg_server.running else "", dbms_status=dbms_status_info)
+                    if mode is None:
+                        console.print(
+                            "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                        return 0
+                    if selected_configs:
+                        default_dbms = [c.name for c in selected_configs]
+                    break  # exit inner loop, re-enter while True with new mode
+
+                from .interactive import MtrInteractiveSession
+                session = MtrInteractiveSession(
+                    configs=selected_configs,
+                    output_dir=output_dir,
+                    mtr_mode=params["mode"],
+                    parallel=params["parallel"],
+                    optimistic=params["optimistic"],
+                    record=params["record"],
+                    retry=params["retry"],
+                    suite_mode=params.get("suite_mode", False),
+                    suite=params.get("suite"),
+                    all_configs=all_configs,
+                )
+                reason = session.run()
+                if reason != "back":
+                    return 0 if reason == "quit" else 0
+                # User typed 'back' — re-show param selection
+                console.clear()
+            continue  # re-select mode after break
+
+        else:
+            # --- benchmark: mode → params → repl (loop params ↔ repl) ---
+            back_to_mode = False
+            # Initialize bench params from CLI args
+            bench_mode = "serial" if args.concurrency == 0 else "concurrent"
+            bench_concurrency = args.concurrency if args.concurrency > 0 else 8
+            bench_duration = args.duration
+            bench_ramp_up = args.ramp_up
+            while True:
+                if not force_bench:
+                    params = _select_bench_params(
+                        iterations=bench_iterations,
+                        warmup=bench_warmup,
+                        concurrency=bench_concurrency,
+                        duration=bench_duration,
+                        ramp_up=bench_ramp_up,
+                        profile=bench_profile,
+                        skip_setup=getattr(args, 'skip_setup', False),
+                        skip_teardown=getattr(args, 'skip_teardown', False),
+                        output_dir=output_dir,
+                    )
+                    if params is None:
+                        console.print(
+                            "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                        return 0
+                    if params.get("action") == "back":
+                        # Back to mode selection
+                        console.clear()
+                        _ensure_bg_server()
+                        mode, selected_configs = _select_mode(configs, args.database, reachable_names=reachable_names, default_dbms=default_dbms, baseline=args.baseline,
+                                                     server_url=bg_server.base_url if bg_server and bg_server.running else "", dbms_status=dbms_status_info)
+                        if mode is None:
+                            console.print(
+                                "\n  [bold cyan]Goodbye! 👋[/bold cyan]\n")
+                            return 0
+                        if selected_configs:
+                            default_dbms = [c.name for c in selected_configs]
+                        back_to_mode = True
+                        break  # exit inner loop
+                    
+                    # Handle RERUN mode cancellation (user pressed Esc in rerun selection)
+                    if params.get("action") == "cancel":
+                        console.clear()
+                        continue  # Re-show Benchmark Mode selection
+                    
+                    # Handle RERUN mode
+                    if params.get("mode") == "rerun":
+                        run_selection = params.get("run_data")
+                        
+                        if not run_selection:
+                            console.clear()
+                            continue  # Back to Benchmark Mode selection
+                        
+                        # Load bench_result.json
+                        run_path = run_selection.get("path", "")
+                        bench_json_path = os.path.join(run_path, "bench_result.json")
+                        
+                        if not os.path.isfile(bench_json_path):
+                            console.print(f"\n  [red]✗ bench_result.json not found in:[/red] {run_path}")
+                            console.clear()
+                            continue  # Back to Benchmark Mode selection
+                        
+                        # Load parameters
+                        import json as _json
+                        try:
+                            with open(bench_json_path, 'r', encoding='utf-8') as f:
+                                run_data = _json.load(f)
+                        except Exception as e:
+                            console.print(f"\n  [red]✗ Failed to load bench_result.json:[/red] {e}")
+                            console.clear()
+                            continue  # Back to Benchmark Mode selection
+                        
+                        # Extract parameters
+                        rerun_bench_file = run_data.get("bench_file") or ""
+                        rerun_database = run_data.get("database") or args.database
+                        mode_str = run_data.get("mode", "SERIAL")
+                        config_data = run_data.get("config", {})
+                        workload_name = run_data.get("workload", "rerun")
+                        
+                        # Determine effective bench file:
+                        # 1) Use saved bench_file if it still exists
+                        # 2) Otherwise reconstruct from saved SQL data
+                        temp_bench_file = None
+                        if rerun_bench_file and os.path.isfile(rerun_bench_file):
+                            effective_bench_file = rerun_bench_file
+                        else:
+                            queries_sql = run_data.get("queries_sql", [])
+                            setup_sql = run_data.get("setup_sql", [])
+                            teardown_sql = run_data.get("teardown_sql", [])
+                            if not queries_sql:
+                                console.print("\n  [red]✗ No query data in bench_result.json[/red]")
+                                console.clear()
+                                continue
+                            import tempfile
+                            reconstructed = {
+                                "name": workload_name,
+                                "database": rerun_database,
+                                "setup": setup_sql,
+                                "teardown": teardown_sql,
+                                "queries": [],
+                            }
+                            for q in queries_sql:
+                                if isinstance(q, dict):
+                                    reconstructed["queries"].append({
+                                        "name": q.get("name", ""),
+                                        "sql": q.get("sql", ""),
+                                        "weight": q.get("weight", 1),
+                                        "description": q.get("description", ""),
+                                        "cleanup_sql": q.get("cleanup_sql", ""),
+                                    })
+                                elif isinstance(q, str):
+                                    reconstructed["queries"].append({
+                                        "name": f"q{len(reconstructed['queries'])+1}",
+                                        "sql": q,
+                                    })
+                            fd, temp_bench_file = tempfile.mkstemp(
+                                suffix=".json", prefix=f"rerun_{workload_name}_")
+                            with os.fdopen(fd, 'w', encoding='utf-8') as tf:
+                                _json.dump(reconstructed, tf, ensure_ascii=False, indent=2)
+                            effective_bench_file = temp_bench_file
+                        
+                        # Build session and execute
+                        bench_mode_val = "concurrent" if mode_str == "CONCURRENT" else "serial"
+                        rr_iter = config_data.get("iterations", 100)
+                        rr_warmup = config_data.get("warmup", 5)
+                        rr_conc = config_data.get("concurrency", 8) if bench_mode_val == "concurrent" else 0
+                        rr_dur = config_data.get("duration", 30.0)
+                        rr_fq = config_data.get("filter_queries", [])
+                        rr_filter = ",".join(rr_fq) if rr_fq else None
+                        
+                        # Display rerun configuration
+                        console.print(f"\n  [bold cyan]Rerun Configuration:[/bold cyan]")
+                        console.print(f"  [dim]RUN ID:[/dim]     [bold]{run_selection.get('id', '')}[/bold]")
+                        console.print(f"  [dim]Workload:[/dim]   [bold]{workload_name}[/bold]")
+                        console.print(f"  [dim]Mode:[/dim]       [bold]{mode_str}[/bold]")
+                        console.print(f"  [dim]Database:[/dim]   [bold]{rerun_database}[/bold]")
+                        if bench_mode_val == "serial":
+                            console.print(f"  [dim]Iterations:[/dim] [bold]{rr_iter}[/bold]")
+                            console.print(f"  [dim]Warmup:[/dim]     [bold]{rr_warmup}[/bold]")
+                        else:
+                            console.print(f"  [dim]Concurrency:[/dim][bold]{rr_conc}[/bold]")
+                            console.print(f"  [dim]Duration:[/dim]   [bold]{rr_dur}s[/bold]")
+                        if rr_fq:
+                            console.print(f"  [dim]Filter:[/dim]     [bold]{', '.join(rr_fq)}[/bold]")
+                        if temp_bench_file:
+                            console.print(f"  [dim]Source:[/dim]     [bold]reconstructed from bench_result.json[/bold]")
+                        else:
+                            console.print(f"  [dim]File:[/dim]       [bold]{rerun_bench_file}[/bold]")
+                        
+                        rr_session = BenchInteractiveSession(
+                            configs=selected_configs,
+                            output_dir=output_dir,
+                            database=rerun_database,
+                            iterations=rr_iter,
+                            warmup=rr_warmup,
+                            concurrency=rr_conc,
+                            duration=rr_dur,
+                            ramp_up=0.0,
+                            bench_filter=rr_filter,
+                            parallel_dbms=True,
+                            output_format="all",
+                            serve=args.serve,
+                            port=args.port,
+                            profile=False,
+                            perf_freq=getattr(args, 'perf_freq', 99),
+                            flamegraph_min_ms=getattr(args, 'flamegraph_min_ms', 1000),
+                            bench_mode=bench_mode_val,
+                            report_server=bg_server,
+                        )
+                        
+                        console.print()
+                        rr_session._run_bench(effective_bench_file)
+                        
+                        # Cleanup temp file
+                        if temp_bench_file and os.path.isfile(temp_bench_file):
+                            try:
+                                os.unlink(temp_bench_file)
+                            except OSError:
+                                pass
+                        
+                        console.print("\n  [dim]Press Enter to continue...[/dim]")
+                        try:
+                            input()
+                        except (EOFError, KeyboardInterrupt):
+                            pass
+                        
+                        console.clear()
+                        continue
+                    
+                    # Normal benchmark mode
+                    bench_mode = params["mode"]
+                    bench_iterations = params["iterations"]
+                    bench_warmup = params["warmup"]
+                    bench_concurrency = params["concurrency"]
+                    bench_duration = params["duration"]
+                    bench_ramp_up = params["ramp_up"]
+                    bench_profile = params["profile"]
+                    bench_skip_setup = params.get("skip_setup", False)
+                    bench_skip_teardown = params.get("skip_teardown", False)
+                else:
+                    bench_skip_setup = getattr(args, 'skip_setup', False)
+                    bench_skip_teardown = getattr(args, 'skip_teardown', False)
+
+                session = BenchInteractiveSession(
+                    configs=selected_configs,
+                    output_dir=output_dir,
+                    database=args.database,
+                    iterations=bench_iterations,
+                    warmup=bench_warmup,
+                    concurrency=bench_concurrency if bench_mode == "concurrent" else 0,
+                    duration=bench_duration,
+                    ramp_up=bench_ramp_up,
+                    bench_filter=args.bench_filter,
+                    parallel_dbms=getattr(args, 'parallel_dbms', True),
+                    output_format="all",
+                    serve=args.serve,
+                    port=args.port,
+                    profile=bench_profile,
+                    perf_freq=getattr(args, 'perf_freq', 99),
+                    flamegraph_min_ms=getattr(args, 'flamegraph_min_ms', 1000),
+                    bench_mode=bench_mode,
+                    report_server=bg_server,
+                )
+                session.skip_setup = bench_skip_setup
+                session.skip_teardown = bench_skip_teardown
+                reason = session.run()
+                # Stop the report server before leaving this session
+                # so the port is released for the next session.
+                if session._report_server and session._report_server is not bg_server:
+                    session._report_server.stop()
+                if reason == "quit":
+                    return 0
+                if reason != "back":
+                    break
+                # Back to bench params
+                console.clear()
+                continue  # re-show _select_bench_params
+
+            if back_to_mode:
+                continue  # re-evaluate mode in outer loop
+            break  # done
+
+    return 0
+
+
+def _find_free_port() -> int:
+    """Find a free port on localhost."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
+def _serve_report(directory: str, html_file: str, port: int = 0,
+                  configs=None, database: str = ""):
+    """Start a local HTTP server and print the URL for the HTML report."""
+    if port == 0:
+        port = _find_free_port()
+
+    abs_dir = os.path.abspath(directory)
+
+    # Pre-generate playground page
+    from .reporter.history import generate_playground_html
+    generate_playground_html(abs_dir)
+
+    # Use the API-capable handler from interactive module if configs given
+    if configs is not None:
+        from .interactive import _APIHandler
+        _APIHandler._configs = configs or []
+        _APIHandler._database = database
+        handler = lambda *a, **kw: _APIHandler(
+            *a, directory=abs_dir, **kw)
+    else:
+        handler = lambda *a, **kw: _NoCacheHandler(
+            *a, directory=abs_dir, **kw)
+
+    try:
+        server = _SilentHTTPServer(("0.0.0.0", port), handler)
+    except OSError as e:
+        print_error(f"Failed to start HTTP server on port {port}: {e}")
+        return
+
+    url = f"http://localhost:{port}/{html_file}"
+    index_url = f"http://localhost:{port}/index.html"
+    print_server_info(url, abs_dir, history_url=index_url)
+
+    # Run server in a background thread so KeyboardInterrupt
+    # can be caught without deadlocking serve_forever().
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    # Try to open the URL in the IDE's built-in Simple Browser.
+    # Works in VS Code / CloudStudio / CodeBuddy environments.
+    try:
+        subprocess.Popen(
+            ["code", "--open-url", url],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        pass  # 'code' CLI not available, skip
+
+    try:
+        # Block main thread until interrupted
+        server_thread.join()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        console.print("\n[dim]Shutting down server...[/dim]")
+        # Run shutdown in a separate thread to avoid blocking forever.
+        t = threading.Thread(target=server.shutdown, daemon=True)
+        t.start()
+        t.join(timeout=3)
+        # server_thread is daemon=True, so it will be cleaned up on exit.
