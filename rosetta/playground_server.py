@@ -250,12 +250,28 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
 
     # ── API: DBMS List ────────────────────────────────────────────────
 
+    def _load_custom_dbms(self, eng_name: str) -> list:
+        """Load custom DBMS configs for a user (from DB)."""
+        # TODO: Implement custom DBMS persistence when needed
+        return []
+
     def _handle_dbms_list(self):
-        # Try to get the original handler if available
+        """GET /api/dbms — list all DBMS (built-in + custom merged)."""
         active_names = {c.name for c in self._configs}
         dbms_list = [{"name": c.name, "host": c.host, "port": c.port,
-                      "active": c.name in active_names}
+                      "active": c.name in active_names, "enabled": c.enabled,
+                      "source": "builtin"}
                      for c in self._all_configs]
+        # Merge custom configs
+        user = self._get_user()
+        eng_name = user.get("eng_name", "anonymous")
+        custom_configs = self._load_custom_dbms(eng_name)
+        for cc in custom_configs:
+            dbms_list.append({
+                "name": cc["name"], "host": cc["host"], "port": cc["port"],
+                "active": cc["enabled"], "enabled": cc["enabled"],
+                "source": "custom", "custom_id": cc["id"],
+            })
         self._respond_json({
             "ok": True,
             "database": self._database,
@@ -465,7 +481,7 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
 
         requested_dbms = body.get("dbms", [])
         sandbox = body.get("sandbox", True)
-        configs_map = {c.name: c for c in self._all_configs}
+        configs_map = self._get_all_configs_map()
 
         if not requested_dbms:
             requested_dbms = list(configs_map.keys())
@@ -647,7 +663,7 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
 
         requested_dbms = body.get("dbms", [])
         sandbox = body.get("sandbox", True)
-        configs_map = {c.name: c for c in self._all_configs}
+        configs_map = self._get_all_configs_map()
 
         if not requested_dbms:
             requested_dbms = list(configs_map.keys())
