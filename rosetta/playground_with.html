@@ -67,26 +67,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .sidebar-body { flex:1; overflow-y:auto; padding:8px; }
 .main-content { flex:1; display:flex; flex-direction:column; overflow:hidden; min-width:0; order:1; }
 
-/* API Unavailable Banner (shown in -0p- static preview mode) */
-.api-banner { border-bottom:1px solid rgba(210,153,34,0.3);
-  background:linear-gradient(135deg,rgba(210,153,34,0.08),rgba(248,181,0,0.04)); }
-.banner-inner { max-width:1400px; margin:0 auto; display:flex; align-items:center; gap:14px;
-  padding:12px 20px; }
-.banner-icon-wrap { flex-shrink:0; display:flex; align-items:center; opacity:0.85; }
-.banner-text { flex:1; font-size:13px; color:var(--fg); line-height:1.6; display:flex;
-  align-items:center; flex-wrap:wrap; gap:6px; }
-.banner-text strong { color:#e3b341; margin-right:4px; }
-.banner-link { color:var(--accent); font-weight:600; text-decoration:none;
-  border-bottom:1px dashed var(--accent); transition:all 0.15s; }
-.banner-link:hover { color:#58a6ff; border-bottom-color:#58a6ff; }
-.banner-link .hl { color:#3fb950; font-weight:700; }
-.banner-code { font-family:'SFMono',monospace; font-size:12px; background:var(--bg3);
-  padding:3px 10px; border-radius:6px; border:1px solid var(--border); color:var(--blue); }
-.banner-close { flex-shrink:0; background:none; border:none; color:var(--fg2);
-  font-size:20px; cursor:pointer; padding:4px 8px; border-radius:6px; line-height:1;
-  transition:all 0.15s; }
-.banner-close:hover { color:var(--fg); background:var(--bg3); }
-
 /* Sidebar Tabs */
 .sidebar-tabs { display:flex; border-bottom:1px solid var(--border); }
 .sidebar-tab { flex:1; padding:8px 12px; font-size:12px; font-weight:600; color:var(--fg2);
@@ -471,22 +451,6 @@ select.form-input { cursor:pointer; }
   </div>
 </div>
 
-<div class="api-banner" id="api-banner" style="display:none">
-  <div class="banner-inner">
-    <div class="banner-icon-wrap">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="#d29922" stroke-width="2"/><line x1="12" y1="8" x2="12" y2="13" stroke="#d29922" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="16.5" r="1.2" fill="#d29922"/></svg>
-    </div>
-    <div class="banner-text">
-      <strong>Full functionality unavailable in static preview mode.</strong>
-      <span>To execute SQL, test connections, and manage DBMS, open this page at</span>
-      <a class="banner-link" href="https://rf5otpny-8000p-devc.preview.with.woa.com/playground.html" target="_blank">rf5otpny-<span class="hl">8000</span>p-devc.preview.with.woa.com/playground.html</a>
-      <span>or</span>
-      <code class="banner-code">http://localhost:8000/playground.html</code>
-    </div>
-    <button class="banner-close" onclick="document.getElementById('api-banner').style.display='none'" title="Dismiss">&times;</button>
-  </div>
-</div>
-
 <div class="body-wrap">
   <!-- Sidebar -->
   <div class="sidebar collapsed" id="sidebar">
@@ -614,8 +578,10 @@ function showToast(msg,type){const t=document.getElementById('toast');t.textCont
 function esc(s){if(s===null||s===undefined)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function fmtElapsed(ms){if(ms<1)return ms.toFixed(3)+' ms';if(ms<1000)return ms.toFixed(1)+' ms';return(ms/1000).toFixed(2)+' s';}
 var IS_PREVIEW_0P=location.hostname.includes('preview.with.woa.com')&&/-0p-/.test(location.hostname);
-function apiCall(method,path,body){const opts={method,headers:{'Content-Type':'application/json'}};if(body)opts.body=JSON.stringify(body);return fetch(location.origin+path,opts).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);const ct=r.headers.get('content-type')||'';if(!ct.includes('application/json'))throw new Error('Non-JSON response from server');return r.json()}).catch(e=>{if(IS_PREVIEW_0P&&!window._apiBannerShown){window._apiBannerShown=true;showApiBanner()}throw e});}
-function showApiBanner(){var b=document.getElementById('api-banner');if(b)b.style.display='flex';var eb=document.getElementById('btn-exec');if(eb){eb.disabled=true;eb.title='SQL execution unavailable in static preview'}var st=document.getElementById('sandbox-toggle');if(st)st.disabled=true}
+if(IS_PREVIEW_0P){var _redirectUrl=location.origin.replace('-0p-','-8000p-')+location.pathname+location.search;console.log('[Rosetta] Redirecting to proxy URL:',_redirectUrl);location.replace(_redirectUrl)}
+function apiCall(method,path,body){const opts={method,headers:{'Content-Type':'application/json'}};if(body)opts.body=JSON.stringify(body);return fetch(location.origin+path,opts).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);const ct=r.headers.get('content-type')||'';if(!ct.includes('application/json'))throw new Error('Non-JSON response from server');return r.json()});}
+// showApiBanner removed — redirect handles -0p- case
+function showApiBanner(){}
 
 // ── User Info ──
 async function loadUserInfo(){const nameEl=document.getElementById('user-name-display');const engEl=document.getElementById('user-eng-display');const wrap=document.getElementById('avatar-wrap');const initialsEl=document.getElementById('avatar-initials');const img=document.getElementById('user-avatar');const avatarColors=['#1f6feb','#8250df','#bf3989','#cf222e','#d4a72c','#1a7f37','#0969da','#a40e26','#bc4c00','#0e7c7b'];function colorFromName(n){let h=0;for(let i=0;i<(n||'').length;i++)h=n.charCodeAt(i)+((h<<5)-h);return avatarColors[Math.abs(h)%avatarColors.length]}function setUser(eng,chn,dept,avatarUrl){nameEl.textContent=chn||eng||'Guest';if(eng){engEl.textContent='@'+eng;engEl.style.display='block'}else{engEl.style.display='none'}document.getElementById('user-info').title=dept||'';const initial=(chn||eng||'G')[0].toUpperCase();initialsEl.textContent=initial;initialsEl.style.background=colorFromName(eng||chn||'Guest');wrap.classList.remove('avatar-loading');img.classList.remove('loaded');img.src='';if(avatarUrl&&eng&&!location.hostname.includes('preview.with.woa.com')){img.src=avatarUrl;img.onload=()=>{img.classList.add('loaded')};img.onerror=()=>{img.classList.remove('loaded');img.src=''}}currentUser=null}try{const r=await fetch(location.origin+'/ts:auth/tauth/info.ashx').then(resp=>resp.json());if(r&&r.EngName){currentUser={eng_name:r.EngName,chn_name:r.ChnName||'',dept_name:r.DeptNameString||'',position:r.PositionName||'',avatar_url:'https://r.hrc.woa.com/photo/150/'+r.EngName+'.png?default_when_absent=true'};setUser(r.EngName,r.ChnName,r.DeptNameString,currentUser.avatar_url);return}}catch(e){}try{const r=await apiCall('GET','/api/user');if(r.ok&&r.user&&r.user.eng_name){currentUser=r.user;setUser(r.user.eng_name,r.user.chn_name,r.user.dept_name,r.user.avatar_url);return}}catch(e){}setUser('','','','')}
