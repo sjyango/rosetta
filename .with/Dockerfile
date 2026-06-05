@@ -11,7 +11,6 @@ WORKDIR /app
 FROM base AS deps
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -30,13 +29,14 @@ COPY --from=deps /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.
 # Copy application
 COPY --chown=rosetta:rosetta . .
 
-# Create output directory
-RUN mkdir -p /app/output && chown rosetta:rosetta /app/output
+# Create results directory
+RUN mkdir -p /app/results && chown rosetta:rosetta /app/results
 
 USER rosetta
 
 EXPOSE 8000
 
+# Environment variables for With MySQL (history/favorites storage)
 ENV MYSQL_HOST=11.142.154.110 \
     MYSQL_PORT=3306 \
     MYSQL_USER=with_ugmatclusdrxhadd \
@@ -44,4 +44,5 @@ ENV MYSQL_HOST=11.142.154.110 \
     MYSQL_DATABASE=rf5otpny \
     ROSETTA_CONFIG=/app/with_config.json
 
-CMD ["python", "-m", "rosetta.playground_server", "--config", "/app/with_config.json", "--port", "8000", "--output-dir", "/app/output"]
+# Run playground server on port 8000 (With platform requirement)
+CMD ["python", "-m", "rosetta.playground_server", "--config", "/app/with_config.json", "--port", "8000", "--output-dir", "/app/results"]

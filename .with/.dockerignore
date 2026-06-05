@@ -28,11 +28,19 @@ logs
 .env
 *.env
 
+# Tests
+tests
+**/*.test.js
+**/*.spec.js
+
+# Documentation
+README.md
+docs
+
 # Misc
 .cache
 tmp
 temp
 
-# Documentation
-README.md
-docs
+# VSCode extension (not needed for playground)
+vscode-extension
