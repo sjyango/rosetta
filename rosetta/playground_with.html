@@ -58,16 +58,16 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 
 /* Body Layout */
 .body-wrap { display:flex; flex:1; overflow:hidden; }
-.sidebar { width:var(--sidebar-w); border-right:1px solid var(--border); background:var(--bg2);
-  display:flex; flex-direction:column; overflow:hidden; flex-shrink:0; transition:margin-left 0.25s; }
-.sidebar.collapsed { margin-left:calc(-1 * var(--sidebar-w)); }
+.sidebar { width:var(--sidebar-w); border-left:1px solid var(--border); background:var(--bg2);
+  display:flex; flex-direction:column; overflow:hidden; flex-shrink:0; transition:margin-right 0.25s ease; order:2; }
+.sidebar.collapsed { margin-right:calc(-1 * var(--sidebar-w)); }
 .sidebar-header { padding:12px 16px; border-bottom:1px solid var(--border);
   display:flex; align-items:center; justify-content:space-between; }
 .sidebar-title { font-size:13px; font-weight:600; color:var(--fg); display:flex; align-items:center; gap:6px; }
 .sidebar-close { background:none; border:none; color:var(--fg2); cursor:pointer; font-size:16px; padding:2px 6px; border-radius:4px; }
 .sidebar-close:hover { color:var(--fg); background:var(--bg3); }
 .sidebar-body { flex:1; overflow-y:auto; padding:8px; }
-.main-content { flex:1; display:flex; flex-direction:column; overflow:hidden; min-width:0; }
+.main-content { flex:1; display:flex; flex-direction:column; overflow:hidden; min-width:0; order:1; }
 
 /* Sidebar Tabs */
 .sidebar-tabs { display:flex; border-bottom:1px solid var(--border); }
@@ -316,7 +316,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
   font-size:12px; line-height:1.6; white-space:pre; overflow:auto; color:var(--fg); }
 
 /* Responsive */
-@media (max-width:900px) { .sidebar { position:absolute; z-index:100; height:100%; } .sidebar.collapsed { margin-left:calc(-1 * var(--sidebar-w)); } }
+@media (max-width:900px) { .sidebar { position:absolute; z-index:100; height:100%; } .sidebar.collapsed { margin-right:calc(-1 * var(--sidebar-w)); } }
 
 /* Modal */
 .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:200;
