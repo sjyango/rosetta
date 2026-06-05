@@ -227,6 +227,9 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
         if self.path == "/api/favorites/toggle":
             self._handle_favorites_toggle()
             return
+        if self.path == "/api/dbms/test":
+            self._handle_dbms_test()
+            return
         self.send_error(404)
 
     # ── DELETE ────────────────────────────────────────────────────────
@@ -279,6 +282,41 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             "traceless": self._traceless,
             "dbms": dbms_list,
         })
+
+    def _handle_dbms_test(self):
+        """POST /api/dbms/test — test connection to a specific DBMS."""
+        body = self._read_json()
+        name = body.get("name", "").strip()
+        if not name:
+            self._respond_json({"ok": False, "error": "Missing 'name'"}, 400)
+            return
+        # Find config
+        config = None
+        for c in self._all_configs:
+            if c.name == name:
+                config = c
+                break
+        if config is None:
+            self._respond_json({"ok": False, "error": f"Unknown DBMS: {name}"}, 404)
+            return
+        try:
+            import pymysql
+            conn = pymysql.connect(
+                host=config.host,
+                port=config.port,
+                user=config.user,
+                password=config.password,
+                charset="utf8mb4",
+                connect_timeout=5,
+            )
+            cursor = conn.cursor()
+            cursor.execute("SELECT VERSION()")
+            version = cursor.fetchone()[0]
+            cursor.close()
+            conn.close()
+            self._respond_json({"ok": True, "success": True, "version": str(version)})
+        except Exception as e:
+            self._respond_json({"ok": True, "success": False, "error": str(e)})
 
     # ── API: History ──────────────────────────────────────────────────
 

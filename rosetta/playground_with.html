@@ -288,6 +288,56 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 
 /* Responsive */
 @media (max-width:900px) { .sidebar { position:absolute; z-index:100; height:100%; } .sidebar.collapsed { margin-left:calc(-1 * var(--sidebar-w)); } }
+
+/* Modal */
+.modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:200;
+  display:flex; align-items:center; justify-content:center; backdrop-filter:blur(4px); }
+.modal-box { background:var(--bg2); border:1px solid var(--border); border-radius:14px;
+  padding:24px; min-width:420px; max-width:600px; max-height:85vh; overflow-y:auto;
+  box-shadow:0 20px 60px rgba(0,0,0,0.5); animation:modalIn 0.2s ease-out; }
+@keyframes modalIn { from{opacity:0;transform:scale(0.95) translateY(-10px)} to{opacity:1;transform:scale(1) translateY(0)} }
+.modal-title { font-size:16px; font-weight:600; margin-bottom:16px; display:flex; align-items:center; gap:8px; }
+.modal-close { background:none; border:none; color:var(--fg2); font-size:20px; cursor:pointer;
+  padding:2px 8px; border-radius:6px; margin-left:auto; }
+.modal-close:hover { color:var(--fg); background:var(--bg3); }
+.modal-field { margin-bottom:12px; }
+.modal-field label { display:block; font-size:11px; color:var(--fg2); font-weight:600;
+  text-transform:uppercase; letter-spacing:0.5px; margin-bottom:4px; }
+.modal-field input { width:100%; background:var(--bg); border:1px solid var(--border); border-radius:8px;
+  padding:8px 12px; color:var(--fg); font-size:13px; font-family:'SF Mono',Consolas,monospace;
+  outline:none; transition:border-color 0.2s; }
+.modal-field input:focus { border-color:var(--accent); box-shadow:0 0 0 3px var(--glow); }
+.modal-field input:read-only { opacity:0.6; cursor:default; }
+
+/* Config list */
+.config-item { padding:12px; border:1px solid var(--border); border-radius:10px;
+  margin-bottom:8px; background:var(--bg); transition:all 0.15s; }
+.config-item:hover { border-color:var(--accent); box-shadow:0 0 0 1px var(--glow); }
+.config-item .ci-row { display:flex; align-items:center; gap:10px; }
+.config-item .ci-status { width:10px; height:10px; border-radius:50%; flex-shrink:0; }
+.config-item .ci-status.online { background:var(--green); box-shadow:0 0 8px rgba(63,185,80,0.5); }
+.config-item .ci-status.offline { background:var(--red); }
+.config-item .ci-status.unknown { background:var(--fg2); animation:pulse 1.5s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{opacity:0.3} 50%{opacity:1} }
+.config-item .ci-info { flex:1; min-width:0; }
+.config-item .ci-name { font-weight:600; font-size:13px; display:flex; align-items:center; gap:6px; }
+.config-item .ci-name .ci-type-tag { font-size:10px; background:var(--accent); color:#fff;
+  padding:1px 6px; border-radius:4px; font-weight:500; }
+.config-item .ci-host { font-size:11px; color:var(--fg2); margin-top:2px; }
+.config-item .ci-actions { display:flex; gap:6px; flex-shrink:0; }
+.ci-btn { background:var(--bg3); border:1px solid var(--border); color:var(--fg2);
+  font-size:11px; padding:5px 10px; border-radius:6px; cursor:pointer; transition:all 0.15s; }
+.ci-btn:hover { color:var(--fg); border-color:var(--fg2); }
+.ci-btn.test:hover { color:var(--green); border-color:var(--green); }
+.ci-btn.test.testing { opacity:0.6; pointer-events:none; }
+.test-result { margin-top:8px; padding:8px 12px; border-radius:8px; font-size:12px;
+  font-weight:500; display:none; animation:fadeIn 0.2s ease-out; }
+@keyframes fadeIn { from{opacity:0;transform:translateY(-4px)} to{opacity:1;transform:translateY(0)} }
+.test-result.success { display:block; background:var(--green-bg); color:var(--green);
+  border:1px solid rgba(63,185,80,0.3); }
+.test-result.fail { display:block; background:var(--red-bg); color:var(--red);
+  border:1px solid rgba(248,81,73,0.3); }
+.test-result .ver { font-size:10px; opacity:0.6; margin-top:2px; }
 </style>
 </head>
 <body>
@@ -299,6 +349,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
   <div class="header-spacer"></div>
   <button class="btn-nav" id="btn-history" onclick="toggleSidebar('history')" title="History">&#128337; History</button>
   <button class="btn-nav" id="btn-favorites" onclick="toggleSidebar('favorites')" title="Favorites">&#11088; Favorites</button>
+  <button class="btn-nav" id="btn-config" onclick="toggleSidebar('config')" title="Config">&#9881; Config</button>
   <div class="user-info" id="user-info" style="display:none">
     <img class="user-avatar" id="user-avatar" src="" alt="" onerror="this.style.display='none'">
     <div>
@@ -314,6 +365,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
     <div class="sidebar-tabs">
       <button class="sidebar-tab active" data-tab="history" onclick="switchSidebarTab('history')">&#128337; History <span class="count" id="history-count">0</span></button>
       <button class="sidebar-tab" data-tab="favorites" onclick="switchSidebarTab('favorites')">&#11088; Favorites <span class="count" id="fav-count">0</span></button>
+      <button class="sidebar-tab" data-tab="config" onclick="switchSidebarTab('config')">&#9881; Config</button>
     </div>
     <div class="sidebar-header">
       <span class="sidebar-title" id="sidebar-title">&#128337; SQL History</span>
@@ -378,10 +430,10 @@ function apiCall(method,path,body){const opts={method,headers:{'Content-Type':'a
 async function loadUserInfo(){try{const r=await apiCall('GET','/api/user');if(r.ok&&r.user&&r.user.eng_name){currentUser=r.user;document.getElementById('user-info').style.display='flex';document.getElementById('user-name-display').textContent=r.user.chn_name||r.user.eng_name;document.getElementById('user-dept-display').textContent=r.user.dept_name||'';if(r.user.avatar_url)document.getElementById('user-avatar').src=r.user.avatar_url}}catch(e){}}
 
 // ── Sidebar ──
-function toggleSidebar(tab){const sidebar=document.getElementById('sidebar');if(_sidebarVisible&&_sidebarTab===tab){closeSidebar();return}_sidebarVisible=true;_sidebarTab=tab;sidebar.classList.remove('collapsed');switchSidebarTab(tab);document.getElementById('btn-history').classList.toggle('active',tab==='history');document.getElementById('btn-favorites').classList.toggle('active',tab==='favorites')}
-function closeSidebar(){_sidebarVisible=false;document.getElementById('sidebar').classList.add('collapsed');document.getElementById('btn-history').classList.remove('active');document.getElementById('btn-favorites').classList.remove('active')}
-function switchSidebarTab(tab){_sidebarTab=tab;document.querySelectorAll('.sidebar-tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===tab));document.getElementById('sidebar-title').innerHTML=tab==='history'?'&#128337; SQL History':'&#11088; Favorites';loadSidebarContent()}
-async function loadSidebarContent(){const body=document.getElementById('sidebar-body');body.innerHTML='<div class="sidebar-empty"><div class="icon">&#9203;</div>Loading...</div>';if(_sidebarTab==='history'){await loadHistory();renderHistory()}else{await loadFavorites();renderFavorites()}}
+function toggleSidebar(tab){const sidebar=document.getElementById('sidebar');if(_sidebarVisible&&_sidebarTab===tab){closeSidebar();return}_sidebarVisible=true;_sidebarTab=tab;sidebar.classList.remove('collapsed');switchSidebarTab(tab);document.getElementById('btn-history').classList.toggle('active',tab==='history');document.getElementById('btn-favorites').classList.toggle('active',tab==='favorites');document.getElementById('btn-config').classList.toggle('active',tab==='config')}
+function closeSidebar(){_sidebarVisible=false;document.getElementById('sidebar').classList.add('collapsed');document.getElementById('btn-history').classList.remove('active');document.getElementById('btn-favorites').classList.remove('active');document.getElementById('btn-config').classList.remove('active')}
+function switchSidebarTab(tab){_sidebarTab=tab;document.querySelectorAll('.sidebar-tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===tab));const titles={history:'&#128337; SQL History',favorites:'&#11088; Favorites',config:'&#9881; DBMS Configurations'};document.getElementById('sidebar-title').innerHTML=titles[tab]||'';loadSidebarContent()}
+async function loadSidebarContent(){const body=document.getElementById('sidebar-body');body.innerHTML='<div class="sidebar-empty"><div class="icon">&#9203;</div>Loading...</div>';if(_sidebarTab==='history'){await loadHistory();renderHistory()}else if(_sidebarTab==='favorites'){await loadFavorites();renderFavorites()}else if(_sidebarTab==='config'){await loadConfigsData();renderConfigs()}}
 
 // ── History ──
 async function loadHistory(){try{const r=await apiCall('GET','/api/history');historyData=r.history||[];document.getElementById('history-count').textContent=historyData.length}catch(e){historyData=[]}}
@@ -397,6 +449,12 @@ function loadFavSql(escapedSql){document.getElementById('sql-input').value=escap
 async function saveToFavorites(){const sql=document.getElementById('sql-input').value.trim();if(!sql){showToast('No SQL to save');return}const title=prompt('Favorite title (optional):',sql.substring(0,50));try{const r=await apiCall('POST','/api/favorites/add',{sql_text:sql,title:title||'',dbms_targets:[...ACTIVE_DBMS].join(','),baseline:BASELINE_DBMS});if(r.ok){showToast('Saved to favorites!','success');favSqlSet.add(sql);await loadFavorites()}}catch(e){showToast('Failed to save')}}
 async function toggleFavHistory(histId,sqlText){try{const r=await apiCall('POST','/api/favorites/toggle',{sql_text:sqlText,title:'',dbms_targets:'',baseline:''});if(r.ok){showToast(r.action==='added'?'Added to favorites':'Removed from favorites','success');await loadFavorites();renderHistory()}}catch(e){showToast('Failed')}}
 async function deleteFavorite(id){try{await apiCall('DELETE','/api/favorites/'+id);favoritesData=favoritesData.filter(f=>f.id!==id);favSqlSet=new Set(favoritesData.map(f=>f.sql_text||''));document.getElementById('fav-count').textContent=favoritesData.length;renderFavorites();showToast('Favorite deleted','success')}catch(e){showToast('Failed to delete')}}
+
+// ── Config Panel ──
+let configsData=[],configTestResults={};
+async function loadConfigsData(){try{const r=await apiCall('GET','/api/dbms');if(r.ok){configsData=r.dbms||[];configTestResults={};configsData.forEach(d=>{configTestResults[d.name]='unknown'})}else{configsData=[]}}catch(e){configsData=[]}}
+function renderConfigs(){const body=document.getElementById('sidebar-body');if(configsData.length===0){body.innerHTML='<div class="sidebar-empty"><div class="icon">&#9881;</div><p>No DBMS configured.<br>Check with_config.json</p></div>';return}let html='';configsData.forEach(d=>{const status=configTestResults[d.name]||'unknown';const statusCls=status==='success'?'online':status==='fail'?'offline':'unknown';const activeBadge=d.active?'<span style="font-size:10px;background:var(--green-bg);color:var(--green);padding:1px 6px;border-radius:4px;margin-left:4px;">active</span>':'';html+='<div class="config-item" id="config-item-'+esc(d.name)+'"><div class="ci-row"><div class="ci-status '+statusCls+'" id="status-'+esc(d.name)+'" title="'+status+'"></div><div class="ci-info"><div class="ci-name">'+esc(d.name)+activeBadge+'<span class="ci-type-tag">'+esc(d.type||'mysql')+'</span></div><div class="ci-host">'+esc(d.host)+':'+esc(d.port)+(d.database?' / '+esc(d.database):'')+'</div></div><div class="ci-actions"><button class="ci-btn test" id="test-btn-'+esc(d.name)+'" onclick="testDbmsConnection(\''+esc(d.name).replace(/'/g,"\\'")+'\')">&#9654; Test</button></div></div><div class="test-result" id="test-result-'+esc(d.name)+'"></div></div>'})body.innerHTML=html}
+async function testDbmsConnection(name){const resultDiv=document.getElementById('test-result-'+name);const statusDot=document.getElementById('status-'+name);const testBtn=document.getElementById('test-btn-'+name);if(!resultDiv||!testBtn)return;testBtn.textContent='...';testBtn.classList.add('testing');resultDiv.style.display='none';statusDot.className='ci-status unknown';try{const r=await apiCall('POST','/api/dbms/test',{name:name});if(r.ok&&r.success){configTestResults[name]='success';statusDot.className='ci-status online';resultDiv.className='test-result success';resultDiv.innerHTML='&#10003; Connected — '+esc(r.version||'OK');resultDiv.style.display='block'}else{throw new Error(r.error||'Connection failed')}}catch(e){configTestResults[name]='fail';statusDot.className='ci-status offline';resultDiv.className='test-result fail';resultDiv.innerHTML='&#10007; '+(e.message||'Connection failed');resultDiv.style.display='block';statusDot.title=e.message}finally{testBtn.textContent='&#9654; Test';testBtn.classList.remove('testing')}}
 
 // ── DBMS Chips ──
 function loadDbms(){apiCall('GET','/api/dbms').then(r=>{if(!r.ok){showToast('Failed to load DBMS list');return}DBMS_LIST=r.dbms||[];DATABASE=r.database||'';ACTIVE_DBMS=new Set(DBMS_LIST.filter(d=>d.active).map(d=>d.name));if(r.baseline)BASELINE_DBMS=r.baseline;else if(!BASELINE_DBMS&&DBMS_LIST.length>0)BASELINE_DBMS=DBMS_LIST[0].name;if(r.traceless!=null){SANDBOX_MODE=r.traceless;document.getElementById('sandbox-toggle').checked=SANDBOX_MODE}renderChips();renderBaselineChips()}).catch(e=>showToast('API error: '+e.message))}
