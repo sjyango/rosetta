@@ -41,10 +41,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
   transition:all 0.15s; cursor:pointer; }
 .btn-nav:hover { border-color:var(--blue); color:var(--blue); background:var(--bg2); }
 .btn-nav.active { border-color:var(--accent); color:var(--blue); background:rgba(31,111,235,0.1); }
-.user-info { display:flex; align-items:center; gap:8px; }
-.user-avatar { width:28px; height:28px; border-radius:50%; border:2px solid var(--border); }
-.user-name { font-size:13px; color:var(--fg); font-weight:500; }
-.user-dept { font-size:11px; color:var(--fg2); }
+.user-info { display:flex; align-items:center; gap:8px; padding:3px 10px 3px 3px; border-radius:24px; border:1px solid transparent; transition:all 0.25s; cursor:default; }
+.user-info:hover { border-color:var(--border); background:var(--bg3); }
+.user-avatar { width:30px; height:30px; border-radius:50%; border:2px solid var(--border); object-fit:cover; flex-shrink:0; box-shadow:0 0 0 2px var(--bg); transition:box-shadow 0.25s; }
+.user-info:hover .user-avatar { box-shadow:0 0 0 2px var(--bg),0 0 8px rgba(31,111,235,0.3); }
+.user-avatar-placeholder { width:30px; height:30px; border-radius:50%; background:linear-gradient(135deg,var(--bg3),var(--bg2)); flex-shrink:0; animation:avatar-pulse 1.5s ease-in-out infinite; }
+@keyframes avatar-pulse { 0%,100%{opacity:0.4} 50%{opacity:0.8} }
+.user-name { font-size:13px; color:var(--fg); font-weight:600; line-height:1.2; }
+.user-dept { font-size:11px; color:var(--fg2); line-height:1.2; }
+#user-name-display:empty::after { content:'\200b'; }
 
 /* Body Layout */
 .body-wrap { display:flex; flex:1; overflow:hidden; }
@@ -350,10 +355,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
   <button class="btn-nav" id="btn-history" onclick="toggleSidebar('history')" title="History">&#128337; History</button>
   <button class="btn-nav" id="btn-favorites" onclick="toggleSidebar('favorites')" title="Favorites">&#11088; Favorites</button>
   <button class="btn-nav" id="btn-config" onclick="toggleSidebar('config')" title="Config">&#9881; Config</button>
-  <div class="user-info" id="user-info" style="display:none">
-    <img class="user-avatar" id="user-avatar" src="" alt="" onerror="this.style.display='none'">
+  <div class="user-info" id="user-info">
+    <div class="user-avatar-placeholder" id="user-avatar-placeholder"></div>
+    <img class="user-avatar" id="user-avatar" src="" alt="" style="display:none" onerror="this.style.display='none'">
     <div>
-      <div class="user-name" id="user-name-display"></div>
+      <div class="user-name" id="user-name-display">Loading...</div>
       <div class="user-dept" id="user-dept-display"></div>
     </div>
   </div>
@@ -427,7 +433,7 @@ function fmtElapsed(ms){if(ms<1)return ms.toFixed(3)+' ms';if(ms<1000)return ms.
 function apiCall(method,path,body){const opts={method,headers:{'Content-Type':'application/json'}};if(body)opts.body=JSON.stringify(body);return fetch(location.origin+path,opts).then(r=>r.json());}
 
 // ── User Info ──
-async function loadUserInfo(){try{const r=await apiCall('GET','/api/user');if(r.ok&&r.user&&r.user.eng_name){currentUser=r.user;document.getElementById('user-info').style.display='flex';document.getElementById('user-name-display').textContent=r.user.chn_name||r.user.eng_name;document.getElementById('user-dept-display').textContent=r.user.dept_name||'';if(r.user.avatar_url)document.getElementById('user-avatar').src=r.user.avatar_url}}catch(e){}}
+async function loadUserInfo(){const nameEl=document.getElementById('user-name-display');const deptEl=document.getElementById('user-dept-display');const avatar=document.getElementById('user-avatar');const ph=document.getElementById('user-avatar-placeholder');function setUser(eng,chn,dept,avatarUrl){nameEl.textContent=chn||eng||'Guest';deptEl.textContent=dept||'';if(avatarUrl&&eng){avatar.src=avatarUrl;avatar.style.display='';if(ph)ph.style.display='none'}else{avatar.style.display='none';if(ph)ph.style.display='';currentUser=null}}try{const r=await fetch(location.origin+'/ts:auth/tauth/info.ashx').then(resp=>resp.json());if(r&&r.EngName){currentUser={eng_name:r.EngName,chn_name:r.ChnName||'',dept_name:r.DeptNameString||'',position:r.PositionName||'',avatar_url:'https://r.hrc.woa.com/photo/150/'+r.EngName+'.png?default_when_absent=true'};setUser(r.EngName,r.ChnName,r.DeptNameString,currentUser.avatar_url);return}}catch(e){}try{const r=await apiCall('GET','/api/user');if(r.ok&&r.user&&r.user.eng_name){currentUser=r.user;setUser(r.user.eng_name,r.user.chn_name,r.user.dept_name,r.user.avatar_url);return}}catch(e){}setUser('','','','')}
 
 // ── Sidebar ──
 function toggleSidebar(tab){const sidebar=document.getElementById('sidebar');if(_sidebarVisible&&_sidebarTab===tab){closeSidebar();return}_sidebarVisible=true;_sidebarTab=tab;sidebar.classList.remove('collapsed');switchSidebarTab(tab);document.getElementById('btn-history').classList.toggle('active',tab==='history');document.getElementById('btn-favorites').classList.toggle('active',tab==='favorites');document.getElementById('btn-config').classList.toggle('active',tab==='config')}
