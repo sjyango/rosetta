@@ -51,7 +51,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 @keyframes avatar-pulse { 0%,100%{opacity:0.4} 50%{opacity:0.8} }
 .avatar-loading .avatar-initials { animation:avatar-pulse 1.5s ease-in-out infinite; }
 .user-name { font-size:13px; color:var(--fg); font-weight:600; line-height:1.2; }
-.user-dept { font-size:11px; color:var(--fg2); line-height:1.2; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.user-name-line { display:flex; align-items:center; gap:0; line-height:1.3; }
+.user-eng { font-size:11px; color:var(--blue); font-weight:500; margin-left:4px; background:rgba(31,111,235,0.08); padding:1px 6px; border-radius:10px; white-space:nowrap; }
+.user-dept { font-size:11px; color:var(--fg2); line-height:1.2; max-width:100px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 #user-name-display:empty::after { content:'\200b'; }
 
 /* Body Layout */
@@ -364,7 +366,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
       <img class="avatar-img" id="user-avatar" src="" alt="">
     </div>
     <div>
-      <div class="user-name" id="user-name-display">Loading...</div>
+      <div class="user-name-line">
+        <span class="user-name" id="user-name-display">Loading...</span>
+        <span class="user-eng" id="user-eng-display" style="display:none"></span>
+      </div>
       <div class="user-dept" id="user-dept-display"></div>
     </div>
   </div>
@@ -438,7 +443,7 @@ function fmtElapsed(ms){if(ms<1)return ms.toFixed(3)+' ms';if(ms<1000)return ms.
 function apiCall(method,path,body){const opts={method,headers:{'Content-Type':'application/json'}};if(body)opts.body=JSON.stringify(body);return fetch(location.origin+path,opts).then(r=>r.json());}
 
 // ── User Info ──
-async function loadUserInfo(){const nameEl=document.getElementById('user-name-display');const deptEl=document.getElementById('user-dept-display');const wrap=document.getElementById('avatar-wrap');const initialsEl=document.getElementById('avatar-initials');const img=document.getElementById('user-avatar');const avatarColors=['#1f6feb','#8250df','#bf3989','#cf222e','#d4a72c','#1a7f37','#0969da','#a40e26','#bc4c00','#0e7c7b'];function colorFromName(n){let h=0;for(let i=0;i<(n||'').length;i++)h=n.charCodeAt(i)+((h<<5)-h);return avatarColors[Math.abs(h)%avatarColors.length]}function setUser(eng,chn,dept,avatarUrl){nameEl.textContent=chn||eng||'Guest';deptEl.textContent=dept||'';deptEl.title=dept||'';const initial=(chn||eng||'G')[0].toUpperCase();initialsEl.textContent=initial;initialsEl.style.background=colorFromName(eng||chn||'Guest');if(!avatarUrl||!eng){wrap.classList.remove('avatar-loading');img.classList.remove('loaded');img.src='';currentUser=null;return}img.src=avatarUrl;img.onload=()=>{wrap.classList.remove('avatar-loading');img.classList.add('loaded')};img.onerror=()=>{wrap.classList.remove('avatar-loading');img.classList.remove('loaded');img.src=''};currentUser=null}try{const r=await fetch(location.origin+'/ts:auth/tauth/info.ashx').then(resp=>resp.json());if(r&&r.EngName){currentUser={eng_name:r.EngName,chn_name:r.ChnName||'',dept_name:r.DeptNameString||'',position:r.PositionName||'',avatar_url:'https://r.hrc.woa.com/photo/150/'+r.EngName+'.png?default_when_absent=true'};setUser(r.EngName,r.ChnName,r.DeptNameString,currentUser.avatar_url);return}}catch(e){}try{const r=await apiCall('GET','/api/user');if(r.ok&&r.user&&r.user.eng_name){currentUser=r.user;setUser(r.user.eng_name,r.user.chn_name,r.user.dept_name,r.user.avatar_url);return}}catch(e){}setUser('','','','')}
+async function loadUserInfo(){const nameEl=document.getElementById('user-name-display');const engEl=document.getElementById('user-eng-display');const deptEl=document.getElementById('user-dept-display');const wrap=document.getElementById('avatar-wrap');const initialsEl=document.getElementById('avatar-initials');const img=document.getElementById('user-avatar');const avatarColors=['#1f6feb','#8250df','#bf3989','#cf222e','#d4a72c','#1a7f37','#0969da','#a40e26','#bc4c00','#0e7c7b'];function colorFromName(n){let h=0;for(let i=0;i<(n||'').length;i++)h=n.charCodeAt(i)+((h<<5)-h);return avatarColors[Math.abs(h)%avatarColors.length]}function setUser(eng,chn,dept,avatarUrl){nameEl.textContent=chn||eng||'Guest';if(eng){engEl.textContent='@'+eng;engEl.style.display='inline'}else{engEl.style.display='none'}deptEl.textContent=dept||'';deptEl.title=dept||'';const initial=(chn||eng||'G')[0].toUpperCase();initialsEl.textContent=initial;initialsEl.style.background=colorFromName(eng||chn||'Guest');if(!avatarUrl||!eng){wrap.classList.remove('avatar-loading');img.classList.remove('loaded');img.src='';currentUser=null;return}img.src=avatarUrl;img.onload=()=>{wrap.classList.remove('avatar-loading');img.classList.add('loaded')};img.onerror=()=>{wrap.classList.remove('avatar-loading');img.classList.remove('loaded');img.src=''};currentUser=null}try{const r=await fetch(location.origin+'/ts:auth/tauth/info.ashx').then(resp=>resp.json());if(r&&r.EngName){currentUser={eng_name:r.EngName,chn_name:r.ChnName||'',dept_name:r.DeptNameString||'',position:r.PositionName||'',avatar_url:'https://r.hrc.woa.com/photo/150/'+r.EngName+'.png?default_when_absent=true'};setUser(r.EngName,r.ChnName,r.DeptNameString,currentUser.avatar_url);return}}catch(e){}try{const r=await apiCall('GET','/api/user');if(r.ok&&r.user&&r.user.eng_name){currentUser=r.user;setUser(r.user.eng_name,r.user.chn_name,r.user.dept_name,r.user.avatar_url);return}}catch(e){}setUser('','','','')}
 
 // ── Sidebar ──
 function toggleSidebar(tab){const sidebar=document.getElementById('sidebar');if(_sidebarVisible&&_sidebarTab===tab){closeSidebar();return}_sidebarVisible=true;_sidebarTab=tab;sidebar.classList.remove('collapsed');switchSidebarTab(tab);document.getElementById('btn-history').classList.toggle('active',tab==='history');document.getElementById('btn-favorites').classList.toggle('active',tab==='favorites');document.getElementById('btn-config').classList.toggle('active',tab==='config')}
