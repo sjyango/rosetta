@@ -1170,6 +1170,33 @@ class PlaygroundServer:
         if os.path.exists(_src_html):
             shutil.copy(_src_html, _dst_html)
             log.info("Playground (With edition) page written: %s", _dst_html)
+            # Embed DBMS config data so the page works even when API is unavailable
+            try:
+                with open(_dst_html, "r", encoding="utf-8") as f:
+                    html = f.read()
+                active_names = {c.name for c in self.configs}
+                dbms_list = []
+                for c in self.all_configs:
+                    dbms_list.append({
+                        "name": c.name, "host": c.host, "port": c.port,
+                        "active": c.name in active_names, "enabled": c.enabled,
+                        "type": getattr(c, "protocol", "mysql"),
+                        "database": getattr(c, "service_name", ""),
+                        "source": "builtin",
+                    })
+                dbms_json = json.dumps(dbms_list, ensure_ascii=False)
+                embedded = (
+                    "var EMBEDDED_DBMS=" + dbms_json + ";"
+                    "var EMBEDDED_DATABASE=" + json.dumps(self.database or "", ensure_ascii=False) + ";"
+                    "var EMBEDDED_BASELINE=" + json.dumps(self.baseline or "", ensure_ascii=False) + ";"
+                    "var EMBEDDED_TRACELESS=" + json.dumps(self.traceless) + ";\n"
+                )
+                html = html.replace("<script>\n", "<script>\n" + embedded, 1)
+                with open(_dst_html, "w", encoding="utf-8") as f:
+                    f.write(html)
+                log.info("Embedded %d DBMS configs into playground page", len(dbms_list))
+            except Exception as e:
+                log.warning("Failed to embed DBMS data: %s", e)
         else:
             from .reporter.history import generate_playground_html
             generate_playground_html(self.directory)
