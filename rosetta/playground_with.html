@@ -365,6 +365,70 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .test-result.fail { display:block; background:var(--red-bg); color:var(--red);
   border:1px solid rgba(248,81,73,0.3); }
 .test-result .ver { font-size:10px; opacity:0.6; margin-top:2px; }
+
+/* ── DBMS Modal ── */
+.modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.65);
+  z-index:10000; align-items:center; justify-content:center;
+  backdrop-filter:blur(4px); }
+.modal-overlay.show { display:flex; animation:fadeIn 0.2s ease; }
+.modal-card { background:var(--bg2); border:1px solid var(--border);
+  border-radius:16px; width:480px; max-width:92vw;
+  box-shadow:0 24px 64px rgba(0,0,0,0.5); overflow:hidden; }
+.modal-header { display:flex; align-items:center; justify-content:space-between;
+  padding:18px 24px; border-bottom:1px solid var(--border); }
+.modal-title { font-size:15px; font-weight:600; color:var(--fg); }
+.modal-close { background:none; border:none; color:var(--fg2); font-size:22px;
+  cursor:pointer; padding:0 4px; line-height:1; transition:color 0.15s; }
+.modal-close:hover { color:var(--fg); }
+.modal-body { padding:20px 24px; display:flex; flex-direction:column; gap:14px; }
+.modal-footer { display:flex; justify-content:flex-end; gap:10px;
+  padding:14px 24px; border-top:1px solid var(--border); background:var(--bg); }
+.form-label { display:block; font-size:11px; color:var(--fg2); margin-bottom:4px;
+  text-transform:uppercase; letter-spacing:0.5px; font-weight:600; }
+.form-label .required { color:var(--red); }
+.form-input { width:100%; background:var(--bg); border:1px solid var(--border);
+  border-radius:8px; padding:9px 12px; color:var(--fg); font-size:13px;
+  outline:none; transition:border-color 0.2s,box-shadow 0.2s; }
+.form-input:focus { border-color:var(--accent); box-shadow:0 0 0 3px var(--glow); }
+.form-input::placeholder { color:var(--fg2); opacity:0.5; }
+select.form-input { cursor:pointer; }
+.form-row-2col { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+.form-check { display:flex; align-items:center; gap:10px; margin-top:4px; }
+.form-check-label { font-size:12px; color:var(--fg2); }
+.btn-cancel { background:var(--bg3); color:var(--fg2); border:1px solid var(--border);
+  border-radius:8px; padding:9px 18px; font-size:13px; cursor:pointer; transition:all 0.15s; }
+.btn-cancel:hover { color:var(--fg); border-color:var(--fg2); }
+.btn-save { background:linear-gradient(135deg, var(--accent), #388bfd);
+  color:#fff; border:none; border-radius:8px; padding:9px 20px; font-size:13px;
+  font-weight:600; cursor:pointer; transition:all 0.2s;
+  box-shadow:0 2px 8px rgba(31,111,235,0.3); }
+.btn-save:hover { transform:translateY(-1px); box-shadow:0 4px 16px rgba(31,111,235,0.4); }
+.btn-save:disabled { opacity:0.5; cursor:not-allowed; }
+
+/* Config item action buttons */
+.ci-actions { display:flex; gap:6px; align-items:center; flex-shrink:0; }
+.ci-btn { background:var(--bg3); border:1px solid var(--border); border-radius:6px;
+  color:var(--fg2); font-size:11px; padding:4px 10px; cursor:pointer;
+  transition:all 0.15s; white-space:nowrap; }
+.ci-btn:hover { color:var(--fg); border-color:var(--fg2); }
+.ci-btn.danger { color:var(--red); }
+.ci-btn.danger:hover { background:var(--red-bg); border-color:var(--red); }
+.ci-btn.testing { opacity:0.5; cursor:not-allowed; }
+
+.add-dbms-btn { display:flex; align-items:center; gap:6px; width:100%;
+  background:var(--bg); border:1px dashed var(--border); border-radius:10px;
+  color:var(--fg2); font-size:12px; padding:10px 16px; cursor:pointer;
+  transition:all 0.2s; margin-bottom:10px; justify-content:center; }
+.add-dbms-btn:hover { border-color:var(--accent); color:var(--blue);
+  background:rgba(31,111,235,0.05); }
+.add-dbms-btn .plus-icon { font-size:16px; font-weight:700; }
+
+.config-item .ci-tags { margin-top:2px; }
+.ci-tags .ci-tag { display:inline-block; font-size:9px; padding:1px 6px;
+  border-radius:4px; margin-right:4px; text-transform:uppercase; font-weight:600;
+  letter-spacing:0.3px; }
+.ci-tag.custom { background:rgba(163,113,247,0.12); color:var(--purple); }
+.ci-tag.builtin { background:rgba(88,166,255,0.1); color:var(--blue); }
 </style>
 </head>
 <body>
@@ -447,6 +511,69 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 
 <div id="toast" class="toast" style="opacity:0"></div>
 
+<!-- DBMS Add/Edit Modal -->
+<div class="modal-overlay" id="dbms-modal">
+  <div class="modal-card">
+    <div class="modal-header">
+      <span class="modal-title" id="modal-title">Add DBMS</span>
+      <button class="modal-close" onclick="closeDbmsModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-row">
+        <label class="form-label">Name <span class="required">*</span></label>
+        <input class="form-input" id="form-name" placeholder="e.g. my-mysql-8.0" autocomplete="off">
+      </div>
+      <div class="form-row form-row-2col">
+        <div>
+          <label class="form-label">Protocol</label>
+          <select class="form-input" id="form-protocol">
+            <option value="mysql">MySQL</option>
+            <option value="tidb">TiDB</option>
+            <option value="oceanbase">OceanBase</option>
+            <option value="tdsql">TDSQL</option>
+            <option value="oracle">Oracle</option>
+            <option value="postgresql">PostgreSQL</option>
+          </select>
+        </div>
+        <div>
+          <label class="form-label">Host <span class="required">*</span></label>
+          <input class="form-input" id="form-host" placeholder="127.0.0.1">
+        </div>
+      </div>
+      <div class="form-row form-row-2col">
+        <div>
+          <label class="form-label">Port <span class="required">*</span></label>
+          <input class="form-input" id="form-port" type="number" placeholder="3306" value="3306">
+        </div>
+        <div>
+          <label class="form-label">Database</label>
+          <input class="form-input" id="form-database" placeholder="(optional)">
+        </div>
+      </div>
+      <div class="form-row form-row-2col">
+        <div>
+          <label class="form-label">Username <span class="required">*</span></label>
+          <input class="form-input" id="form-user" placeholder="root">
+        </div>
+        <div>
+          <label class="form-label">Password</label>
+          <input class="form-input" id="form-password" type="password" placeholder="password">
+        </div>
+      </div>
+      <div class="form-row form-check">
+        <label class="toggle-switch"><input type="checkbox" id="form-enabled" checked><span class="toggle-slider"></span></label>
+        <span class="form-check-label">Enabled (will appear in Targets & Baseline selectors)</span>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-cancel" onclick="closeDbmsModal()">Cancel</button>
+      <button class="btn-save" id="btn-save-dbms" onclick="saveCustomDbms()">
+        <span id="save-icon">&#10003;</span> Save DBMS
+      </button>
+    </div>
+  </div>
+</div>
+
 <script>
 // ── State ──
 let DBMS_LIST=[], ACTIVE_DBMS=new Set(), BASELINE_DBMS='', DATABASE='', SANDBOX_MODE=true;
@@ -487,8 +614,17 @@ async function deleteFavorite(id){try{await apiCall('DELETE','/api/favorites/'+i
 
 // ── Config Panel ──
 async function loadConfigsData(){try{const r=await apiCall('GET','/api/dbms');if(r.ok){configsData=r.dbms||[];configsData.forEach(d=>{if(!(d.name in DBMS_CONN_STATUS))DBMS_CONN_STATUS[d.name]='unknown'})}else{configsData=[]}}catch(e){configsData=[]}}
-function renderConfigs(){const b=document.getElementById('sidebar-body');if(configsData.length===0){b.innerHTML='<div class="sidebar-empty"><div class="icon">&#9881;</div><p>No DBMS configured.<br>Check with_config.json</p></div>';return}let html='';configsData.forEach(d=>{const status=DBMS_CONN_STATUS[d.name]||'unknown';const statusCls=status==='success'?'online':status==='fail'?'offline':status==='testing'?'unknown':'unknown';const activeBadge=d.active?'<span style="font-size:10px;background:var(--green-bg);color:var(--green);padding:1px 6px;border-radius:4px;margin-left:4px;">active</span>':'';html+='<div class="config-item" id="config-item-'+esc(d.name)+'"><div class="ci-row"><div class="ci-status '+statusCls+'" id="status-'+esc(d.name)+'" title="'+status+'"></div><div class="ci-info"><div class="ci-name">'+esc(d.name)+activeBadge+'<span class="ci-type-tag">'+esc(d.type||'mysql')+'</span></div><div class="ci-host">'+esc(d.host)+':'+esc(d.port)+(d.database?' / '+esc(d.database):'')+'</div></div><div class="ci-actions"><button class="ci-btn test" id="test-btn-'+esc(d.name)+'" onclick="testDbmsConnection(\''+esc(d.name).replace(/'/g,"\\'")+'\')">&#9654; Test</button></div></div><div class="test-result" id="test-result-'+esc(d.name)+'"></div></div>';});b.innerHTML=html}
+function renderConfigs(){const b=document.getElementById('sidebar-body');let html='<button class="add-dbms-btn" onclick="openAddDbmsModal()"><span class="plus-icon">+</span> Add DBMS</button>';if(configsData.length===0){html+='<div class="sidebar-empty"><div class="icon">&#9881;</div><p>No DBMS configured.<br>Add yours above or edit with_config.json</p></div>';b.innerHTML=html;return}configsData.forEach(d=>{const isCustom=d.source==='custom';const status=DBMS_CONN_STATUS[d.name]||'unknown';const statusCls=status==='success'?'online':status==='fail'?'offline':status==='testing'?'unknown':'unknown';const activeBadge=d.active?'<span style="font-size:10px;background:var(--green-bg);color:var(--green);padding:1px 6px;border-radius:4px;margin-left:4px;">active</span>':'';const sourceTag=isCustom?'<span class="ci-tag custom">custom</span>':'<span class="ci-tag builtin">builtin</span>';const editBtns=isCustom?'<button class="ci-btn" onclick="event.stopPropagation();openEditDbmsModal(\''+esc(d.name).replace(/'/g,"\\'")+'\')" title="Edit">&#9998;</button><button class="ci-btn danger" onclick="event.stopPropagation();deleteCustomDbms(\''+esc(d.name).replace(/'/g,"\\'")+'\')" title="Delete">&#10005;</button>':'';html+='<div class="config-item" id="config-item-'+esc(d.name)+'"><div class="ci-row"><div class="ci-status '+statusCls+'" id="status-'+esc(d.name)+'" title="'+status+'"></div><div class="ci-info"><div class="ci-name">'+esc(d.name)+activeBadge+'<span class="ci-type-tag">'+esc(d.type||'mysql')+'</span></div><div class="ci-tags">'+sourceTag+'</div><div class="ci-host">'+esc(d.host)+':'+esc(d.port)+(d.database?' / '+esc(d.database):'')+'</div></div><div class="ci-actions"><button class="ci-btn test" id="test-btn-'+esc(d.name)+'" onclick="testDbmsConnection(\''+esc(d.name).replace(/'/g,"\\'")+'\')">&#9654; Test</button>'+editBtns+'</div></div><div class="test-result" id="test-result-'+esc(d.name)+'"></div></div>';});b.innerHTML=html}
 async function testDbmsConnection(name){const resultDiv=document.getElementById('test-result-'+name);const statusDot=document.getElementById('status-'+name);const testBtn=document.getElementById('test-btn-'+name);if(!resultDiv||!testBtn)return;testBtn.textContent='...';testBtn.classList.add('testing');resultDiv.style.display='none';statusDot.className='ci-status unknown';DBMS_CONN_STATUS[name]='testing';try{const r=await apiCall('POST','/api/dbms/test',{name:name});if(r.ok&&r.success){DBMS_CONN_STATUS[name]='success';statusDot.className='ci-status online';resultDiv.className='test-result success';resultDiv.innerHTML='&#10003; Connected — '+esc(r.version||'OK');resultDiv.style.display='block'}else{throw new Error(r.error||'Connection failed')}}catch(e){DBMS_CONN_STATUS[name]='fail';statusDot.className='ci-status offline';resultDiv.className='test-result fail';resultDiv.innerHTML='&#10007; '+(e.message||'Connection failed');resultDiv.style.display='block';statusDot.title=e.message}finally{testBtn.textContent='&#9654; Test';testBtn.classList.remove('testing');renderChips();renderBaselineChips()}}
+
+// ── DBMS Modal ──
+let _editingDbmsName=null;
+function openAddDbmsModal(){_editingDbmsName=null;document.getElementById('modal-title').textContent='Add DBMS';document.getElementById('form-name').value='';document.getElementById('form-name').disabled=false;document.getElementById('form-protocol').value='mysql';document.getElementById('form-host').value='';document.getElementById('form-port').value='3306';document.getElementById('form-database').value='';document.getElementById('form-user').value='';document.getElementById('form-password').value='';document.getElementById('form-enabled').checked=true;document.getElementById('btn-save-dbms').innerHTML='<span id="save-icon">&#10003;</span> Save DBMS';document.getElementById('dbms-modal').classList.add('show')}
+function openEditDbmsModal(ename){const d=configsData.find(c=>c.name===ename.replace(/\\'/g,"'"));if(!d)return;_editingDbmsName=d.name;document.getElementById('modal-title').textContent='Edit DBMS';document.getElementById('form-name').value=d.name;document.getElementById('form-name').disabled=true;document.getElementById('form-protocol').value=d.type||'mysql';document.getElementById('form-host').value=d.host||'';document.getElementById('form-port').value=d.port||3306;document.getElementById('form-database').value=d.database||'';document.getElementById('form-user').value='';document.getElementById('form-password').value='';document.getElementById('form-enabled').checked=d.active!==false;document.getElementById('btn-save-dbms').innerHTML='<span id="save-icon">&#10003;</span> Save Changes';document.getElementById('dbms-modal').classList.add('show')}
+function closeDbmsModal(){document.getElementById('dbms-modal').classList.remove('show')}
+async function saveCustomDbms(){const name=(document.getElementById('form-name').value||'').trim();if(!name){showToast('DBMS name is required');return}const btn=document.getElementById('btn-save-dbms');btn.disabled=true;btn.innerHTML='Saving...';const body={name:name,protocol:document.getElementById('form-protocol').value,host:document.getElementById('form-host').value.trim()||'127.0.0.1',port:parseInt(document.getElementById('form-port').value)||3306,user:document.getElementById('form-user').value.trim()||'root',password:document.getElementById('form-password').value,database:document.getElementById('form-database').value.trim(),enabled:document.getElementById('form-enabled').checked};try{const r=await apiCall('POST','/api/dbms/custom/save',body);if(r.ok){showToast(r.action==='created'?'DBMS added!':'DBMS updated!','success');closeDbmsModal();await loadDbms();await loadConfigsData();renderConfigs()}else{showToast(r.error||'Save failed')}}catch(e){showToast('Save failed: '+e.message)}finally{btn.disabled=false;btn.innerHTML='<span id="save-icon">&#10003;</span> '+(document.getElementById('form-name').disabled?'Save Changes':'Save DBMS')}}
+async function deleteCustomDbms(ename){const name=ename.replace(/\\'/g,"'");if(!confirm('Delete custom DBMS "'+name+'"? This cannot be undone.'))return;try{const r=await apiCall('DELETE','/api/dbms/custom/'+encodeURIComponent(name));if(r.ok){showToast('DBMS deleted','success');await loadDbms();await loadConfigsData();renderConfigs()}else{showToast(r.error||'Delete failed')}}catch(e){showToast('Delete failed: '+e.message)}}
+document.getElementById('dbms-modal').addEventListener('click',function(e){if(e.target===this)closeDbmsModal()});
 
 // ── DBMS Chips ──
 function loadDbms(){apiCall('GET','/api/dbms').then(r=>{if(!r.ok){showToast('Failed to load DBMS list');return}DBMS_LIST=r.dbms||[];DATABASE=r.database||'';ACTIVE_DBMS=new Set(DBMS_LIST.filter(d=>d.active).map(d=>d.name));if(r.baseline)BASELINE_DBMS=r.baseline;else if(!BASELINE_DBMS&&DBMS_LIST.length>0)BASELINE_DBMS=DBMS_LIST[0].name;if(r.traceless!=null){SANDBOX_MODE=r.traceless;document.getElementById('sandbox-toggle').checked=SANDBOX_MODE}DBMS_LIST.forEach(d=>{if(!(d.name in DBMS_CONN_STATUS))DBMS_CONN_STATUS[d.name]='unknown'});renderChips();renderBaselineChips();autoTestAllDbms()}).catch(e=>showToast('API error: '+e.message))}

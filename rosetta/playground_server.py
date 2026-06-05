@@ -101,14 +101,14 @@ def _db_execute(sql: str, params=None):
 
 def _get_with_user(headers) -> dict:
     """Extract user info from With platform headers or return guest."""
-    eng_name = headers.get("X-With-EngName", "")
-    chn_name = headers.get("X-With-ChnName", "")
-    dept_name = headers.get("X-With-DeptName", "")
-    position = headers.get("X-With-PositionName", "")
+    eng_name = headers.get("x-with-engname", "")
+    chn_name = headers.get("x-with-chnname", "")
+    dept_name = headers.get("x-with-deptname", "")
+    position = headers.get("x-with-positionname", "")
 
     # Also try standard nginx/forwarded headers
     if not eng_name:
-        eng_name = headers.get("X-Forwarded-User", "")
+        eng_name = headers.get("x-forwarded-user", "")
 
     return {
         "eng_name": eng_name,
@@ -230,6 +230,9 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
         if self.path == "/api/dbms/test":
             self._handle_dbms_test()
             return
+        if self.path == "/api/dbms/custom/save":
+            self._handle_custom_dbms_save()
+            return
         self.send_error(404)
 
     # ── DELETE ────────────────────────────────────────────────────────
@@ -243,6 +246,10 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             hist_id = self.path.split("/")[-1]
             self._handle_history_delete(hist_id)
             return
+        if self.path.startswith("/api/dbms/custom/"):
+            cust_name = self.path.split("/")[-1]
+            self._handle_custom_dbms_delete(cust_name)
+            return
         self.send_error(404)
 
     # ── API: User Info ────────────────────────────────────────────────
@@ -253,16 +260,172 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
 
     # ── API: DBMS List ────────────────────────────────────────────────
 
+    @classmethod
+    def _ensure_custom_dbms_table(cls):
+        """Create the custom_dbms table if it doesn't exist."""
+        try:
+            db = _get_db()
+            if db is None:
+                return
+            cursor = db.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS custom_dbms (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    name VARCHAR(128) NOT NULL,
+                    protocol VARCHAR(32) DEFAULT 'mysql',
+                    host VARCHAR(256) NOT NULL DEFAULT '127.0.0.1',
+                    port INT NOT NULL DEFAULT 3306,
+                    username VARCHAR(128) NOT NULL DEFAULT 'root',
+                    password VARCHAR(256) NOT NULL DEFAULT '',
+                    database_name VARCHAR(128) DEFAULT '',
+                    owner VARCHAR(128) NOT NULL DEFAULT '',
+                    enabled TINYINT(1) NOT NULL DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    UNIQUE KEY uk_owner_name (owner, name)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """)
+            cursor.close()
+        except Exception as e:
+            log.error("Failed to ensure custom_dbms table: %s", e)
+
     def _load_custom_dbms(self, eng_name: str) -> list:
-        """Load custom DBMS configs for a user (from DB)."""
-        # TODO: Implement custom DBMS persistence when needed
-        return []
+        """Load custom DBMS configs for a user from MySQL."""
+        if not eng_name:
+            return []
+        cls = type(self)
+        cls._ensure_custom_dbms_table()
+        db = _get_db()
+        if db is None:
+            return []
+        try:
+            cursor = db.cursor()
+            cursor.execute(
+                "SELECT id, name, protocol, host, port, username, password, "
+                "database_name, enabled FROM custom_dbms WHERE owner=%s ORDER BY name",
+                (eng_name,)
+            )
+            rows = cursor.fetchall()
+            cursor.close()
+            result = []
+            for r in rows:
+                result.append({
+                    "custom_id": r[0],
+                    "name": r[1],
+                    "protocol": r[2] or "mysql",
+                    "host": r[3],
+                    "port": r[4],
+                    "user": r[5],
+                    "password": r[6],
+                    "database": r[7] or "",
+                    "enabled": bool(r[8]),
+                })
+            return result
+        except Exception as e:
+            log.error("Failed to load custom DBMS: %s", e)
+            return []
+
+    def _handle_custom_dbms_save(self):
+        """POST /api/dbms/custom/save — create or update a custom DBMS."""
+        user = self._get_user()
+        eng_name = user.get("eng_name", "")
+        if not eng_name:
+            self._respond_json({"ok": False, "error": "User not authenticated"}, 401)
+            return
+
+        body = self._read_json()
+        name = (body.get("name") or "").strip()
+        if not name:
+            self._respond_json({"ok": False, "error": "DBMS name is required"}, 400)
+            return
+
+        protocol = body.get("protocol", "mysql")
+        host = body.get("host", "127.0.0.1")
+        port = int(body.get("port", 3306))
+        username = body.get("user", "root")
+        password = body.get("password", "")
+        database_name = body.get("database", "")
+        enabled = 1 if body.get("enabled", True) else 0
+
+        type(self)._ensure_custom_dbms_table()
+        db = _get_db()
+        if db is None:
+            self._respond_json({"ok": False, "error": "Database unavailable"}, 500)
+            return
+
+        try:
+            cursor = db.cursor()
+            cursor.execute(
+                "SELECT id FROM custom_dbms WHERE owner=%s AND name=%s",
+                (eng_name, name)
+            )
+            existing = cursor.fetchone()
+            if existing:
+                cursor.execute(
+                    "UPDATE custom_dbms SET protocol=%s, host=%s, port=%s, "
+                    "username=%s, password=%s, database_name=%s, enabled=%s "
+                    "WHERE id=%s",
+                    (protocol, host, port, username, password, database_name,
+                     enabled, existing[0])
+                )
+                cursor.close()
+                self._respond_json({"ok": True, "action": "updated",
+                                    "name": name, "custom_id": existing[0]})
+            else:
+                cursor.execute(
+                    "INSERT INTO custom_dbms (name, protocol, host, port, "
+                    "username, password, database_name, owner, enabled) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (name, protocol, host, port, username, password,
+                     database_name, eng_name, enabled)
+                )
+                new_id = cursor.lastrowid
+                cursor.close()
+                self._respond_json({"ok": True, "action": "created",
+                                    "name": name, "custom_id": new_id})
+        except Exception as e:
+            log.error("Failed to save custom DBMS: %s", e)
+            self._respond_json({"ok": False, "error": str(e)}, 500)
+
+    def _handle_custom_dbms_delete(self, cust_name: str):
+        """DELETE /api/dbms/custom/<name> — delete a custom DBMS."""
+        user = self._get_user()
+        eng_name = user.get("eng_name", "")
+        if not eng_name:
+            self._respond_json({"ok": False, "error": "User not authenticated"}, 401)
+            return
+
+        type(self)._ensure_custom_dbms_table()
+        db = _get_db()
+        if db is None:
+            self._respond_json({"ok": False, "error": "Database unavailable"}, 500)
+            return
+
+        try:
+            cursor = db.cursor()
+            cursor.execute(
+                "DELETE FROM custom_dbms WHERE owner=%s AND name=%s",
+                (eng_name, cust_name)
+            )
+            affected = cursor.rowcount
+            cursor.close()
+            if affected > 0:
+                self._respond_json({"ok": True, "action": "deleted",
+                                    "name": cust_name})
+            else:
+                self._respond_json({"ok": False,
+                                    "error": "Custom DBMS not found"}, 404)
+        except Exception as e:
+            log.error("Failed to delete custom DBMS: %s", e)
+            self._respond_json({"ok": False, "error": str(e)}, 500)
 
     def _handle_dbms_list(self):
         """GET /api/dbms — list all DBMS (built-in + custom merged)."""
         active_names = {c.name for c in self._configs}
         dbms_list = [{"name": c.name, "host": c.host, "port": c.port,
                       "active": c.name in active_names, "enabled": c.enabled,
+                      "type": getattr(c, "protocol", "mysql"),
+                      "database": getattr(c, "service_name", ""),
                       "source": "builtin"}
                      for c in self._all_configs]
         # Merge custom configs
@@ -273,7 +436,9 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             dbms_list.append({
                 "name": cc["name"], "host": cc["host"], "port": cc["port"],
                 "active": cc["enabled"], "enabled": cc["enabled"],
-                "source": "custom", "custom_id": cc["id"],
+                "type": cc.get("protocol", "mysql"),
+                "database": cc.get("database", ""),
+                "source": "custom", "custom_id": cc.get("custom_id"),
             })
         self._respond_json({
             "ok": True,
@@ -290,22 +455,30 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
         if not name:
             self._respond_json({"ok": False, "error": "Missing 'name'"}, 400)
             return
-        # Find config
+        # Find config (built-in first, then custom)
         config = None
         for c in self._all_configs:
             if c.name == name:
-                config = c
+                config = (c.host, c.port, c.user, c.password)
                 break
+        if config is None:
+            user = self._get_user()
+            eng_name = user.get("eng_name", "anonymous")
+            customs = self._load_custom_dbms(eng_name)
+            for cc in customs:
+                if cc["name"] == name:
+                    config = (cc["host"], cc["port"], cc["user"], cc["password"])
+                    break
         if config is None:
             self._respond_json({"ok": False, "error": f"Unknown DBMS: {name}"}, 404)
             return
         try:
             import pymysql
             conn = pymysql.connect(
-                host=config.host,
-                port=config.port,
-                user=config.user,
-                password=config.password,
+                host=config[0],
+                port=config[1],
+                user=config[2],
+                password=config[3],
                 charset="utf8mb4",
                 connect_timeout=5,
             )
