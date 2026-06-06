@@ -308,6 +308,62 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             log.error("Failed to ensure custom_dbms table: %s", e)
 
+    @classmethod
+    def _ensure_history_table(cls):
+        """Create the sql_history table if it doesn't exist."""
+        try:
+            db = _get_db()
+            if db is None:
+                return
+            cursor = db.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sql_history (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_name VARCHAR(128) NOT NULL DEFAULT '',
+                    sql_text TEXT NOT NULL,
+                    dbms_targets VARCHAR(512) DEFAULT '',
+                    baseline VARCHAR(128) DEFAULT '',
+                    execution_time_ms INT DEFAULT 0,
+                    result_summary JSON DEFAULT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_user_created (user_name, created_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """)
+            cursor.close()
+        except Exception as e:
+            log.error("Failed to ensure sql_history table: %s", e)
+
+    @classmethod
+    def _ensure_favorites_table(cls):
+        """Create the sql_favorites table if it doesn't exist."""
+        try:
+            db = _get_db()
+            if db is None:
+                return
+            cursor = db.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sql_favorites (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_name VARCHAR(128) NOT NULL DEFAULT '',
+                    sql_text TEXT NOT NULL,
+                    title VARCHAR(256) DEFAULT '',
+                    dbms_targets VARCHAR(512) DEFAULT '',
+                    baseline VARCHAR(128) DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uk_user_sql (user_name, sql_text(255))
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """)
+            cursor.close()
+        except Exception as e:
+            log.error("Failed to ensure sql_favorites table: %s", e)
+
+    @classmethod
+    def _ensure_all_tables(cls):
+        """Ensure all required tables exist."""
+        cls._ensure_custom_dbms_table()
+        cls._ensure_history_table()
+        cls._ensure_favorites_table()
+
     def _load_custom_dbms(self, eng_name: str) -> list:
         """Load custom DBMS configs for a user from MySQL."""
         if not eng_name:
@@ -614,6 +670,8 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
     # ── API: History ──────────────────────────────────────────────────
 
     def _handle_history_list(self):
+        cls = type(self)
+        cls._ensure_history_table()
         user = self._get_user()
         eng_name = user.get("eng_name", "anonymous")
         try:
@@ -642,6 +700,8 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             self._respond_json({"ok": False, "error": str(e)}, 500)
 
     def _handle_history_save(self):
+        cls = type(self)
+        cls._ensure_history_table()
         try:
             body = self._read_json()
         except Exception:
@@ -683,6 +743,8 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
     # ── API: Favorites ────────────────────────────────────────────────
 
     def _handle_favorites_list(self):
+        cls = type(self)
+        cls._ensure_favorites_table()
         user = self._get_user()
         eng_name = user.get("eng_name", "anonymous")
         try:
@@ -1348,6 +1410,12 @@ class PlaygroundServer:
         PlaygroundAPIHandler._database = self.database
         PlaygroundAPIHandler._baseline = self.baseline
         PlaygroundAPIHandler._traceless = self.traceless
+
+        # Ensure database tables exist
+        try:
+            PlaygroundAPIHandler._ensure_all_tables()
+        except Exception as e:
+            log.warning("Failed to ensure DB tables: %s", e)
 
         handler = lambda *a, **kw: PlaygroundAPIHandler(*a, directory=self.directory, **kw)
 
