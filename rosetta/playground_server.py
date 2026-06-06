@@ -146,6 +146,11 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
                     pass
             cls._active_connections.clear()
 
+    @classmethod
+    def _get_all_configs_map(cls) -> dict:
+        """Return a mapping of config name -> config object for all DBMS."""
+        return {c.name: c for c in cls._all_configs}
+
     def log_message(self, format, *args):
         pass  # suppress
 
