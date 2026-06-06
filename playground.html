@@ -133,7 +133,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .sql-input { flex:1; background:var(--bg); border:1px solid var(--border);
   border-radius:10px; color:var(--fg); padding:14px 18px; font-size:14px;
   font-family:'SF Mono',Consolas,'Courier New',monospace;
-  min-height:130px; max-height:320px; resize:vertical; outline:none;
+  min-height:130px; max-height:460px; overflow-y:auto; outline:none;
   line-height:1.7; transition:border-color 0.2s,box-shadow 0.2s; tab-size:2; }
 .sql-input:focus { border-color:var(--accent); box-shadow:0 0 0 3px var(--glow); }
 .sql-input::placeholder { color:var(--fg2); opacity:0.6; }
@@ -818,6 +818,9 @@ initVersion();loadUserInfo();loadDbms();loadFavorites();loadHistory();checkSyste
 // ── Back to Top ──
 (function(){const btn=document.getElementById('back-to-top');const area=document.getElementById('results-area');function toggle(){if(!area)return;btn.classList.toggle('visible',area.scrollTop>300)}if(area)area.addEventListener('scroll',toggle,{passive:true})})();
 function scrollToTop(){const area=document.getElementById('results-area');if(area)area.scrollTo({top:0,behavior:'smooth'})}
+
+// ── SQL Editor Auto-resize ──
+(function(){const ta=document.getElementById('sql-input');if(!ta)return;function resize(){ta.style.height='auto';ta.style.height=Math.min(ta.scrollHeight,460)+'px'}ta.addEventListener('input',resize);ta.addEventListener('paste',()=>setTimeout(resize,0));resize()})();
 </script>
 
 </body>
