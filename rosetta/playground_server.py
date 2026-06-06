@@ -22,6 +22,7 @@ import sys
 import threading
 import time as _time
 from typing import Optional
+from urllib.parse import urlparse, parse_qs
 
 log = logging.getLogger("rosetta.playground")
 
@@ -197,27 +198,28 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
     # ── GET ───────────────────────────────────────────────────────────
 
     def do_GET(self):
-        if self.path == "/":
+        path = self.path.split("?")[0]
+        if path == "/":
             self.send_response(302)
             self.send_header("Location", "/playground.html")
             self.end_headers()
             return
-        if self.path == "/api/dbms":
+        if path == "/api/dbms":
             self._handle_dbms_list()
             return
-        if self.path == "/api/user":
+        if path == "/api/user":
             self._handle_user_info()
             return
-        if self.path == "/api/history":
+        if path == "/api/history":
             self._handle_history_list()
             return
-        if self.path == "/api/favorites":
+        if path == "/api/favorites":
             self._handle_favorites_list()
             return
-        if self.path == "/api/health":
+        if path == "/api/health":
             self._handle_health_check()
             return
-        if self.path == "/api/config/raw":
+        if path == "/api/config/raw":
             self._handle_config_raw_get()
             return
         super().do_GET()
@@ -673,7 +675,11 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
         cls = type(self)
         cls._ensure_history_table()
         user = self._get_user()
-        eng_name = user.get("eng_name", "anonymous")
+        # Priority: query param > auth header > "anonymous"
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        query_user = qs.get("user_name", [None])[0]
+        eng_name = query_user or user.get("eng_name", "") or "anonymous"
         try:
             cursor = _db_execute(
                 "SELECT id, sql_text, dbms_targets, baseline, execution_time_ms, "
@@ -709,7 +715,8 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         user = self._get_user()
-        eng_name = user.get("eng_name", "anonymous")
+        # Priority: With auth header > request body > "anonymous"
+        eng_name = user.get("eng_name", "") or body.get("user_name", "") or "anonymous"
         sql_text = body.get("sql_text", "")
         dbms_targets = body.get("dbms_targets", "")
         baseline = body.get("baseline", "")
@@ -746,7 +753,11 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
         cls = type(self)
         cls._ensure_favorites_table()
         user = self._get_user()
-        eng_name = user.get("eng_name", "anonymous")
+        # Priority: query param > auth header > "anonymous"
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        query_user = qs.get("user_name", [None])[0]
+        eng_name = query_user or user.get("eng_name", "") or "anonymous"
         try:
             cursor = _db_execute(
                 "SELECT id, sql_text, title, dbms_targets, baseline, created_at "
@@ -778,7 +789,7 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         user = self._get_user()
-        eng_name = user.get("eng_name", "anonymous")
+        eng_name = user.get("eng_name", "") or body.get("user_name", "") or "anonymous"
         sql_text = body.get("sql_text", "")
         title = body.get("title", "")
         dbms_targets = body.get("dbms_targets", "")
@@ -803,7 +814,7 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         user = self._get_user()
-        eng_name = user.get("eng_name", "anonymous")
+        eng_name = user.get("eng_name", "") or body.get("user_name", "") or "anonymous"
         sql_text = body.get("sql_text", "")
 
         try:
