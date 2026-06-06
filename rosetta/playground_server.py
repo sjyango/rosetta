@@ -129,6 +129,7 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
     # Class-level config (set before starting server)
     _configs: list = []
     _all_configs: list = []
+    _config_path: str = ""
     _database: str = ""
     _baseline: str = ""
     _traceless: bool = True
@@ -216,6 +217,9 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
         if self.path == "/api/health":
             self._handle_health_check()
             return
+        if self.path == "/api/config/raw":
+            self._handle_config_raw_get()
+            return
         super().do_GET()
 
     # ── POST ──────────────────────────────────────────────────────────
@@ -244,6 +248,9 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
         if self.path == "/api/dbms/custom/save":
             self._handle_custom_dbms_save()
+            return
+        if self.path == "/api/config/raw":
+            self._handle_config_raw_save()
             return
         self.send_error(404)
 
@@ -430,6 +437,62 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             log.error("Failed to delete custom DBMS: %s", e)
             self._respond_json({"ok": False, "error": str(e)}, 500)
+
+    # ── API: Config Raw ───────────────────────────────────────────────
+
+    def _handle_config_raw_get(self):
+        """GET /api/config/raw — return the full config.json content."""
+        config_path = self._config_path
+        if not config_path or not os.path.isfile(config_path):
+            self._respond_json({"ok": False, "error": "Config file not found"}, 404)
+            return
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            self._respond_json({"ok": True, "content": content})
+        except Exception as e:
+            self._respond_json({"ok": False, "error": str(e)}, 500)
+
+    def _handle_config_raw_save(self):
+        """POST /api/config/raw — save config.json content."""
+        config_path = self._config_path
+        if not config_path:
+            self._respond_json({"ok": False, "error": "Config path not configured"}, 500)
+            return
+        body = self._read_json()
+        content = body.get("content", "")
+        if not content.strip():
+            self._respond_json({"ok": False, "error": "Content is empty"}, 400)
+            return
+        # Validate JSON
+        try:
+            parsed = json.loads(content)
+            if "databases" not in parsed:
+                self._respond_json({"ok": False,
+                    "error": "Config must contain 'databases' key"}, 400)
+                return
+        except json.JSONDecodeError as e:
+            self._respond_json({"ok": False, "error": f"Invalid JSON: {e}"}, 400)
+            return
+        # Backup before overwrite
+        backup_path = config_path + ".bak"
+        try:
+            import shutil
+            shutil.copy2(config_path, backup_path)
+        except Exception:
+            pass  # best-effort backup
+        try:
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(parsed, f, indent=2, ensure_ascii=False)
+            # Reload configs
+            from .config import load_config
+            new_configs = load_config(config_path)
+            PlaygroundAPIHandler._all_configs = new_configs
+            PlaygroundAPIHandler._configs = [c for c in new_configs if c.enabled]
+            self._respond_json({"ok": True, "action": "saved",
+                                "databases": len(parsed.get("databases", []))})
+        except Exception as e:
+            self._respond_json({"ok": False, "error": f"Failed to save: {e}"}, 500)
 
     def _handle_dbms_list(self):
         """GET /api/dbms — list all DBMS (built-in + custom merged)."""
@@ -1325,6 +1388,8 @@ def main():
 
     output_dir = os.path.abspath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
+
+    PlaygroundAPIHandler._config_path = os.path.abspath(args.config)
 
     server = PlaygroundServer(
         directory=output_dir, port=args.port,

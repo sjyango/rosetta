@@ -445,6 +445,47 @@ select.form-input { cursor:pointer; }
   letter-spacing:0.3px; }
 .ci-tag.custom { background:rgba(163,113,247,0.12); color:var(--purple); }
 .ci-tag.builtin { background:rgba(88,166,255,0.1); color:var(--blue); }
+
+/* Config JSON Editor */
+.edit-config-btn { display:flex; align-items:center; gap:6px; width:100%;
+  background:var(--bg); border:1px dashed var(--border); border-radius:10px;
+  color:var(--fg2); font-size:12px; padding:10px 16px; cursor:pointer;
+  transition:all 0.2s; margin-bottom:10px; justify-content:center; }
+.edit-config-btn:hover { border-color:var(--yellow); color:var(--yellow);
+  background:rgba(210,153,34,0.05); }
+.edit-config-btn .edit-icon { font-size:14px; font-weight:700; }
+.config-editor-modal .modal-card { max-width:780px; width:95vw; max-height:90vh; }
+.config-editor-body { padding:16px 20px; display:flex; flex-direction:column; gap:12px; }
+.config-editor-hint { font-size:11px; color:var(--fg2); line-height:1.5;
+  background:rgba(210,153,34,0.08); border:1px solid rgba(210,153,34,0.2);
+  border-radius:8px; padding:10px 14px; }
+.config-editor-hint strong { color:var(--yellow); }
+.json-editor { width:100%; min-height:380px; max-height:55vh;
+  background:var(--bg); border:1px solid var(--border); border-radius:8px;
+  color:var(--fg); font-size:13px; font-family:'SF Mono',Consolas,'Courier New',monospace;
+  padding:14px 16px; resize:vertical; outline:none; line-height:1.6; tab-size:2;
+  transition:border-color 0.2s,box-shadow 0.2s; }
+.json-editor:focus { border-color:var(--yellow); box-shadow:0 0 0 3px rgba(210,153,34,0.15); }
+.json-editor.error { border-color:var(--red); box-shadow:0 0 0 3px rgba(248,81,73,0.15); }
+.config-editor-footer { display:flex; justify-content:space-between; align-items:center;
+  padding:14px 20px; border-top:1px solid var(--border); background:var(--bg); }
+.config-editor-footer .save-status { font-size:12px; color:var(--fg2); display:flex;
+  align-items:center; gap:6px; }
+.config-editor-footer .save-status.success { color:var(--green); }
+.config-editor-footer .save-status.error { color:var(--red); }
+.config-editor-footer .btn-group { display:flex; gap:8px; }
+.btn-reload { background:var(--bg3); color:var(--fg2); border:1px solid var(--border);
+  border-radius:8px; padding:9px 16px; font-size:13px; cursor:pointer;
+  transition:all 0.15s; display:flex; align-items:center; gap:5px; }
+.btn-reload:hover { color:var(--fg); border-color:var(--fg2); }
+.btn-reload svg { width:14px; height:14px; }
+.btn-save-warn { background:linear-gradient(135deg, var(--yellow), #d29922);
+  color:#000; border:none; border-radius:8px; padding:9px 20px; font-size:13px;
+  font-weight:600; cursor:pointer; transition:all 0.2s;
+  box-shadow:0 2px 8px rgba(210,153,34,0.3); }
+.btn-save-warn:hover { transform:translateY(-1px); box-shadow:0 4px 16px rgba(210,153,34,0.4); }
+.btn-save-warn:disabled { opacity:0.5; cursor:not-allowed; transform:none;
+  box-shadow:0 2px 8px rgba(210,153,34,0.15); }
 </style>
 </head>
 <body>
@@ -587,6 +628,36 @@ select.form-input { cursor:pointer; }
   </div>
 </div>
 
+<!-- Config Editor Modal -->
+<div class="modal-overlay config-editor-modal" id="config-editor-modal">
+  <div class="modal-card">
+    <div class="modal-header">
+      <span class="modal-title">&#9881; Edit config.json</span>
+      <button class="modal-close" onclick="closeConfigEditor()">&times;</button>
+    </div>
+    <div class="config-editor-body">
+      <div class="config-editor-hint">
+        <strong>⚠️ Warning:</strong> Editing <code>config.json</code> directly may break the configuration.
+        Changes take effect immediately after saving. A backup (<code>.bak</code>) is auto-created.
+      </div>
+      <textarea class="json-editor" id="json-editor" spellcheck="false" placeholder="Loading config.json..."></textarea>
+    </div>
+    <div class="config-editor-footer">
+      <span class="save-status" id="config-save-status"></span>
+      <div class="btn-group">
+        <button class="btn-reload" id="btn-reload-config" onclick="reloadConfigEditor()" title="Reload from disk">
+          <svg viewBox="0 0 16 16" fill="none"><path d="M1 8a7 7 0 0113.5-3M15 8a7 7 0 01-13.5 3M13.5 1.5V5H10M2.5 14.5V11H6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Reload
+        </button>
+        <button class="btn-cancel" onclick="closeConfigEditor()">Cancel</button>
+        <button class="btn-save-warn" id="btn-save-config" onclick="saveConfigEditor()">
+          &#9881; Save & Apply
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 var EMBEDDED_DBMS=[{"name": "mysql-9.6", "host": "21.6.101.185", "port": 3306, "active": true, "enabled": true, "type": "mysql", "database": "", "source": "builtin"}, {"name": "txsql-8.0", "host": "21.6.101.185", "port": 3307, "active": true, "enabled": true, "type": "mysql", "database": "", "source": "builtin"}, {"name": "tidb-8.5", "host": "21.6.101.185", "port": 4000, "active": true, "enabled": true, "type": "tidb", "database": "", "source": "builtin"}, {"name": "oceanbase", "host": "21.6.101.185", "port": 2881, "active": false, "enabled": false, "type": "oceanbase", "database": "", "source": "builtin"}, {"name": "oracle", "host": "21.6.101.185", "port": 1521, "active": false, "enabled": false, "type": "oracle", "database": "orclpdb1", "source": "builtin"}, {"name": "postgres-15", "host": "21.6.101.185", "port": 5432, "active": false, "enabled": false, "type": "mysql", "database": "", "source": "builtin"}];var EMBEDDED_DATABASE="cross_dbms_test_db";var EMBEDDED_BASELINE="";var EMBEDDED_TRACELESS=true;
 var EMBEDDED_DBMS=[{"name": "mysql-9.6", "host": "21.6.101.185", "port": 3306, "active": true, "enabled": true, "type": "mysql", "database": "", "source": "builtin"}, {"name": "txsql-8.0", "host": "21.6.101.185", "port": 3307, "active": true, "enabled": true, "type": "mysql", "database": "", "source": "builtin"}, {"name": "tidb-8.5", "host": "21.6.101.185", "port": 4000, "active": true, "enabled": true, "type": "tidb", "database": "", "source": "builtin"}, {"name": "oceanbase", "host": "21.6.101.185", "port": 2881, "active": false, "enabled": false, "type": "oceanbase", "database": "", "source": "builtin"}, {"name": "oracle", "host": "21.6.101.185", "port": 1521, "active": false, "enabled": false, "type": "oracle", "database": "orclpdb1", "source": "builtin"}, {"name": "postgres-15", "host": "21.6.101.185", "port": 5432, "active": false, "enabled": false, "type": "mysql", "database": "", "source": "builtin"}];var EMBEDDED_DATABASE="cross_dbms_test_db";var EMBEDDED_BASELINE="";var EMBEDDED_TRACELESS=true;
@@ -632,7 +703,7 @@ async function deleteFavorite(id){try{await apiCall('DELETE','/api/favorites/'+i
 
 // ── Config Panel ──
 async function loadConfigsData(){try{const r=await apiCall('GET','/api/dbms');if(r.ok){configsData=r.dbms||[];configsData.forEach(d=>{if(!(d.name in DBMS_CONN_STATUS))DBMS_CONN_STATUS[d.name]='unknown'})}else{configsData=[]}}catch(e){if(typeof EMBEDDED_DBMS!=='undefined'&&EMBEDDED_DBMS.length>0){configsData=EMBEDDED_DBMS;configsData.forEach(d=>{if(!(d.name in DBMS_CONN_STATUS))DBMS_CONN_STATUS[d.name]='unknown'})}else{configsData=[]}}}
-function renderConfigs(){const b=document.getElementById('sidebar-body');let html='<button class="add-dbms-btn" onclick="openAddDbmsModal()"><span class="plus-icon">+</span> Add DBMS</button>';if(configsData.length===0){html+='<div class="sidebar-empty"><div class="icon">&#9881;</div><p>No DBMS configured.<br>Add yours above or edit with_config.json</p></div>';b.innerHTML=html;return}configsData.forEach(d=>{const isCustom=d.source==='custom';const status=DBMS_CONN_STATUS[d.name]||'unknown';const statusCls=status==='success'?'online':status==='fail'?'offline':status==='testing'?'unknown':'unknown';const activeBadge=d.active?'<span style="font-size:10px;background:var(--green-bg);color:var(--green);padding:1px 6px;border-radius:4px;margin-left:4px;">active</span>':'';const sourceTag=isCustom?'<span class="ci-tag custom">custom</span>':'<span class="ci-tag builtin">builtin</span>';const editBtns=isCustom?'<button class="ci-btn" onclick="event.stopPropagation();openEditDbmsModal(\''+esc(d.name).replace(/'/g,"\\'")+'\')" title="Edit">&#9998;</button><button class="ci-btn danger" onclick="event.stopPropagation();deleteCustomDbms(\''+esc(d.name).replace(/'/g,"\\'")+'\')" title="Delete">&#10005;</button>':'';html+='<div class="config-item" id="config-item-'+esc(d.name)+'"><div class="ci-row"><div class="ci-status '+statusCls+'" id="status-'+esc(d.name)+'" title="'+status+'"></div><div class="ci-info"><div class="ci-name">'+esc(d.name)+activeBadge+'<span class="ci-type-tag">'+esc(d.type||'mysql')+'</span>'+sourceTag+'</div><div class="ci-host">'+esc(d.host)+':'+esc(d.port)+(d.database?' / '+esc(d.database):'')+'</div></div><div class="ci-actions"><button class="ci-btn test" id="test-btn-'+esc(d.name)+'" onclick="testDbmsConnection(\''+esc(d.name).replace(/'/g,"\\'")+'\')">&#9654; Test</button>'+editBtns+'</div></div><div class="test-result" id="test-result-'+esc(d.name)+'"></div></div>';});b.innerHTML=html}
+function renderConfigs(){const b=document.getElementById('sidebar-body');let html='<button class="add-dbms-btn" onclick="openAddDbmsModal()"><span class="plus-icon">+</span> Add DBMS</button><button class="edit-config-btn" onclick="event.stopPropagation();openConfigEditor()"><span class="edit-icon">&#9881;</span> Edit config.json</button>';if(configsData.length===0){html+='<div class="sidebar-empty"><div class="icon">&#9881;</div><p>No DBMS configured.<br>Add yours above or edit with_config.json</p></div>';b.innerHTML=html;return}configsData.forEach(d=>{const isCustom=d.source==='custom';const status=DBMS_CONN_STATUS[d.name]||'unknown';const statusCls=status==='success'?'online':status==='fail'?'offline':status==='testing'?'unknown':'unknown';const activeBadge=d.active?'<span style="font-size:10px;background:var(--green-bg);color:var(--green);padding:1px 6px;border-radius:4px;margin-left:4px;">active</span>':'';const sourceTag=isCustom?'<span class="ci-tag custom">custom</span>':'<span class="ci-tag builtin">builtin</span>';const editBtns=isCustom?'<button class="ci-btn" onclick="event.stopPropagation();openEditDbmsModal(\''+esc(d.name).replace(/'/g,"\\'")+'\')" title="Edit">&#9998;</button><button class="ci-btn danger" onclick="event.stopPropagation();deleteCustomDbms(\''+esc(d.name).replace(/'/g,"\\'")+'\')" title="Delete">&#10005;</button>':'';html+='<div class="config-item" id="config-item-'+esc(d.name)+'"><div class="ci-row"><div class="ci-status '+statusCls+'" id="status-'+esc(d.name)+'" title="'+status+'"></div><div class="ci-info"><div class="ci-name">'+esc(d.name)+activeBadge+'<span class="ci-type-tag">'+esc(d.type||'mysql')+'</span>'+sourceTag+'</div><div class="ci-host">'+esc(d.host)+':'+esc(d.port)+(d.database?' / '+esc(d.database):'')+'</div></div><div class="ci-actions"><button class="ci-btn test" id="test-btn-'+esc(d.name)+'" onclick="testDbmsConnection(\''+esc(d.name).replace(/'/g,"\\'")+'\')">&#9654; Test</button>'+editBtns+'</div></div><div class="test-result" id="test-result-'+esc(d.name)+'"></div></div>';});b.innerHTML=html}
 async function testDbmsConnection(name){const resultDiv=document.getElementById('test-result-'+name);const statusDot=document.getElementById('status-'+name);const testBtn=document.getElementById('test-btn-'+name);if(!resultDiv||!testBtn)return;testBtn.textContent='...';testBtn.classList.add('testing');resultDiv.style.display='none';statusDot.className='ci-status unknown';DBMS_CONN_STATUS[name]='testing';try{const r=await apiCall('POST','/api/dbms/test',{name:name});if(r.ok&&r.success){DBMS_CONN_STATUS[name]='success';statusDot.className='ci-status online';resultDiv.className='test-result success';resultDiv.innerHTML='&#10003; Connected — '+esc(r.version||'OK');resultDiv.style.display='block'}else{throw new Error(r.error||'Connection failed')}}catch(e){DBMS_CONN_STATUS[name]='fail';statusDot.className='ci-status offline';resultDiv.className='test-result fail';resultDiv.innerHTML='&#10007; '+(e.message||'Connection failed');resultDiv.style.display='block';statusDot.title=e.message}finally{testBtn.textContent='&#9654; Test';testBtn.classList.remove('testing');renderChips();renderBaselineChips()}}
 
 // ── DBMS Modal ──
@@ -643,6 +714,13 @@ function closeDbmsModal(){document.getElementById('dbms-modal').classList.remove
 async function saveCustomDbms(){const name=(document.getElementById('form-name').value||'').trim();if(!name){showToast('DBMS name is required');return}const btn=document.getElementById('btn-save-dbms');btn.disabled=true;btn.innerHTML='Saving...';const body={name:name,protocol:document.getElementById('form-protocol').value,host:document.getElementById('form-host').value.trim()||'127.0.0.1',port:parseInt(document.getElementById('form-port').value)||3306,user:document.getElementById('form-user').value.trim()||'root',password:document.getElementById('form-password').value,database:document.getElementById('form-database').value.trim(),enabled:document.getElementById('form-enabled').checked};try{const r=await apiCall('POST','/api/dbms/custom/save',body);if(r.ok){showToast(r.action==='created'?'DBMS added!':'DBMS updated!','success');closeDbmsModal();await loadDbms();await loadConfigsData();renderConfigs()}else{showToast(r.error||'Save failed')}}catch(e){showToast('Save failed: '+e.message)}finally{btn.disabled=false;btn.innerHTML='<span id="save-icon">&#10003;</span> '+(document.getElementById('form-name').disabled?'Save Changes':'Save DBMS')}}
 async function deleteCustomDbms(ename){const name=ename.replace(/\\'/g,"'");if(!confirm('Delete custom DBMS "'+name+'"? This cannot be undone.'))return;try{const r=await apiCall('DELETE','/api/dbms/custom/'+encodeURIComponent(name));if(r.ok){showToast('DBMS deleted','success');await loadDbms();await loadConfigsData();renderConfigs()}else{showToast(r.error||'Delete failed')}}catch(e){showToast('Delete failed: '+e.message)}}
 document.getElementById('dbms-modal').addEventListener('click',function(e){if(e.target===this)closeDbmsModal()});
+
+// ── Config Editor ──
+async function openConfigEditor(){document.getElementById('config-editor-modal').classList.add('show');await reloadConfigEditor()}
+function closeConfigEditor(){document.getElementById('config-editor-modal').classList.remove('show')}
+async function reloadConfigEditor(){const editor=document.getElementById('json-editor');const status=document.getElementById('config-save-status');const btn=document.getElementById('btn-reload-config');btn.disabled=true;status.textContent='';status.className='save-status';editor.value='Loading...';try{const r=await apiCall('GET','/api/config/raw');editor.value=r.content||'';editor.classList.remove('error')}catch(e){editor.value='// Failed to load config: '+e.message;editor.classList.add('error')}finally{btn.disabled=false}}
+async function saveConfigEditor(){const editor=document.getElementById('json-editor');const status=document.getElementById('config-save-status');const btn=document.getElementById('btn-save-config');const content=editor.value.trim();if(!content){status.textContent='Content is empty';status.className='save-status error';return}btn.disabled=true;status.textContent='Saving...';status.className='save-status';try{const r=await apiCall('POST','/api/config/raw',{content:content});if(r.ok){editor.classList.remove('error');status.textContent='Saved — '+r.databases+' database(s) loaded. Refresh to see updates.';status.className='save-status success';showToast('Config saved & applied','success');closeConfigEditor();await loadConfigsData();renderConfigs();await loadDbms()}else{editor.classList.add('error');status.textContent=r.error||'Save failed';status.className='save-status error'}}catch(e){editor.classList.add('error');status.textContent='Save failed: '+e.message;status.className='save-status error'}finally{btn.disabled=false}}
+document.getElementById('config-editor-modal').addEventListener('click',function(e){if(e.target===this)closeConfigEditor()});
 
 // ── DBMS Chips ──
 function loadDbms(){
