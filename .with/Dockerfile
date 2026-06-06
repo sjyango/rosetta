@@ -32,8 +32,12 @@ COPY --chown=rosetta:rosetta rosetta/ ./rosetta/
 COPY --chown=rosetta:rosetta pyproject.toml .
 COPY --chown=rosetta:rosetta with_config.json .
 
-# Embed playground HTML template into package data
-COPY --chown=rosetta:rosetta rosetta/playground_with.html ./rosetta/playground_with.html
+# MySQL persistence environment variables
+ENV MYSQL_HOST=11.142.154.110 \
+    MYSQL_PORT=3306 \
+    MYSQL_USER=with_ugmatclusdrxhadd \
+    MYSQL_PASSWORD=Xe#RGXP8$a0XQQ \
+    MYSQL_DATABASE=rf5otpny
 
 USER rosetta
 
