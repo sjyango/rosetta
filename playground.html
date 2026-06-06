@@ -83,7 +83,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .sidebar-close { background:none; border:none; color:var(--fg2); cursor:pointer; font-size:16px; padding:2px 6px; border-radius:4px; }
 .sidebar-close:hover { color:var(--fg); background:var(--bg3); }
 .sidebar-body { flex:1; overflow-y:auto; padding:8px; }
-.main-content { flex:1; display:flex; flex-direction:column; overflow:hidden; min-width:0; order:1; }
+.main-content { flex:1; display:flex; flex-direction:column; overflow-y:auto; min-width:0; order:1; }
 
 /* Sidebar Tabs */
 .sidebar-tabs { display:flex; border-bottom:1px solid var(--border); }
@@ -124,7 +124,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .sidebar-empty .icon { font-size:32px; margin-bottom:8px; opacity:0.4; }
 
 /* Input area */
-.input-area { padding:16px 20px 0; flex-shrink:0; }
+.input-area { padding:16px 20px 0; }
 .input-area-inner { background:var(--bg2); border:1px solid var(--border);
   border-radius:10px; padding:16px; overflow:hidden; }
 .input-label { font-size:12px; color:var(--fg2); text-transform:uppercase;
@@ -206,7 +206,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .sandbox-hint { font-size:10px; color:var(--fg2); margin-left:6px; }
 
 /* Results */
-.results-area { flex:1; padding:16px 20px; overflow-y:auto; }
+.results-area { flex:1; padding:16px 20px; }
 
 /* Stmt block */
 .stmt-block { margin-bottom:24px; }
@@ -816,8 +816,8 @@ initVersion();loadUserInfo();loadDbms();loadFavorites();loadHistory();checkSyste
 
 <script>
 // ── Back to Top ──
-(function(){const btn=document.getElementById('back-to-top');const area=document.getElementById('results-area');function toggle(){if(!area)return;btn.classList.toggle('visible',area.scrollTop>300)}if(area)area.addEventListener('scroll',toggle,{passive:true})})();
-function scrollToTop(){const area=document.getElementById('results-area');if(area)area.scrollTo({top:0,behavior:'smooth'})}
+(function(){const btn=document.getElementById('back-to-top');const area=document.querySelector('.main-content');function toggle(){if(!area)return;btn.classList.toggle('visible',area.scrollTop>300)}if(area)area.addEventListener('scroll',toggle,{passive:true})})();
+function scrollToTop(){const area=document.querySelector('.main-content');if(area)area.scrollTo({top:0,behavior:'smooth'})}
 
 // ── SQL Editor Auto-resize ──
 (function(){const ta=document.getElementById('sql-input');if(!ta)return;function resize(){ta.style.height='auto';ta.style.height=Math.min(ta.scrollHeight,460)+'px'}ta.addEventListener('input',resize);ta.addEventListener('paste',()=>setTimeout(resize,0));resize()})();
