@@ -261,7 +261,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 /* Results summary bar */
 .results-summary { display:flex; gap:8px; align-items:center; padding:8px 16px;
   background:var(--bg2); border:1px solid var(--border); border-radius:8px;
-  margin-bottom:14px; font-size:12px; font-weight:600; }
+  margin-bottom:14px; font-size:12px; font-weight:600;
+  position:sticky; top:0; z-index:10;
+  backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+  box-shadow:0 2px 12px rgba(0,0,0,0.3); }
 .summary-btn { display:inline-flex; align-items:center; gap:3px;
   background:none; border:1px solid transparent; border-radius:6px;
   padding:3px 8px; cursor:pointer; font-size:12px; font-weight:600; transition:all 0.15s; }
@@ -312,6 +315,20 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
   transition:opacity 0.3s; pointer-events:none; box-shadow:0 4px 20px rgba(0,0,0,0.4); }
 .toast-error { background:var(--red); }
 .toast-success { background:var(--green); }
+
+/* Back to Top */
+.back-to-top { position:fixed; bottom:28px; right:28px; width:42px; height:42px;
+  background:linear-gradient(135deg, var(--accent), #388bfd);
+  color:#fff; border:none; border-radius:50%; font-size:18px; cursor:pointer;
+  z-index:9998; opacity:0; transform:translateY(12px);
+  transition:opacity 0.3s,transform 0.3s,box-shadow 0.2s;
+  box-shadow:0 4px 16px rgba(31,111,235,0.35);
+  display:flex; align-items:center; justify-content:center;
+  pointer-events:none; }
+.back-to-top.visible { opacity:1; transform:translateY(0); pointer-events:auto; }
+.back-to-top:hover { transform:translateY(-2px); box-shadow:0 6px 24px rgba(31,111,235,0.5); }
+.back-to-top:active { transform:translateY(0); box-shadow:0 2px 8px rgba(31,111,235,0.3); }
+.back-to-top svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:2.5; stroke-linecap:round; stroke-linejoin:round; }
 
 /* EXPLAIN tabs */
 .explain-container { display:flex; flex-direction:column; max-height:350px; }
@@ -791,5 +808,16 @@ async function checkSystemHealth(){const el=document.getElementById('sys-status'
 // ── Init ──
 initVersion();loadUserInfo();loadDbms();loadFavorites();loadHistory();checkSystemHealth();
 </script>
+
+<button class="back-to-top" id="back-to-top" title="Back to top" onclick="scrollToTop()">
+  <svg viewBox="0 0 24 24"><polyline points="18 15 12 9 6 15"/></svg>
+</button>
+
+<script>
+// ── Back to Top ──
+(function(){const btn=document.getElementById('back-to-top');const area=document.getElementById('results-area');function toggle(){if(!area)return;btn.classList.toggle('visible',area.scrollTop>300)}if(area)area.addEventListener('scroll',toggle,{passive:true})})();
+function scrollToTop(){const area=document.getElementById('results-area');if(area)area.scrollTo({top:0,behavior:'smooth'})}
+</script>
+
 </body>
 </html>
