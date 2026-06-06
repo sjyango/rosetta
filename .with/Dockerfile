@@ -1,3 +1,4 @@
+# Multi-stage build for Rosetta Playground
 FROM python:3.11-slim AS base
 
 ENV PYTHONUNBUFFERED=1 \
@@ -7,42 +8,35 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# ---- Dependencies ----
-FROM base AS deps
-
+# Install system dependencies needed for pymysql
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Dependencies stage — install only production deps
+FROM base AS deps
+COPY pyproject.toml .
+RUN pip install --no-cache-dir pymysql rich prompt_toolkit oracledb
 
-# ---- Production ----
+# Runner stage
 FROM base AS runner
 
 # Create non-root user
 RUN useradd -m -u 1001 rosetta
 
-# Copy installed packages from deps
+# Copy installed packages from deps stage
 COPY --from=deps /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 
-# Copy application
-COPY --chown=rosetta:rosetta . .
+# Copy application source
+COPY --chown=rosetta:rosetta rosetta/ ./rosetta/
+COPY --chown=rosetta:rosetta pyproject.toml .
+COPY --chown=rosetta:rosetta with_config.json .
 
-# Create results directory
-RUN mkdir -p /app/results && chown rosetta:rosetta /app/results
+# Embed playground HTML template into package data
+COPY --chown=rosetta:rosetta rosetta/playground_with.html ./rosetta/playground_with.html
 
 USER rosetta
 
 EXPOSE 8000
 
-# Environment variables for With MySQL (history/favorites storage)
-ENV MYSQL_HOST=11.142.154.110 \
-    MYSQL_PORT=3306 \
-    MYSQL_USER=with_ugmatclusdrxhadd \
-    MYSQL_PASSWORD=Xe#RGXP8$a0XQQ \
-    MYSQL_DATABASE=rf5otpny \
-    ROSETTA_CONFIG=/app/with_config.json
-
-# Run playground server on port 8000 (With platform requirement)
-CMD ["python", "-m", "rosetta.playground_server", "--config", "/app/with_config.json", "--port", "8000", "--output-dir", "/app/results"]
+CMD ["python3", "-m", "rosetta.playground_server", "--config", "with_config.json", "--port", "8000"]

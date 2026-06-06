@@ -213,6 +213,9 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
         if self.path == "/api/favorites":
             self._handle_favorites_list()
             return
+        if self.path == "/api/health":
+            self._handle_health_check()
+            return
         super().do_GET()
 
     # ── POST ──────────────────────────────────────────────────────────
@@ -499,6 +502,51 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             self._respond_json({"ok": True, "success": True, "version": str(version)})
         except Exception as e:
             self._respond_json({"ok": True, "success": False, "error": str(e)})
+
+    # ── API: Health ──────────────────────────────────────────────────
+
+    def _handle_health_check(self):
+        """GET /api/health — check if the system is functional.
+        Tests connectivity to at least one enabled DBMS."""
+        from importlib.metadata import version as _get_version
+        try:
+            _version = _get_version("rosetta-sql")
+        except Exception:
+            _version = "1.5.1"
+        # Collect enabled active configs
+        active_configs = [c for c in self._all_configs
+                          if getattr(c, "enabled", True)]
+        if not active_configs:
+            self._respond_json({"ok": True, "status": "unhealthy",
+                                "reason": "No enabled DBMS", "version": _version})
+            return
+
+        # Try to connect to at least one enabled DBMS
+        import pymysql
+        connected_count = 0
+        for c in active_configs:
+            try:
+                conn = pymysql.connect(
+                    host=c.host, port=c.port, user=c.user,
+                    password=c.password,
+                    charset="utf8mb4", connect_timeout=3,
+                )
+                conn.ping(reconnect=False)
+                conn.close()
+                connected_count += 1
+            except Exception:
+                pass
+
+        if connected_count > 0:
+            self._respond_json({"ok": True, "status": "healthy",
+                                "connected": connected_count,
+                                "total": len(active_configs),
+                                "version": _version})
+        else:
+            self._respond_json({"ok": True, "status": "unhealthy",
+                                "reason": "No DBMS reachable",
+                                "total": len(active_configs),
+                                "version": _version})
 
     # ── API: History ──────────────────────────────────────────────────
 
@@ -1203,11 +1251,17 @@ class PlaygroundServer:
                         "source": "builtin",
                     })
                 dbms_json = json.dumps(dbms_list, ensure_ascii=False)
+                from importlib.metadata import version as _get_version
+                try:
+                    _version = _get_version("rosetta-sql")
+                except Exception:
+                    _version = "1.5.1"
                 embedded = (
                     "var EMBEDDED_DBMS=" + dbms_json + ";"
                     "var EMBEDDED_DATABASE=" + json.dumps(self.database or "", ensure_ascii=False) + ";"
                     "var EMBEDDED_BASELINE=" + json.dumps(self.baseline or "", ensure_ascii=False) + ";"
-                    "var EMBEDDED_TRACELESS=" + json.dumps(self.traceless) + ";\n"
+                    "var EMBEDDED_TRACELESS=" + json.dumps(self.traceless) + ";"
+                    "var EMBEDDED_VERSION=" + json.dumps(_version, ensure_ascii=False) + ";\n"
                 )
                 html = html.replace("<script>\n", "<script>\n" + embedded, 1)
                 with open(_dst_html, "w", encoding="utf-8") as f:
