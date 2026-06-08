@@ -711,7 +711,7 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
                 break
         if config is None:
             user = self._get_user()
-            eng_name = user.get("eng_name", "anonymous")
+            eng_name = user.get("eng_name", "") or "anonymous"
             customs = self._load_custom_dbms(eng_name)
             for cc in customs:
                 if cc["name"] == name:
