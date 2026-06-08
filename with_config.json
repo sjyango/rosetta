@@ -73,31 +73,18 @@
     },
     {
       "_comment": "──── ⬜ 预留: Oracle ────",
-      "name": "oracle",
+      "name": "oracle19c",
       "type": "oracle",
-      "host": "21.6.101.185",
+      "host": "9.135.63.213",
       "port": 1521,
-      "user": "test_user",
-      "password": "",
+      "user": "lyd",
+      "password": "Tencent_123",
       "driver": "oracledb",
       "service_name": "orclpdb1",
       "skip_patterns": [],
       "init_sql": [
         "ALTER SESSION SET NLS_DATE_FORMAT='YYYY-MM-DD HH24:MI:SS'"
       ],
-      "enabled": false
-    },
-    {
-      "_comment": "──── ⬜ 预留: PostgreSQL ────",
-      "name": "postgres-15",
-      "type": "mysql",
-      "host": "21.6.101.185",
-      "port": 5432,
-      "user": "postgres",
-      "password": "",
-      "driver": "pymysql",
-      "skip_patterns": [],
-      "init_sql": [],
       "enabled": false
     }
   ]
