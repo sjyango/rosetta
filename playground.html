@@ -812,7 +812,7 @@ document.getElementById('sql-input').addEventListener('keydown',e=>{if((e.ctrlKe
 
 // ── Version & Health ──
 function initVersion(){const tag=document.getElementById('version-tag');if(tag&&typeof EMBEDDED_VERSION!=='undefined')tag.textContent='v'+EMBEDDED_VERSION}
-async function checkSystemHealth(){const el=document.getElementById('sys-status');if(!el)return;el.className='sys-status checking';el.innerHTML='<span class="status-dot"></span> Checking';try{const r=await apiCall('GET','/api/health');if(r.ok&&r.status==='healthy'){el.className='sys-status healthy';el.title='System operational — '+r.connected+'/'+r.total+' DBMS reachable';el.innerHTML='<span class="status-dot"></span> Normal'}else{el.className='sys-status unhealthy';el.title=r.reason||'DBMS unreachable';el.innerHTML='<span class="status-dot"></span> Degraded'}}catch(e){el.className='sys-status unhealthy';el.title='Health check failed: '+e.message;el.innerHTML='<span class="status-dot"></span> Unreachable'}}
+async function checkSystemHealth(){const el=document.getElementById('sys-status');if(!el)return;el.className='sys-status checking';el.innerHTML='<span class="status-dot"></span> 检测中';try{const r=await apiCall('GET','/api/health');if(r.ok&&r.status==='healthy'){el.className='sys-status healthy';el.title='系统运行正常 — '+r.connected+'/'+r.total+' 数据库可达';el.innerHTML='<span class="status-dot"></span> 运行正常'}else{el.className='sys-status unhealthy';el.title=r.reason||'部分数据库不可达';el.innerHTML='<span class="status-dot"></span> 部分异常'}}catch(e){el.className='sys-status unhealthy';el.title='健康检查失败: '+e.message;el.innerHTML='<span class="status-dot"></span> 无法连接'}}
 
 // ── Init ──
 initVersion();loadUserInfo();loadDbms();loadFavorites();loadHistory();checkSystemHealth();

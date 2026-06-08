@@ -77,7 +77,7 @@
       "type": "oracle",
       "host": "9.135.63.213",
       "port": 1521,
-      "user": "lyd",
+      "user": "root",
       "password": "Tencent_123",
       "driver": "oracledb",
       "service_name": "orclpdb1",
