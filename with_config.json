@@ -5,12 +5,10 @@
   "_comment4": " With 容器通过 TCP 远程连接执行 SQL 并比对 diff",
   "_comment5": " 实测验证时间: 2026-06-04",
   "_comment6": "══════════════════════════════════════════════════════════════",
-
   "playground": {
     "traceless": true,
     "_note": "每次执行后自动清理临时数据库，不留痕迹"
   },
-
   "databases": [
     {
       "_comment": "──── ✅ 已验证: MySQL 9.6.0 ────",
@@ -33,7 +31,7 @@
       "name": "txsql-8.0",
       "type": "mysql",
       "host": "21.6.101.185",
-      "port": 11886,
+      "port": 3307,
       "user": "root",
       "password": "",
       "driver": "pymysql",
@@ -47,20 +45,23 @@
     {
       "_comment": "──── ✅ 已验证: TiDB 8.5.6 ────",
       "name": "tidb-8.5",
-      "type": "tidb",
+      "type": "mysql",
       "host": "21.6.101.185",
       "port": 4000,
       "user": "root",
       "password": "",
       "driver": "pymysql",
-      "skip_patterns": ["tdsql_", "ddl_recovery"],
+      "skip_patterns": [
+        "tdsql_",
+        "ddl_recovery"
+      ],
       "init_sql": [],
       "enabled": true
     },
     {
       "_comment": "──── ⚠ OceanBase 待修复认证 ────",
       "name": "oceanbase",
-      "type": "oceanbase",
+      "type": "mysql",
       "host": "21.6.101.185",
       "port": 2881,
       "user": "root",
