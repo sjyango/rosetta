@@ -139,6 +139,22 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
     _active_connections_lock: threading.Lock = threading.Lock()
 
     @classmethod
+    def _reload_configs(cls):
+        """Re-read config file and update class-level config caches."""
+        if not cls._config_path:
+            return
+        if os.path.isfile(cls._config_path):
+            from .config import load_config
+            try:
+                new_all = load_config(cls._config_path)
+                cls._all_configs = new_all
+                cls._configs = [c for c in new_all if c.enabled]
+                log.debug("Configs reloaded from %s: %d total, %d enabled",
+                          cls._config_path, len(new_all), len(cls._configs))
+            except Exception as e:
+                log.warning("Failed to reload configs: %s", e)
+
+    @classmethod
     def _cleanup_connections(cls):
         with cls._active_connections_lock:
             for db in cls._active_connections:
@@ -222,6 +238,9 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/config/raw":
             self._handle_config_raw_get()
             return
+        if path == "/playground.html":
+            self._serve_playground_html()
+            return
         super().do_GET()
 
     # ── POST ──────────────────────────────────────────────────────────
@@ -278,6 +297,81 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
     def _handle_user_info(self):
         user = self._get_user()
         self._respond_json({"ok": True, "user": user})
+
+    # ── Serve Playground HTML (dynamic config injection) ───────────────
+
+    def _serve_playground_html(self):
+        """Serve playground.html with live config injected (not stale baked data).
+
+        On every page load, re-reads the config file and injects the latest
+        DBMS list into the HTML response, so refreshing the page always
+        reflects the current with_config.json state.
+        """
+        import re
+        cls = type(self)
+        cls._reload_configs()
+
+        _pkg_dir = os.path.dirname(os.path.abspath(__file__))
+        _src_html = os.path.join(_pkg_dir, "playground_with.html")
+        if not os.path.exists(_src_html):
+            self.send_error(404)
+            return
+
+        try:
+            with open(_src_html, "r", encoding="utf-8") as f:
+                html = f.read()
+        except Exception as e:
+            self.send_error(500)
+            return
+
+        # Strip any stale EMBEDDED_xxx lines left over from previous bakes
+        html = re.sub(
+            r'\n?var EMBEDDED_DBMS=.*?;var EMBEDDED_DATABASE=.*?;'
+            r'var EMBEDDED_BASELINE=.*?;var EMBEDDED_TRACELESS=.*?;'
+            r'(?:var EMBEDDED_VERSION=.*?;)?\n?',
+            '', html, count=1
+        )
+
+        # Build fresh config JSON
+        active_names = {c.name for c in cls._configs}
+        dbms_list = []
+        for c in cls._all_configs:
+            dbms_list.append({
+                "name": c.name, "host": c.host, "port": c.port,
+                "active": c.name in active_names, "enabled": c.enabled,
+                "type": getattr(c, "protocol", "mysql"),
+                "database": getattr(c, "service_name", ""),
+                "source": "builtin",
+            })
+        dbms_json = json.dumps(dbms_list, ensure_ascii=False)
+
+        from importlib.metadata import version as _get_version
+        try:
+            _version = _get_version("rosetta-sql")
+        except Exception:
+            _version = "1.5.1"
+
+        embedded = (
+            "var EMBEDDED_DBMS=" + dbms_json + ";"
+            "var EMBEDDED_DATABASE=" + json.dumps(cls._database or "", ensure_ascii=False) + ";"
+            "var EMBEDDED_BASELINE=" + json.dumps(cls._baseline or "", ensure_ascii=False) + ";"
+            "var EMBEDDED_TRACELESS=" + json.dumps(cls._traceless) + ";"
+            "var EMBEDDED_VERSION=" + json.dumps(_version, ensure_ascii=False) + ";\n"
+        )
+        # Inject after the first opening <script> tag
+        html = html.replace("<script>\n", "<script>\n" + embedded, 1)
+
+        payload = html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self._send_cors_headers()
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        try:
+            self.wfile.write(payload)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
     # ── API: DBMS List ────────────────────────────────────────────────
 
@@ -553,7 +647,12 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             self._respond_json({"ok": False, "error": f"Failed to save: {e}"}, 500)
 
     def _handle_dbms_list(self):
-        """GET /api/dbms — list all DBMS (built-in + custom merged)."""
+        """GET /api/dbms — list all DBMS (built-in + custom merged).
+
+        Re-reads config file on each request to reflect live edits.
+        """
+        cls = type(self)
+        cls._reload_configs()
         active_names = {c.name for c in self._configs}
         dbms_list = [{"name": c.name, "host": c.host, "port": c.port,
                       "active": c.name in active_names, "enabled": c.enabled,
