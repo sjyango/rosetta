@@ -47,7 +47,7 @@
     {
       "_comment": "──── ✅ 已验证: TiDB 8.5.6 ────",
       "name": "tidb-8.5",
-      "type": "tidb",
+      "type": "mysql",
       "host": "21.6.101.185",
       "port": 4000,
       "user": "root",
@@ -60,7 +60,7 @@
     {
       "_comment": "──── ⚠ OceanBase 待修复认证 ────",
       "name": "oceanbase",
-      "type": "oceanbase",
+      "type": "mysql",
       "host": "21.6.101.185",
       "port": 2881,
       "user": "root",
@@ -84,19 +84,6 @@
       "init_sql": [
         "ALTER SESSION SET NLS_DATE_FORMAT='YYYY-MM-DD HH24:MI:SS'"
       ],
-      "enabled": false
-    },
-    {
-      "_comment": "──── ⬜ 预留: PostgreSQL ────",
-      "name": "postgres-15",
-      "type": "mysql",
-      "host": "21.6.101.185",
-      "port": 5432,
-      "user": "postgres",
-      "password": "",
-      "driver": "pymysql",
-      "skip_patterns": [],
-      "init_sql": [],
       "enabled": false
     }
   ]
