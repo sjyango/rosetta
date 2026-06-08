@@ -58,8 +58,8 @@
       "enabled": true,
       "restart": {
         "enabled": true,
-        "service": "txsqld",
-        "command": "systemctl restart txsqld"
+        "service": "txsql",
+        "command": "/usr/local/mysql/bin/mysqld --user=root --port=3307 --socket=/tmp/mysql_txsql.sock --datadir=/usr/local/mysql/data --pid-file=/usr/local/mysql/data/mysqld.pid --daemonize"
       }
     },
     {
