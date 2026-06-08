@@ -179,8 +179,24 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
 
     @classmethod
     def _get_all_configs_map(cls) -> dict:
-        """Return a mapping of config name -> config object for all DBMS."""
-        return {c.name: c for c in cls._all_configs}
+        """Return a mapping of config name -> DBMSConfig object for all DBMS (built-in + custom)."""
+        from .models import DBMSConfig
+        result = {c.name: c for c in cls._all_configs}
+        # Merge custom DBMS from MySQL
+        customs = cls._load_all_custom_dbms()
+        for cc in customs:
+            if cc["name"] not in result:
+                result[cc["name"]] = DBMSConfig(
+                    name=cc["name"],
+                    host=cc["host"],
+                    port=cc["port"],
+                    user=cc["user"],
+                    password=cc["password"],
+                    protocol=cc.get("protocol", "mysql"),
+                    enabled=cc.get("enabled", True),
+                    restart=cc.get("restart", {}),
+                )
+        return result
 
     def log_message(self, format, *args):
         pass  # suppress
