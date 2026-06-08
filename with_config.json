@@ -64,12 +64,12 @@
       "type": "mysql",
       "host": "21.6.101.185",
       "port": 2881,
-      "user": "root@sys",
+      "user": "root",
       "password": "Root@2026",
       "driver": "pymysql",
       "skip_patterns": [],
       "init_sql": [],
-      "enabled": false
+      "enabled": true
     },
     {
       "_comment": "──── ⬜ 预留: Oracle ────",
