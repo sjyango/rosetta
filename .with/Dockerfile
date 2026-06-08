@@ -8,15 +8,10 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Install system dependencies needed for pymysql
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
 # Dependencies stage — install only production deps
 FROM base AS deps
 COPY pyproject.toml .
-RUN pip install --no-cache-dir pymysql rich prompt_toolkit oracledb
+RUN pip install --no-cache-dir pymysql rich prompt_toolkit
 
 # Runner stage
 FROM base AS runner
@@ -43,4 +38,4 @@ USER rosetta
 
 EXPOSE 8000
 
-CMD ["python3", "-m", "rosetta.playground_server", "--config", "with_config.json", "--port", "8000"]
+CMD ["python3", "-m", "rosetta.playground_server", "--config", "with_config.json", "--port", "8000", "--output-dir", "/app/results"]
