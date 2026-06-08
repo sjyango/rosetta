@@ -678,7 +678,7 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
                      for c in self._all_configs]
         # Merge custom configs
         user = self._get_user()
-        eng_name = user.get("eng_name", "anonymous")
+        eng_name = user.get("eng_name", "") or "anonymous"
         custom_configs = self._load_custom_dbms(eng_name)
         for cc in custom_configs:
             dbms_list.append({
@@ -1290,7 +1290,7 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
 
     def _handle_history_delete(self, hist_id: str):
         user = self._get_user()
-        eng_name = user.get("eng_name", "anonymous")
+        eng_name = user.get("eng_name", "") or "anonymous"
         try:
             _db_execute(
                 "DELETE FROM sql_history WHERE id = %s AND user_name = %s",
@@ -1396,7 +1396,7 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
 
     def _handle_favorites_delete(self, fav_id: str):
         user = self._get_user()
-        eng_name = user.get("eng_name", "anonymous")
+        eng_name = user.get("eng_name", "") or "anonymous"
         try:
             _db_execute(
                 "DELETE FROM sql_favorites WHERE id = %s AND user_name = %s",
