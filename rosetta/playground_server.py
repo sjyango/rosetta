@@ -417,11 +417,17 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
                     database_name VARCHAR(128) DEFAULT '',
                     owner VARCHAR(128) NOT NULL DEFAULT '',
                     enabled TINYINT(1) NOT NULL DEFAULT 1,
+                    restart_cmd VARCHAR(512) DEFAULT '',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     UNIQUE KEY uk_owner_name (owner, name)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """)
+            # Add restart_cmd column if not exists (for existing tables)
+            try:
+                cursor.execute("ALTER TABLE custom_dbms ADD COLUMN restart_cmd VARCHAR(512) DEFAULT ''")
+            except Exception:
+                pass  # column already exists
             cursor.close()
         except Exception as e:
             log.error("Failed to ensure custom_dbms table: %s", e)
@@ -495,13 +501,17 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             cursor = db.cursor()
             cursor.execute(
                 "SELECT id, name, protocol, host, port, username, password, "
-                "database_name, enabled FROM custom_dbms WHERE owner=%s ORDER BY name",
+                "database_name, enabled, COALESCE(restart_cmd,'') FROM custom_dbms "
+                "WHERE owner=%s ORDER BY name",
                 (eng_name,)
             )
             rows = cursor.fetchall()
             cursor.close()
             result = []
             for r in rows:
+                restart_dict = {}
+                if r[9]:
+                    restart_dict = {"enabled": True, "command": r[9]}
                 result.append({
                     "custom_id": r[0],
                     "name": r[1],
@@ -512,6 +522,7 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
                     "password": r[6],
                     "database": r[7] or "",
                     "enabled": bool(r[8]),
+                    "restart": restart_dict,
                 })
             return result
         except Exception as e:
@@ -536,6 +547,7 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
         password = body.get("password", "")
         database_name = body.get("database", "")
         enabled = 1 if body.get("enabled", True) else 0
+        restart_cmd = body.get("restart_cmd", "") or ""
 
         type(self)._ensure_custom_dbms_table()
         db = _get_db()
@@ -553,10 +565,10 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             if existing:
                 cursor.execute(
                     "UPDATE custom_dbms SET protocol=%s, host=%s, port=%s, "
-                    "username=%s, password=%s, database_name=%s, enabled=%s "
-                    "WHERE id=%s",
+                    "username=%s, password=%s, database_name=%s, enabled=%s, "
+                    "restart_cmd=%s WHERE id=%s",
                     (protocol, host, port, username, password, database_name,
-                     enabled, existing[0])
+                     enabled, restart_cmd, existing[0])
                 )
                 cursor.close()
                 self._respond_json({"ok": True, "action": "updated",
@@ -564,10 +576,10 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             else:
                 cursor.execute(
                     "INSERT INTO custom_dbms (name, protocol, host, port, "
-                    "username, password, database_name, owner, enabled) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    "username, password, database_name, owner, enabled, restart_cmd) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     (name, protocol, host, port, username, password,
-                     database_name, eng_name, enabled)
+                     database_name, eng_name, enabled, restart_cmd)
                 )
                 new_id = cursor.lastrowid
                 cursor.close()
@@ -787,15 +799,16 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
     # ── API: Per-DBMS Health ─────────────────────────────────────────
 
     def _handle_per_dbms_health(self):
-        """GET /api/dbms/health — check health of all enabled DBMS individually.
-
-        Returns per-DBMS status including: connected, host, port, version,
-        latency, restart_available, restart_in_progress.
-        """
+        """GET /api/dbms/health — check health of all enabled DBMS (built-in + custom)."""
         cls = type(self)
         cls._reload_configs()
-        active_configs = [c for c in cls._all_configs if getattr(c, "enabled", True)]
-        if not active_configs:
+        builtin = [c for c in cls._all_configs if getattr(c, "enabled", True)]
+        # Also include custom DBMS from MySQL
+        customs = cls._load_all_custom_dbms()
+        all_configs = list(builtin)
+        all_configs.extend(customs)
+
+        if not all_configs:
             self._respond_json({"ok": True, "dbms": [], "total": 0,
                                 "healthy": 0, "unhealthy": 0})
             return
@@ -806,15 +819,16 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
         def _check_one(cfg):
             import pymysql
             start = _time.time()
-            name = cfg.name
-            host = cfg.host
-            port = cfg.port
-            restart_cfg = getattr(cfg, "restart", None) or {}
+            name = cfg["name"] if isinstance(cfg, dict) else cfg.name
+            host = cfg["host"] if isinstance(cfg, dict) else cfg.host
+            port = cfg["port"] if isinstance(cfg, dict) else cfg.port
+            user = cfg["user"] if isinstance(cfg, dict) else cfg.user
+            password = cfg["password"] if isinstance(cfg, dict) else cfg.password
+            restart_cfg = cfg.get("restart", {}) if isinstance(cfg, dict) else (getattr(cfg, "restart", None) or {})
             restart_available = bool(restart_cfg.get("enabled") and restart_cfg.get("command"))
             with cls._restart_lock:
                 restart_in_progress = cls._restart_in_progress.get(name, False)
 
-            # Check port reachability quickly
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(2)
@@ -838,8 +852,8 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             if port_ok:
                 try:
                     conn = pymysql.connect(
-                        host=host, port=port, user=cfg.user,
-                        password=cfg.password,
+                        host=host, port=port, user=user,
+                        password=password,
                         charset="utf8mb4", connect_timeout=3,
                     )
                     cur = conn.cursor()
@@ -855,13 +869,12 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             else:
                 result["error"] = "Port unreachable"
 
-            # Update class-level cache
             with cls._health_lock:
                 cls._health_status[name] = result
             return result
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(active_configs)) as pool:
-            futs = [pool.submit(_check_one, c) for c in active_configs]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(all_configs)) as pool:
+            futs = [pool.submit(_check_one, c) for c in all_configs]
             for fut in concurrent.futures.as_completed(futs):
                 try:
                     dbms_list.append(fut.result())
@@ -953,18 +966,25 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
 
         cls = type(self)
 
-        # Find config
+        # Find config (built-in first, then custom)
         cfg = None
         for c in cls._all_configs:
             if c.name == name:
                 cfg = c
                 break
+        if cfg is None:
+            # Try custom DBMS from MySQL
+            customs = cls._load_all_custom_dbms()
+            for cc in customs:
+                if cc["name"] == name:
+                    cfg = cc  # dict
+                    break
 
         if cfg is None:
             self._respond_json({"ok": False, "error": f"Unknown DBMS: {name}"}, 404)
             return
 
-        restart_cfg = getattr(cfg, "restart", None) or {}
+        restart_cfg = cfg.get("restart", {}) if isinstance(cfg, dict) else (getattr(cfg, "restart", None) or {})
         if not restart_cfg.get("enabled"):
             self._respond_json({"ok": False,
                                 "error": f"Restart not configured for {name}"}, 400)
@@ -997,6 +1017,10 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             cmd,
         ]
 
+        # Get host/port from config (supports both DBMSConfig obj and dict)
+        cfg_host = cfg["host"] if isinstance(cfg, dict) else cfg.host
+        cfg_port = cfg["port"] if isinstance(cfg, dict) else cfg.port
+
         try:
             result = subprocess.run(
                 ssh_cmd, capture_output=True, text=True,
@@ -1012,7 +1036,7 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(5)
-                s.connect((cfg.host, cfg.port))
+                s.connect((cfg_host, cfg_port))
                 s.close()
                 port_ok = True
             except Exception:
@@ -1021,7 +1045,7 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             # Update health cache
             with cls._health_lock:
                 cls._health_status[name] = {
-                    "name": name, "host": cfg.host, "port": cfg.port,
+                    "name": name, "host": cfg_host, "port": cfg_port,
                     "port_reachable": port_ok, "connected": port_ok,
                     "version": None, "latency_ms": 0,
                     "restart_available": True, "restart_in_progress": False,
@@ -1111,31 +1135,40 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
 
     @classmethod
     def _run_health_scan(cls, auto_restart: bool = True, max_retries: int = 3):
-        """Run a single health scan of all enabled DBMS.
+        """Run a single health scan of all enabled DBMS (built-in + custom).
 
         If auto_restart is True, attempt to restart any unhealthy DBMS.
         """
         cls._reload_configs()
-        active = [c for c in cls._all_configs if getattr(c, "enabled", True)]
-        if not active:
+        builtin = [c for c in cls._all_configs if getattr(c, "enabled", True)]
+        # Also load custom DBMS from MySQL
+        customs = cls._load_all_custom_dbms()
+        all_targets = list(builtin)
+        all_targets.extend(customs)
+
+        if not all_targets:
             return
 
         import concurrent.futures
 
         def _check_one(cfg):
             import pymysql
-            name = cfg.name
+            name = cfg["name"]
+            host = cfg["host"]
+            port = cfg["port"]
+            user = cfg["user"]
+            password = cfg["password"]
             connected = False
             version = None
             error = None
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(2)
-                s.connect((cfg.host, cfg.port))
+                s.connect((host, port))
                 s.close()
                 conn = pymysql.connect(
-                    host=cfg.host, port=cfg.port, user=cfg.user,
-                    password=cfg.password, charset="utf8mb4", connect_timeout=3,
+                    host=host, port=port, user=user,
+                    password=password, charset="utf8mb4", connect_timeout=3,
                 )
                 cur = conn.cursor()
                 cur.execute("SELECT VERSION()")
@@ -1146,32 +1179,32 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
                 connected = True
             except Exception as e:
                 error = str(e)[:200]
-            return name, connected, version, error
+            return name, connected, version, error, cfg
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(active)) as pool:
-            futs = [pool.submit(_check_one, c) for c in active]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(all_targets)) as pool:
+            futs = [pool.submit(_check_one, c) for c in all_targets]
             for fut in concurrent.futures.as_completed(futs):
                 try:
-                    name, connected, version, error = fut.result()
+                    name, connected, version, error, cfg = fut.result()
                 except Exception:
                     continue
 
-                cfg = next((c for c in active if c.name == name), None)
-                if cfg is None:
-                    continue
-
-                restart_cfg = getattr(cfg, "restart", None) or {}
+                restart_cfg = cfg.get("restart", {}) or {}
                 restart_avail = bool(restart_cfg.get("enabled") and restart_cfg.get("command"))
 
                 with cls._health_lock:
                     cls._health_status[name] = {
-                        "name": name, "host": cfg.host, "port": cfg.port,
+                        "name": name, "host": cfg["host"], "port": cfg["port"],
                         "port_reachable": connected, "connected": connected,
                         "version": version, "latency_ms": 0,
                         "restart_available": restart_avail,
                         "restart_in_progress": cls._restart_in_progress.get(name, False),
                         "error": error,
                     }
+
+                # Reset retry if recovered
+                if connected:
+                    cls._restart_retry_count[name] = 0
 
                 # Auto-restart if down
                 if not connected and auto_restart and restart_avail:
@@ -1209,6 +1242,45 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
                     finally:
                         with cls._restart_lock:
                             cls._restart_in_progress[name] = False
+
+    @classmethod
+    def _load_all_custom_dbms(cls) -> list:
+        """Load ALL custom DBMS configs from MySQL (for health monitoring).
+
+        Returns a list of dicts with keys: name, host, port, user, password, restart.
+        """
+        db = _get_db()
+        if db is None:
+            return []
+        try:
+            cls._ensure_custom_dbms_table()
+            cursor = db.cursor()
+            cursor.execute(
+                "SELECT name, protocol, host, port, username, password, enabled, "
+                "COALESCE(restart_cmd,'') FROM custom_dbms WHERE enabled=1 ORDER BY name"
+            )
+            rows = cursor.fetchall()
+            cursor.close()
+            result = []
+            for r in rows:
+                restart_dict = {}
+                if r[7]:  # restart_cmd
+                    restart_dict = {"enabled": True, "command": r[7]}
+                result.append({
+                    "name": r[0],
+                    "protocol": r[1] or "mysql",
+                    "host": r[2],
+                    "port": r[3],
+                    "user": r[4],
+                    "password": r[5] or "",
+                    "enabled": bool(r[6]),
+                    "restart": restart_dict,
+                    "source": "custom",
+                })
+            return result
+        except Exception as e:
+            log.error("Failed to load all custom DBMS for health scan: %s", e)
+            return []
 
     @classmethod
     def _load_health_monitor_config(cls, config_path: str):

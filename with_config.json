@@ -12,7 +12,7 @@
   "health_monitor": {
     "_comment": "定期扫描各DBMS健康状态，自动拉起挂掉的实例",
     "enabled": true,
-    "interval_seconds": 30,
+    "interval_seconds": 60,
     "auto_restart": true,
     "max_retries": 3,
     "ssh_host": "21.6.101.185",
