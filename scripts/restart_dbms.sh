@@ -17,7 +17,7 @@ SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o Connect
 # 格式: name|port|service_command
 declare -A DBMS_MAP
 DBMS_MAP=(
-    ["mysql-9.6"]="3306|systemctl restart mysqld"
+    ["mysql-9.6"]="3306|pkill -9 mysqld; /usr/sbin/mysqld --user=mysql --daemonize"
     ["txsql-8.0"]="3307|systemctl restart txsqld"
     ["tidb-8.5"]="4000|systemctl restart tidb"
     ["oceanbase"]="2881|su - admin -c 'obd cluster restart obcluster'"

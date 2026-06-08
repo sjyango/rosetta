@@ -38,7 +38,7 @@
       "restart": {
         "enabled": true,
         "service": "mysqld",
-        "command": "systemctl restart mysqld"
+        "command": "pkill -9 mysqld; /usr/sbin/mysqld --user=mysql --daemonize"
       }
     },
     {
