@@ -138,13 +138,6 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
     _active_connections: list = []
     _active_connections_lock: threading.Lock = threading.Lock()
 
-    # Auto-monitoring of DBMS instances
-    _monitor_thread: threading.Thread = None
-    _monitor_running: bool = False
-    _monitor_interval: int = 30  # seconds between checks
-    _restart_status: dict = {}    # name -> "success"|"failed"|"restarting"
-    _restart_lock: threading.Lock = threading.Lock()
-
     @classmethod
     def _reload_configs(cls):
         """Re-read config file and update class-level config caches."""
@@ -176,91 +169,6 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
         """Return a mapping of config name -> config object for all DBMS."""
         return {c.name: c for c in cls._all_configs}
 
-    @classmethod
-    def start_dbms_monitor(cls, interval: int = 30):
-        """Start a background thread that periodically checks enabled DBMS
-        and auto-restarts any down instances."""
-        if cls._monitor_running:
-            return
-        cls._monitor_interval = interval
-        cls._monitor_running = True
-        cls._monitor_thread = threading.Thread(
-            target=cls._monitor_loop, daemon=True, name="dbms-monitor")
-        cls._monitor_thread.start()
-        log.info("DBMS monitor started (interval=%ds)", interval)
-
-    @classmethod
-    def stop_dbms_monitor(cls):
-        """Stop the background DBMS monitor thread."""
-        cls._monitor_running = False
-        if cls._monitor_thread and cls._monitor_thread.is_alive():
-            cls._monitor_thread.join(timeout=5)
-        log.info("DBMS monitor stopped")
-
-    @classmethod
-    def _monitor_loop(cls):
-        """Main loop for the DBMS auto-monitor thread."""
-        from .executor import check_port
-        import subprocess as _subprocess
-        log.info("DBMS monitor loop started")
-        while cls._monitor_running:
-            try:
-                # Reload configs in case file changed
-                cls._reload_configs()
-                enabled_configs = [c for c in cls._all_configs
-                                   if getattr(c, "enabled", True)]
-                for cfg in enabled_configs:
-                    if not cls._monitor_running:
-                        break
-                    name = cfg.name
-                    # Skip if already being restarted manually
-                    with cls._restart_lock:
-                        if cls._restart_status.get(name) == "restarting":
-                            continue
-                    # Check if port is reachable
-                    if check_port(cfg.host, cfg.port, timeout=3.0):
-                        continue  # all good
-                    # Port down — try restart
-                    restart_cmd = getattr(cfg, "restart_cmd", "")
-                    if not restart_cmd or restart_cmd.startswith("echo 'AUTO-RESTART"):
-                        continue  # no real restart command configured
-                    log.warning("[monitor] %s is DOWN — attempting auto-restart", name)
-                    with cls._restart_lock:
-                        cls._restart_status[name] = "restarting"
-                    try:
-                        _subprocess.run(
-                            restart_cmd, shell=True, timeout=60, check=False,
-                            stdout=_subprocess.PIPE, stderr=_subprocess.PIPE,
-                        )
-                        recovered = False
-                        for i in range(10):
-                            _time.sleep(3)
-                            if check_port(cfg.host, cfg.port, timeout=3.0):
-                                recovered = True
-                                break
-                        with cls._restart_lock:
-                            cls._restart_status[name] = "success" if recovered else "failed"
-                            if not recovered:
-                                cls._restart_status[name + "_error"] = "Auto-restart: service unreachable after 30s"
-                        if recovered:
-                            log.info("[monitor] %s auto-restarted successfully", name)
-                        else:
-                            log.error("[monitor] %s auto-restart failed to bring service up", name)
-                    except Exception as e:
-                        with cls._restart_lock:
-                            cls._restart_status[name] = "failed"
-                            cls._restart_status[name + "_error"] = str(e)
-                        log.error("[monitor] %s auto-restart error: %s", name, e)
-
-            except Exception as e:
-                log.error("[monitor] Error in monitor loop: %s", e)
-
-            # Sleep between full scan cycles
-            for _ in range(cls._monitor_interval):
-                if not cls._monitor_running:
-                    break
-                _time.sleep(1)
-
     def log_message(self, format, *args):
         pass  # suppress
 
@@ -268,7 +176,6 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
         self.send_header("Pragma", "no-cache")
         self.send_header("Expires", "0")
-        self._send_cors_headers()
         super().end_headers()
 
     def _send_cors_headers(self):
@@ -331,9 +238,6 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/config/raw":
             self._handle_config_raw_get()
             return
-        if path == "/api/dbms/restart/status":
-            self._handle_dbms_restart_status()
-            return
         if path == "/playground.html":
             self._serve_playground_html()
             return
@@ -362,9 +266,6 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
         if self.path == "/api/dbms/test":
             self._handle_dbms_test()
-            return
-        if self.path == "/api/dbms/restart":
-            self._handle_dbms_restart()
             return
         if self.path == "/api/dbms/custom/save":
             self._handle_custom_dbms_save()
@@ -821,88 +722,6 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             self._respond_json({"ok": True, "success": True, "version": str(version)})
         except Exception as e:
             self._respond_json({"ok": True, "success": False, "error": str(e)})
-
-    def _handle_dbms_restart(self):
-        """POST /api/dbms/restart — restart a DBMS instance via restart_cmd.
-        Runs the restart asynchronously and responds immediately."""
-        body = self._read_json()
-        name = body.get("name", "").strip()
-        if not name:
-            self._respond_json({"ok": False, "error": "Missing 'name'"}, 400)
-            return
-
-        cls = type(self)
-        cls._reload_configs()
-
-        # Find config among all_configs
-        config = None
-        for c in cls._all_configs:
-            if c.name == name:
-                config = c
-                break
-
-        if config is None:
-            self._respond_json({"ok": False, "error": f"Unknown DBMS: {name}"}, 404)
-            return
-
-        restart_cmd = getattr(config, "restart_cmd", "")
-        if not restart_cmd:
-            self._respond_json({"ok": False, "error": f"No restart_cmd configured for {name}"}, 400)
-            return
-
-        # Check if already restarting
-        with cls._restart_lock:
-            if cls._restart_status.get(name) == "restarting":
-                self._respond_json({"ok": True, "action": "restart",
-                                    "name": name, "status": "already_restarting",
-                                    "message": f"{name} is already being restarted"})
-                return
-            cls._restart_status[name] = "restarting"
-            cls._restart_status.pop(name + "_error", None)
-
-        # Start background restart thread
-        def _do_restart():
-            from .executor import check_port
-            import subprocess as _sp
-            try:
-                log.info("[restart] Starting restart for %s: %s", name, restart_cmd)
-                proc = _sp.run(
-                    restart_cmd, shell=True, timeout=60, check=False,
-                    stdout=_sp.PIPE, stderr=_sp.PIPE,
-                )
-                if proc.returncode != 0:
-                    stderr_text = proc.stderr.decode("utf-8", errors="replace").strip()
-                    log.warning("[restart] %s restart_cmd exited with code %d: %s",
-                               name, proc.returncode, stderr_text[-200:])
-
-                recovered = False
-                for attempt in range(10):
-                    _time.sleep(3)
-                    if check_port(config.host, config.port):
-                        recovered = True
-                        break
-                    log.info("[restart] %s waiting... (%d/10)", name, attempt + 1)
-
-                with cls._restart_lock:
-                    if recovered:
-                        cls._restart_status[name] = "success"
-                        cls._restart_status.pop(name + "_error", None)
-                        log.info("[restart] %s is back up!", name)
-                    else:
-                        cls._restart_status[name] = "failed"
-                        cls._restart_status[name + "_error"] = "Service did not come back within 30s"
-                        log.error("[restart] %s did not recover after restart", name)
-            except Exception as e:
-                with cls._restart_lock:
-                    cls._restart_status[name] = "failed"
-                    cls._restart_status[name + "_error"] = str(e)
-                log.error("[restart] %s restart error: %s", name, e)
-
-        threading.Thread(target=_do_restart, daemon=True, name=f"restart-{name}").start()
-
-        self._respond_json({"ok": True, "action": "restart",
-                            "name": name, "status": "restarting",
-                            "message": f"Restart initiated for {name}"})
 
     # ── API: Health ──────────────────────────────────────────────────
 
@@ -1720,21 +1539,9 @@ class PlaygroundServer:
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         log.info("Playground server started on port %d", self.port)
-
-        # Start auto-monitor for DBMS instances
-        try:
-            PlaygroundAPIHandler.start_dbms_monitor(interval=30)
-        except Exception as e:
-            log.warning("Failed to start DBMS monitor: %s", e)
-
         return self.base_url
 
     def stop(self):
-        # Stop DBMS monitor first
-        try:
-            PlaygroundAPIHandler.stop_dbms_monitor()
-        except Exception:
-            pass
         if self._server:
             PlaygroundAPIHandler._cleanup_connections()
             self._server.shutdown()

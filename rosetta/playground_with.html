@@ -401,26 +401,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
   border:1px solid rgba(248,81,73,0.3); }
 .test-result .ver { font-size:10px; opacity:0.6; margin-top:2px; }
 
-/* ── Restart button & monitoring ── */
-.ci-btn.restart { color:var(--orange,#f0883e); }
-.ci-btn.restart:hover { color:#fff; background:var(--orange,#f0883e); border-color:var(--orange,#f0883e); }
-.ci-btn.restart.restarting { opacity:0.6; pointer-events:none; animation:pulse 1s ease-in-out infinite; }
-.ci-btn.restart .spinner { display:none; width:12px; height:12px; border:2px solid currentColor; border-top-color:transparent; border-radius:50%; animation:spin 0.6s linear infinite; margin-right:2px; vertical-align:middle; }
-.ci-btn.restart.restarting .spinner { display:inline-block; }
-@keyframes spin { to{transform:rotate(360deg)} }
-.restart-result { margin-top:8px; padding:8px 12px; border-radius:8px; font-size:12px;
-  font-weight:500; display:none; animation:fadeIn 0.2s ease-out; }
-.restart-result.success { display:block; background:var(--green-bg); color:var(--green);
-  border:1px solid rgba(63,185,80,0.3); }
-.restart-result.fail { display:block; background:var(--red-bg); color:var(--red);
-  border:1px solid rgba(248,81,73,0.3); }
-.restart-result.info { display:block; background:rgba(240,136,62,0.08); color:var(--orange,#f0883e);
-  border:1px solid rgba(240,136,62,0.3); }
-.ci-status.restarting { background:var(--orange,#f0883e) !important;
-  box-shadow:0 0 8px rgba(240,136,62,0.6) !important; animation:pulse 1s ease-in-out infinite !important; }
-.monitor-badge { font-size:10px; background:var(--green-bg); color:var(--green); padding:2px 8px; border-radius:10px; margin-left:6px; display:inline-flex; align-items:center; gap:4px; }
-.monitor-badge .dot { width:6px; height:6px; border-radius:50%; background:var(--green); animation:pulse 2s ease-in-out infinite; }
-
 /* ── DBMS Modal ── */
 .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.65);
   z-index:10000; align-items:center; justify-content:center;
@@ -811,9 +791,8 @@ async function deleteFavorite(id){try{await apiCall('DELETE','/api/favorites/'+i
 
 // ── Config Panel ──
 async function loadConfigsData(){try{const r=await apiCall('GET','/api/dbms');if(r.ok){configsData=r.dbms||[];configsData.forEach(d=>{if(!(d.name in DBMS_CONN_STATUS))DBMS_CONN_STATUS[d.name]='unknown'})}else{configsData=[]}}catch(e){if(typeof EMBEDDED_DBMS!=='undefined'&&EMBEDDED_DBMS.length>0){configsData=EMBEDDED_DBMS;configsData.forEach(d=>{if(!(d.name in DBMS_CONN_STATUS))DBMS_CONN_STATUS[d.name]='unknown'})}else{configsData=[]}}document.getElementById('config-count').textContent=configsData.length}
-function renderConfigs(){const b=document.getElementById('sidebar-body');let html='<button class="add-dbms-btn" onclick="openAddDbmsModal()"><span class="plus-icon">+</span> Add DBMS</button><button class="edit-config-btn" onclick="event.stopPropagation();openConfigEditor()"><span class="edit-icon">&#9881;</span> Edit config.json</button>';if(configsData.length===0){html+='<div class="sidebar-empty"><div class="icon">&#9881;</div><p>No DBMS configured.<br>Add yours above or edit with_config.json</p></div>';b.innerHTML=html;return}configsData.forEach(d=>{const isCustom=d.source==='custom';const status=DBMS_CONN_STATUS[d.name]||'unknown';const statusCls=status==='success'?'online':status==='fail'?'offline':status==='testing'?'unknown':'unknown';const activeBadge=d.active?'<span style="font-size:10px;background:var(--green-bg);color:var(--green);padding:1px 6px;border-radius:4px;margin-left:4px;">active</span>':'';const sourceTag=isCustom?'<span class="ci-tag custom">custom</span>':'<span class="ci-tag builtin">builtin</span>';const editBtns='<button class="ci-btn gear" onclick="event.stopPropagation();openEditDbmsModal(\''+esc(d.name).replace(/'/g,"\\'")+'\')" title="Edit config">&#9881;</button>'+(isCustom?'<button class="ci-btn danger" onclick="event.stopPropagation();deleteCustomDbms(\''+esc(d.name).replace(/'/g,"\\'")+'\')" title="Delete">&#10005;</button>':'');html+='<div class="config-item" id="config-item-'+esc(d.name)+'"><div class="ci-row"><div class="ci-status '+statusCls+'" id="status-'+esc(d.name)+'" title="'+status+'"></div><div class="ci-info"><div class="ci-name">'+esc(d.name)+activeBadge+'<span class="ci-type-tag">'+esc(d.type||'mysql')+'</span>'+sourceTag+'</div><div class="ci-host">'+esc(d.host)+':'+esc(d.port)+(d.database?' / '+esc(d.database):'')+'</div></div><div class="ci-actions"><button class="ci-btn test" id="test-btn-'+esc(d.name)+'" onclick="testDbmsConnection(\''+esc(d.name).replace(/'/g,"\\'")+'\')">&#9654; Test</button><button class="ci-btn restart" id="restart-btn-'+esc(d.name)+'" onclick="restartDbmsInstance(\''+esc(d.name).replace(/'/g,"\\'")+'\')" title="Restart this DBMS instance"><span class="spinner"></span>&#8635; Restart</button>'+editBtns+'</div></div><div class="test-result" id="test-result-'+esc(d.name)+'"></div><div class="restart-result" id="restart-result-'+esc(d.name)+'"></div></div>';});b.innerHTML=html}
+function renderConfigs(){const b=document.getElementById('sidebar-body');let html='<button class="add-dbms-btn" onclick="openAddDbmsModal()"><span class="plus-icon">+</span> Add DBMS</button><button class="edit-config-btn" onclick="event.stopPropagation();openConfigEditor()"><span class="edit-icon">&#9881;</span> Edit config.json</button>';if(configsData.length===0){html+='<div class="sidebar-empty"><div class="icon">&#9881;</div><p>No DBMS configured.<br>Add yours above or edit with_config.json</p></div>';b.innerHTML=html;return}configsData.forEach(d=>{const isCustom=d.source==='custom';const status=DBMS_CONN_STATUS[d.name]||'unknown';const statusCls=status==='success'?'online':status==='fail'?'offline':status==='testing'?'unknown':'unknown';const activeBadge=d.active?'<span style="font-size:10px;background:var(--green-bg);color:var(--green);padding:1px 6px;border-radius:4px;margin-left:4px;">active</span>':'';const sourceTag=isCustom?'<span class="ci-tag custom">custom</span>':'<span class="ci-tag builtin">builtin</span>';const editBtns='<button class="ci-btn gear" onclick="event.stopPropagation();openEditDbmsModal(\''+esc(d.name).replace(/'/g,"\\'")+'\')" title="Edit config">&#9881;</button>'+(isCustom?'<button class="ci-btn danger" onclick="event.stopPropagation();deleteCustomDbms(\''+esc(d.name).replace(/'/g,"\\'")+'\')" title="Delete">&#10005;</button>':'');html+='<div class="config-item" id="config-item-'+esc(d.name)+'"><div class="ci-row"><div class="ci-status '+statusCls+'" id="status-'+esc(d.name)+'" title="'+status+'"></div><div class="ci-info"><div class="ci-name">'+esc(d.name)+activeBadge+'<span class="ci-type-tag">'+esc(d.type||'mysql')+'</span>'+sourceTag+'</div><div class="ci-host">'+esc(d.host)+':'+esc(d.port)+(d.database?' / '+esc(d.database):'')+'</div></div><div class="ci-actions"><button class="ci-btn test" id="test-btn-'+esc(d.name)+'" onclick="testDbmsConnection(\''+esc(d.name).replace(/'/g,"\\'")+'\')">&#9654; Test</button>'+editBtns+'</div></div><div class="test-result" id="test-result-'+esc(d.name)+'"></div></div>';});b.innerHTML=html}
 async function testDbmsConnection(name){const resultDiv=document.getElementById('test-result-'+name);const statusDot=document.getElementById('status-'+name);const testBtn=document.getElementById('test-btn-'+name);if(!resultDiv||!testBtn)return;testBtn.textContent='...';testBtn.classList.add('testing');resultDiv.style.display='none';statusDot.className='ci-status unknown';DBMS_CONN_STATUS[name]='testing';try{const r=await apiCall('POST','/api/dbms/test',{name:name});if(r.ok&&r.success){DBMS_CONN_STATUS[name]='success';statusDot.className='ci-status online';resultDiv.className='test-result success';resultDiv.innerHTML='&#10003; Connected — '+esc(r.version||'OK');resultDiv.style.display='block'}else{throw new Error(r.error||'Connection failed')}}catch(e){DBMS_CONN_STATUS[name]='fail';statusDot.className='ci-status offline';resultDiv.className='test-result fail';resultDiv.innerHTML='&#10007; '+(e.message||'Connection failed');resultDiv.style.display='block';statusDot.title=e.message}finally{testBtn.innerHTML='&#9654; Test';testBtn.classList.remove('testing');renderChips();renderBaselineChips()}}
-async function restartDbmsInstance(name){const restartBtn=document.getElementById('restart-btn-'+name);const resultDiv=document.getElementById('restart-result-'+name);const statusDot=document.getElementById('status-'+name);const testResultDiv=document.getElementById('test-result-'+name);if(!restartBtn||!resultDiv)return;if(restartBtn.classList.contains('restarting'))return;if(!confirm('Restart DBMS instance "'+name+'"?\\n\\nThis will execute the configured restart command.'))return;restartBtn.classList.add('restarting');restartBtn.innerHTML='<span class="spinner"></span> Restarting...';resultDiv.style.display='none';testResultDiv.style.display='none';statusDot.className='ci-status restarting';DBMS_CONN_STATUS[name]='testing';try{const r=await apiCall('POST','/api/dbms/restart',{name:name});if(r.ok&&r.success){DBMS_CONN_STATUS[name]='success';statusDot.className='ci-status online';resultDiv.className='restart-result success';resultDiv.innerHTML='&#10003; '+esc(r.message||'Service back up');resultDiv.style.display='block'}else{throw new Error(r.error||'Restart failed')}}catch(e){DBMS_CONN_STATUS[name]='fail';statusDot.className='ci-status offline';resultDiv.className='restart-result fail';resultDiv.innerHTML='&#10007; '+esc(e.message||'Restart failed');resultDiv.style.display='block'}finally{restartBtn.classList.remove('restarting');restartBtn.innerHTML='<span class="spinner"></span>&#8635; Restart';renderChips();renderBaselineChips()}}
 
 // ── DBMS Modal ──
 let _editingDbmsName=null;_editingSource=null;
@@ -901,16 +880,6 @@ async function checkSystemHealth(){const el=document.getElementById('sys-status'
 
 // ── Init ──
 initVersion();loadUserInfo();loadDbms();loadFavorites();loadHistory();loadConfigsData();checkSystemHealth();
-
-// Auto-refresh DBMS status every 30 seconds
-setInterval(()=>{
-  if(_sidebarTab==='config'){
-    loadConfigsData().then(()=>renderConfigs());
-    checkSystemHealth();
-  }
-  // Also refresh the health indicator always
-  checkSystemHealth();
-},30000);
 </script>
 
 <button class="back-to-top" id="back-to-top" title="Back to top" onclick="scrollToTop()">

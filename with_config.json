@@ -24,8 +24,7 @@
         "SET sql_mode='STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'",
         "SET NAMES utf8mb4"
       ],
-      "enabled": true,
-      "restart_cmd": "echo 'AUTO-RESTART: mysql-9.6 check triggered, but restart_cmd not configured yet'"
+      "enabled": true
     },
     {
       "_comment": "──── ✅ 已验证: TXSQL 8.0.30 (Tencent MySQL fork) ────",
@@ -41,8 +40,7 @@
         "SET sql_mode='STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'",
         "SET NAMES utf8mb4"
       ],
-      "enabled": true,
-      "restart_cmd": "echo 'AUTO-RESTART: txsql-8.0 check triggered, but restart_cmd not configured yet'"
+      "enabled": true
     },
     {
       "_comment": "──── ✅ 已验证: TiDB 8.5.6 ────",
@@ -58,8 +56,7 @@
         "ddl_recovery"
       ],
       "init_sql": [],
-      "enabled": true,
-      "restart_cmd": "echo 'AUTO-RESTART: tidb-8.5 check triggered, but restart_cmd not configured yet'"
+      "enabled": true
     },
     {
       "_comment": "──── ⚠ OceanBase 待修复认证 ────",
@@ -72,8 +69,7 @@
       "driver": "pymysql",
       "skip_patterns": [],
       "init_sql": [],
-      "enabled": true,
-      "restart_cmd": "echo 'AUTO-RESTART: oceanbase check triggered, but restart_cmd not configured yet'"
+      "enabled": true
     },
     {
       "_comment": "──── ⬜ 预留: Oracle ────",
@@ -89,8 +85,7 @@
       "init_sql": [
         "ALTER SESSION SET NLS_DATE_FORMAT='YYYY-MM-DD HH24:MI:SS'"
       ],
-      "enabled": false,
-      "restart_cmd": "echo 'AUTO-RESTART: oracle19c check triggered, but restart_cmd not configured yet'"
+      "enabled": false
     }
   ]
 }
