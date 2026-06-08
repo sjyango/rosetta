@@ -521,10 +521,7 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
     def _handle_custom_dbms_save(self):
         """POST /api/dbms/custom/save — create or update a custom DBMS."""
         user = self._get_user()
-        eng_name = user.get("eng_name", "")
-        if not eng_name:
-            self._respond_json({"ok": False, "error": "User not authenticated"}, 401)
-            return
+        eng_name = user.get("eng_name", "") or "anonymous"
 
         body = self._read_json()
         name = (body.get("name") or "").strip()
@@ -583,10 +580,7 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
     def _handle_custom_dbms_delete(self, cust_name: str):
         """DELETE /api/dbms/custom/<name> — delete a custom DBMS."""
         user = self._get_user()
-        eng_name = user.get("eng_name", "")
-        if not eng_name:
-            self._respond_json({"ok": False, "error": "User not authenticated"}, 401)
-            return
+        eng_name = user.get("eng_name", "") or "anonymous"
 
         type(self)._ensure_custom_dbms_table()
         db = _get_db()
