@@ -8,7 +8,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Install system dependencies needed for SSH + pymysql
+# Install system dependencies needed for SSH + build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     build-essential \
@@ -16,8 +16,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # ── Dependencies stage ──
 FROM base AS deps
-COPY pyproject.toml .
-RUN pip install --no-cache-dir pymysql rich prompt_toolkit
+COPY pyproject.toml requirements.txt ./
+RUN pip install --no-cache-dir \
+    pymysql>=1.0 \
+    rich>=13.0 \
+    prompt_toolkit>=3.0.52 \
+    oracledb>=2.0 \
+    mysql-connector-python>=8.0
 
 # ── Runner stage ──
 FROM base AS runner
@@ -46,6 +51,9 @@ ENV MYSQL_HOST=11.142.154.110 \
     MYSQL_USER=with_ugmatclusdrxhadd \
     MYSQL_PASSWORD=Xe#RGXP8$a0XQQ \
     MYSQL_DATABASE=rf5otpny
+
+# Rosetta config path
+ENV ROSETTA_CONFIG=/app/with_config.json
 
 # SSH config for DBMS restart
 ENV SSH_HOST=21.6.101.185 \
