@@ -33,7 +33,7 @@
       "name": "txsql-8.0",
       "type": "mysql",
       "host": "21.6.101.185",
-      "port": 3307,
+      "port": 11886,
       "user": "root",
       "password": "",
       "driver": "pymysql",
