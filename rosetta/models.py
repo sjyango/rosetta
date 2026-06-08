@@ -53,6 +53,7 @@ class DBMSConfig:
     init_sql: List[str] = field(default_factory=list)
     enabled: bool = True
     restart_cmd: str = ""
+    restart: dict = field(default_factory=dict)
 
 
 @dataclass

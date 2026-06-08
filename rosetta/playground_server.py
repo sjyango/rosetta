@@ -18,6 +18,7 @@ import logging
 import os
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time as _time
@@ -138,6 +139,18 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
     _active_connections: list = []
     _active_connections_lock: threading.Lock = threading.Lock()
 
+    # ── Health Monitor (class-level) ──
+    _health_status: dict = {}          # name -> {"connected": bool, "host": str, "port": int, ...}
+    _health_lock: threading.Lock = threading.Lock()
+    _health_monitor_thread: Optional[threading.Thread] = None
+    _health_monitor_stop: threading.Event = threading.Event()
+    _health_monitor_config: dict = {}  # loaded from config
+    _restart_in_progress: dict = {}    # name -> True if restart is ongoing
+    _restart_lock: threading.Lock = threading.Lock()
+    _restart_retry_count: dict = {}    # name -> retry count for current failure cycle
+    _restart_script: str = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        "..", "scripts", "restart_dbms.sh")
+
     @classmethod
     def _reload_configs(cls):
         """Re-read config file and update class-level config caches."""
@@ -235,6 +248,12 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/health":
             self._handle_health_check()
             return
+        if path == "/api/dbms/health":
+            self._handle_per_dbms_health()
+            return
+        if path.startswith("/api/dbms/health/"):
+            self._handle_single_dbms_health(path.split("/api/dbms/health/", 1)[-1])
+            return
         if path == "/api/config/raw":
             self._handle_config_raw_get()
             return
@@ -266,6 +285,9 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
         if self.path == "/api/dbms/test":
             self._handle_dbms_test()
+            return
+        if self.path == "/api/dbms/restart":
+            self._handle_dbms_restart()
             return
         if self.path == "/api/dbms/custom/save":
             self._handle_custom_dbms_save()
@@ -767,6 +789,444 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
                                 "reason": "No DBMS reachable",
                                 "total": len(active_configs),
                                 "version": _version})
+
+    # ── API: Per-DBMS Health ─────────────────────────────────────────
+
+    def _handle_per_dbms_health(self):
+        """GET /api/dbms/health — check health of all enabled DBMS individually.
+
+        Returns per-DBMS status including: connected, host, port, version,
+        latency, restart_available, restart_in_progress.
+        """
+        cls = type(self)
+        cls._reload_configs()
+        active_configs = [c for c in cls._all_configs if getattr(c, "enabled", True)]
+        if not active_configs:
+            self._respond_json({"ok": True, "dbms": [], "total": 0,
+                                "healthy": 0, "unhealthy": 0})
+            return
+
+        import concurrent.futures
+        dbms_list = []
+
+        def _check_one(cfg):
+            import pymysql
+            start = _time.time()
+            name = cfg.name
+            host = cfg.host
+            port = cfg.port
+            restart_cfg = getattr(cfg, "restart", None) or {}
+            restart_available = bool(restart_cfg.get("enabled") and restart_cfg.get("command"))
+            with cls._restart_lock:
+                restart_in_progress = cls._restart_in_progress.get(name, False)
+
+            # Check port reachability quickly
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(2)
+                s.connect((host, port))
+                s.close()
+                port_ok = True
+            except Exception:
+                port_ok = False
+
+            latency_ms = round((_time.time() - start) * 1000, 2)
+
+            result = {
+                "name": name, "host": host, "port": port,
+                "port_reachable": port_ok, "connected": False,
+                "version": None, "latency_ms": latency_ms,
+                "restart_available": restart_available,
+                "restart_in_progress": restart_in_progress,
+                "error": None,
+            }
+
+            if port_ok:
+                try:
+                    conn = pymysql.connect(
+                        host=host, port=port, user=cfg.user,
+                        password=cfg.password,
+                        charset="utf8mb4", connect_timeout=3,
+                    )
+                    cur = conn.cursor()
+                    cur.execute("SELECT VERSION()")
+                    row = cur.fetchone()
+                    result["version"] = row[0] if row else "unknown"
+                    result["connected"] = True
+                    result["latency_ms"] = round((_time.time() - start) * 1000, 2)
+                    cur.close()
+                    conn.close()
+                except Exception as e:
+                    result["error"] = str(e)[:200]
+            else:
+                result["error"] = "Port unreachable"
+
+            # Update class-level cache
+            with cls._health_lock:
+                cls._health_status[name] = result
+            return result
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(active_configs)) as pool:
+            futs = [pool.submit(_check_one, c) for c in active_configs]
+            for fut in concurrent.futures.as_completed(futs):
+                try:
+                    dbms_list.append(fut.result())
+                except Exception:
+                    pass
+
+        dbms_list.sort(key=lambda d: d["name"])
+        healthy = sum(1 for d in dbms_list if d["connected"])
+        hc = cls._health_monitor_config
+        self._respond_json({
+            "ok": True, "dbms": dbms_list, "total": len(dbms_list),
+            "healthy": healthy, "unhealthy": len(dbms_list) - healthy,
+            "_monitor_enabled": hc.get("enabled", False),
+            "_monitor_interval": hc.get("interval_seconds", 30),
+            "_monitor_auto_restart": hc.get("auto_restart", True),
+        })
+
+    def _handle_single_dbms_health(self, name: str):
+        """GET /api/dbms/health/<name> — check health of a single DBMS."""
+        from urllib.parse import unquote
+        name = unquote(name)
+        cls = type(self)
+        cls._reload_configs()
+
+        cfg = None
+        for c in cls._all_configs:
+            if c.name == name:
+                cfg = c
+                break
+        if cfg is None:
+            self._respond_json({"ok": False, "error": f"Unknown DBMS: {name}"}, 404)
+            return
+
+        # Quick check
+        import pymysql
+        start = _time.time()
+        port_ok = False
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(2)
+            s.connect((cfg.host, cfg.port))
+            s.close()
+            port_ok = True
+        except Exception:
+            pass
+
+        result = {
+            "name": name, "host": cfg.host, "port": cfg.port,
+            "port_reachable": port_ok, "connected": False,
+            "version": None, "latency_ms": round((_time.time() - start) * 1000, 2),
+        }
+        if port_ok:
+            try:
+                conn = pymysql.connect(
+                    host=cfg.host, port=cfg.port, user=cfg.user,
+                    password=cfg.password,
+                    charset="utf8mb4", connect_timeout=3,
+                )
+                cur = conn.cursor()
+                cur.execute("SELECT VERSION()")
+                row = cur.fetchone()
+                result["version"] = row[0] if row else "unknown"
+                result["connected"] = True
+                result["latency_ms"] = round((_time.time() - start) * 1000, 2)
+                cur.close()
+                conn.close()
+            except Exception as e:
+                result["error"] = str(e)[:200]
+        else:
+            result["error"] = "Port unreachable"
+
+        with cls._health_lock:
+            cls._health_status[name] = result
+        self._respond_json({"ok": True, "dbms": result})
+
+    # ── API: DBMS Restart ─────────────────────────────────────────────
+
+    def _handle_dbms_restart(self):
+        """POST /api/dbms/restart — restart a DBMS instance.
+
+        Body: {"name": "mysql-9.6"}
+        Returns progress via the restart flow.
+        """
+        body = self._read_json()
+        name = body.get("name", "").strip()
+        if not name:
+            self._respond_json({"ok": False, "error": "Missing 'name'"}, 400)
+            return
+
+        cls = type(self)
+
+        # Find config
+        cfg = None
+        for c in cls._all_configs:
+            if c.name == name:
+                cfg = c
+                break
+
+        if cfg is None:
+            self._respond_json({"ok": False, "error": f"Unknown DBMS: {name}"}, 404)
+            return
+
+        restart_cfg = getattr(cfg, "restart", None) or {}
+        if not restart_cfg.get("enabled"):
+            self._respond_json({"ok": False,
+                                "error": f"Restart not configured for {name}"}, 400)
+            return
+
+        # Check if restart already in progress
+        with cls._restart_lock:
+            if cls._restart_in_progress.get(name):
+                self._respond_json({"ok": False,
+                                    "error": f"Restart already in progress for {name}"}, 409)
+                return
+            cls._restart_in_progress[name] = True
+
+        # Extract restart info
+        cmd = restart_cfg.get("command", "")
+        ssh_host = cls._health_monitor_config.get("ssh_host", "21.6.101.185")
+        ssh_user = cls._health_monitor_config.get("ssh_user", "root")
+        ssh_timeout = str(cls._health_monitor_config.get("ssh_timeout", 10))
+
+        log.info("Restarting DBMS '%s' on %s via SSH: %s", name, ssh_host, cmd)
+
+        # Build SSH command
+        ssh_cmd = [
+            "ssh",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", f"ConnectTimeout={ssh_timeout}",
+            "-o", "BatchMode=no",
+            f"{ssh_user}@{ssh_host}",
+            cmd,
+        ]
+
+        try:
+            result = subprocess.run(
+                ssh_cmd, capture_output=True, text=True,
+                timeout=int(ssh_timeout) + 30,
+            )
+            success = result.returncode == 0
+            output = (result.stdout + result.stderr).strip()[:500]
+            log.info("Restart %s: exit=%d, output=%s", name, result.returncode, output[:200])
+
+            # Wait a bit and verify
+            _time.sleep(5)
+            port_ok = False
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(5)
+                s.connect((cfg.host, cfg.port))
+                s.close()
+                port_ok = True
+            except Exception:
+                pass
+
+            # Update health cache
+            with cls._health_lock:
+                cls._health_status[name] = {
+                    "name": name, "host": cfg.host, "port": cfg.port,
+                    "port_reachable": port_ok, "connected": port_ok,
+                    "version": None, "latency_ms": 0,
+                    "restart_available": True, "restart_in_progress": False,
+                    "error": None if port_ok else "Port still unreachable after restart",
+                }
+
+            # Reset retry count on success
+            if port_ok:
+                cls._restart_retry_count[name] = 0
+
+            self._respond_json({
+                "ok": True, "success": port_ok,
+                "name": name,
+                "ssh_exit_code": result.returncode,
+                "output": output,
+                "port_reachable": port_ok,
+                "message": f"Restart command sent (exit={result.returncode}), port {'reachable' if port_ok else 'still unreachable'}"
+            })
+
+        except subprocess.TimeoutExpired:
+            log.error("Restart %s: SSH timeout", name)
+            self._respond_json({
+                "ok": False, "success": False,
+                "error": f"SSH command timed out for {name}"
+            }, 500)
+        except FileNotFoundError:
+            log.error("Restart %s: 'ssh' command not found", name)
+            self._respond_json({
+                "ok": False, "success": False,
+                "error": "SSH command not available on this host"
+            }, 500)
+        except Exception as e:
+            log.error("Restart %s: unexpected error: %s", name, e)
+            self._respond_json({
+                "ok": False, "success": False,
+                "error": str(e)
+            }, 500)
+        finally:
+            with cls._restart_lock:
+                cls._restart_in_progress[name] = False
+
+    # ── Health Monitor (class methods) ─────────────────────────────────
+
+    @classmethod
+    def _start_health_monitor(cls):
+        """Start background health monitor thread if configured."""
+        if cls._health_monitor_thread and cls._health_monitor_thread.is_alive():
+            return
+
+        hc = cls._health_monitor_config
+        if not hc.get("enabled", False):
+            log.info("Health monitor disabled by config")
+            return
+
+        interval = int(hc.get("interval_seconds", 30))
+        auto_restart = hc.get("auto_restart", True)
+        max_retries = int(hc.get("max_retries", 3))
+
+        cls._health_monitor_stop.clear()
+
+        def _monitor_loop():
+            log.info("Health monitor started (interval=%ds, auto_restart=%s, max_retries=%d)",
+                     interval, auto_restart, max_retries)
+            while not cls._health_monitor_stop.is_set():
+                cls._health_monitor_stop.wait(interval)
+                if cls._health_monitor_stop.is_set():
+                    break
+                try:
+                    cls._run_health_scan(auto_restart, max_retries)
+                except Exception as e:
+                    log.error("Health monitor scan error: %s", e)
+
+        cls._health_monitor_thread = threading.Thread(
+            target=_monitor_loop, daemon=True, name="health-monitor"
+        )
+        cls._health_monitor_thread.start()
+        log.info("Health monitor thread started")
+
+    @classmethod
+    def _stop_health_monitor(cls):
+        """Stop the background health monitor thread."""
+        cls._health_monitor_stop.set()
+        if cls._health_monitor_thread:
+            cls._health_monitor_thread.join(timeout=5)
+            cls._health_monitor_thread = None
+            log.info("Health monitor stopped")
+
+    @classmethod
+    def _run_health_scan(cls, auto_restart: bool = True, max_retries: int = 3):
+        """Run a single health scan of all enabled DBMS.
+
+        If auto_restart is True, attempt to restart any unhealthy DBMS.
+        """
+        cls._reload_configs()
+        active = [c for c in cls._all_configs if getattr(c, "enabled", True)]
+        if not active:
+            return
+
+        import concurrent.futures
+
+        def _check_one(cfg):
+            import pymysql
+            name = cfg.name
+            connected = False
+            version = None
+            error = None
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(2)
+                s.connect((cfg.host, cfg.port))
+                s.close()
+                conn = pymysql.connect(
+                    host=cfg.host, port=cfg.port, user=cfg.user,
+                    password=cfg.password, charset="utf8mb4", connect_timeout=3,
+                )
+                cur = conn.cursor()
+                cur.execute("SELECT VERSION()")
+                row = cur.fetchone()
+                version = row[0] if row else "unknown"
+                cur.close()
+                conn.close()
+                connected = True
+            except Exception as e:
+                error = str(e)[:200]
+            return name, connected, version, error
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(active)) as pool:
+            futs = [pool.submit(_check_one, c) for c in active]
+            for fut in concurrent.futures.as_completed(futs):
+                try:
+                    name, connected, version, error = fut.result()
+                except Exception:
+                    continue
+
+                cfg = next((c for c in active if c.name == name), None)
+                if cfg is None:
+                    continue
+
+                restart_cfg = getattr(cfg, "restart", None) or {}
+                restart_avail = bool(restart_cfg.get("enabled") and restart_cfg.get("command"))
+
+                with cls._health_lock:
+                    cls._health_status[name] = {
+                        "name": name, "host": cfg.host, "port": cfg.port,
+                        "port_reachable": connected, "connected": connected,
+                        "version": version, "latency_ms": 0,
+                        "restart_available": restart_avail,
+                        "restart_in_progress": cls._restart_in_progress.get(name, False),
+                        "error": error,
+                    }
+
+                # Auto-restart if down
+                if not connected and auto_restart and restart_avail:
+                    with cls._restart_lock:
+                        if cls._restart_in_progress.get(name):
+                            continue
+                        retries = cls._restart_retry_count.get(name, 0)
+                        if retries >= max_retries:
+                            log.warning("Health monitor: %s max retries (%d) reached, skipping auto-restart",
+                                       name, max_retries)
+                            continue
+                        cls._restart_retry_count[name] = retries + 1
+                        cls._restart_in_progress[name] = True
+
+                    cmd = restart_cfg.get("command", "")
+                    ssh_host = cls._health_monitor_config.get("ssh_host", "21.6.101.185")
+                    ssh_user = cls._health_monitor_config.get("ssh_user", "root")
+                    ssh_timeout = str(cls._health_monitor_config.get("ssh_timeout", 10))
+
+                    log.warning("Health monitor: %s is DOWN, auto-restarting (attempt %d/%d)...",
+                               name, retries + 1, max_retries)
+                    try:
+                        result = subprocess.run(
+                            ["ssh", "-o", "StrictHostKeyChecking=no",
+                             "-o", "UserKnownHostsFile=/dev/null",
+                             "-o", f"ConnectTimeout={ssh_timeout}",
+                             "-o", "BatchMode=no",
+                             f"{ssh_user}@{ssh_host}", cmd],
+                            capture_output=True, text=True,
+                            timeout=int(ssh_timeout) + 30,
+                        )
+                        log.info("Auto-restart %s: exit=%d", name, result.returncode)
+                    except Exception as e:
+                        log.error("Auto-restart %s failed: %s", name, e)
+                    finally:
+                        with cls._restart_lock:
+                            cls._restart_in_progress[name] = False
+
+    @classmethod
+    def _load_health_monitor_config(cls, config_path: str):
+        """Load health_monitor settings from config JSON."""
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            cls._health_monitor_config = raw.get("health_monitor", {})
+            log.info("Health monitor config loaded: %s", cls._health_monitor_config)
+        except Exception as e:
+            log.warning("Failed to load health_monitor config: %s", e)
+            cls._health_monitor_config = {}
 
     # ── API: History ──────────────────────────────────────────────────
 
@@ -1539,10 +1999,18 @@ class PlaygroundServer:
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         log.info("Playground server started on port %d", self.port)
+
+        # Start health monitor
+        PlaygroundAPIHandler._load_health_monitor_config(
+            PlaygroundAPIHandler._config_path or "with_config.json"
+        )
+        PlaygroundAPIHandler._start_health_monitor()
+
         return self.base_url
 
     def stop(self):
         if self._server:
+            PlaygroundAPIHandler._stop_health_monitor()
             PlaygroundAPIHandler._cleanup_connections()
             self._server.shutdown()
             self._server.server_close()

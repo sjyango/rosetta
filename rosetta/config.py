@@ -23,6 +23,10 @@ def load_config(config_path: str) -> List[DBMSConfig]:
         protocol = entry.get("type", "") or entry.get("protocol", "mysql")
         default_port = 1521 if protocol == "oracle" else 3306
         default_driver = "oracledb" if protocol == "oracle" else "pymysql"
+        # Support both flat restart_cmd (legacy) and nested restart dict
+        restart_dict = entry.get("restart", {})
+        if not restart_dict and entry.get("restart_cmd"):
+            restart_dict = {"enabled": True, "command": entry["restart_cmd"]}
         configs.append(DBMSConfig(
             name=entry.get("name", "unknown"),
             host=entry.get("host", "127.0.0.1"),
@@ -36,6 +40,7 @@ def load_config(config_path: str) -> List[DBMSConfig]:
             init_sql=entry.get("init_sql", []),
             enabled=entry.get("enabled", True),
             restart_cmd=entry.get("restart_cmd", ""),
+            restart=restart_dict,
         ))
 
     return configs

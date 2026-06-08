@@ -9,6 +9,16 @@
     "traceless": true,
     "_note": "每次执行后自动清理临时数据库，不留痕迹"
   },
+  "health_monitor": {
+    "_comment": "定期扫描各DBMS健康状态，自动拉起挂掉的实例",
+    "enabled": true,
+    "interval_seconds": 30,
+    "auto_restart": true,
+    "max_retries": 3,
+    "ssh_host": "21.6.101.185",
+    "ssh_user": "root",
+    "ssh_timeout": 10
+  },
   "databases": [
     {
       "_comment": "──── ✅ 已验证: MySQL 9.6.0 ────",
@@ -24,7 +34,12 @@
         "SET sql_mode='STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'",
         "SET NAMES utf8mb4"
       ],
-      "enabled": true
+      "enabled": true,
+      "restart": {
+        "enabled": true,
+        "service": "mysqld",
+        "command": "systemctl restart mysqld"
+      }
     },
     {
       "_comment": "──── ✅ 已验证: TXSQL 8.0.30 (Tencent MySQL fork) ────",
@@ -40,7 +55,12 @@
         "SET sql_mode='STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'",
         "SET NAMES utf8mb4"
       ],
-      "enabled": true
+      "enabled": true,
+      "restart": {
+        "enabled": true,
+        "service": "txsqld",
+        "command": "systemctl restart txsqld"
+      }
     },
     {
       "_comment": "──── ✅ 已验证: TiDB 8.5.6 ────",
@@ -56,7 +76,12 @@
         "ddl_recovery"
       ],
       "init_sql": [],
-      "enabled": true
+      "enabled": true,
+      "restart": {
+        "enabled": true,
+        "service": "tidb",
+        "command": "systemctl restart tidb"
+      }
     },
     {
       "_comment": "──── ⚠ OceanBase 待修复认证 ────",
@@ -69,7 +94,12 @@
       "driver": "pymysql",
       "skip_patterns": [],
       "init_sql": [],
-      "enabled": true
+      "enabled": true,
+      "restart": {
+        "enabled": true,
+        "service": "oceanbase",
+        "command": "su - admin -c 'obd cluster restart obcluster'"
+      }
     },
     {
       "_comment": "──── ⬜ 预留: Oracle ────",
