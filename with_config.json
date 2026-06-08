@@ -80,7 +80,7 @@
       "restart": {
         "enabled": true,
         "service": "tidb",
-        "command": "systemctl restart tidb"
+        "command": "pkill -9 -f \"tidb-server|tikv-server|pd-server\" 2>/dev/null; nohup tiup playground v8.5.5 --db 1 --pd 1 --kv 1 --tiflash 0 --host 0.0.0.0 --without-monitor > /tmp/tidb.log 2>&1 &"
       }
     },
     {

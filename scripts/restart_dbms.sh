@@ -19,7 +19,7 @@ declare -A DBMS_MAP
 DBMS_MAP=(
     ["mysql-9.6"]="3306|pkill -9 mysqld; /usr/sbin/mysqld --user=mysql --daemonize"
     ["txsql-8.0"]="3307|/usr/local/mysql/bin/mysqld --user=root --port=3307 --socket=/tmp/mysql_txsql.sock --datadir=/usr/local/mysql/data --pid-file=/usr/local/mysql/data/mysqld.pid --daemonize"
-    ["tidb-8.5"]="4000|systemctl restart tidb"
+    ["tidb-8.5"]="4000|pkill -9 -f \"tidb-server|tikv-server|pd-server\" 2>/dev/null; nohup tiup playground v8.5.5 --db 1 --pd 1 --kv 1 --tiflash 0 --host 0.0.0.0 --without-monitor > /tmp/tidb.log 2>&1 &"
     ["oceanbase"]="2881|su - admin -c 'obd cluster restart obcluster'"
     ["postgres-15"]="5432|systemctl restart postgresql-15"
     ["oracle"]="1521|echo 'Oracle restart requires manual intervention'"
