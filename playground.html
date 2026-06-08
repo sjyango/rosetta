@@ -879,7 +879,7 @@ function initVersion(){const tag=document.getElementById('version-tag');if(tag&&
 async function checkSystemHealth(){const el=document.getElementById('sys-status');if(!el)return;el.className='sys-status checking';el.innerHTML='<span class="status-dot"></span> 检测中';try{const r=await apiCall('GET','/api/health');if(r.ok&&r.status==='healthy'){el.className='sys-status healthy';el.title='系统运行正常 — '+r.connected+'/'+r.total+' 数据库可达';el.innerHTML='<span class="status-dot"></span> 运行正常'}else{el.className='sys-status unhealthy';el.title=r.reason||'部分数据库不可达';el.innerHTML='<span class="status-dot"></span> 部分异常'}}catch(e){el.className='sys-status unhealthy';el.title='健康检查失败: '+e.message;el.innerHTML='<span class="status-dot"></span> 无法连接'}}
 
 // ── Init ──
-initVersion();loadUserInfo();loadDbms();loadFavorites();loadHistory();checkSystemHealth();
+initVersion();loadUserInfo();loadDbms();loadFavorites();loadHistory();loadConfigsData();checkSystemHealth();
 </script>
 
 <button class="back-to-top" id="back-to-top" title="Back to top" onclick="scrollToTop()">
