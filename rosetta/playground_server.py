@@ -1049,14 +1049,20 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             # Wait a bit and verify
             _time.sleep(5)
             port_ok = False
+            _vs = None
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(5)
-                s.connect((cfg_host, cfg_port))
-                s.close()
+                _vs = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                _vs.settimeout(5)
+                _vs.connect((cfg_host, cfg_port))
                 port_ok = True
             except Exception:
                 pass
+            finally:
+                if _vs is not None:
+                    try:
+                        _vs.close()
+                    except Exception:
+                        pass
 
             # Update health cache
             with cls._health_lock:
@@ -1177,11 +1183,26 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
             connected = False
             version = None
             error = None
+            # 1) Port reachability check — ensure the socket is ALWAYS closed,
+            #    even on connect timeout/refused, to avoid fd leaks that can
+            #    crash the process under glibc's threaded resolver.
+            s = None
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(2)
                 s.connect((host, port))
-                s.close()
+            except Exception as e:
+                error = str(e)[:200]
+                return name, connected, version, error, cfg
+            finally:
+                if s is not None:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+            # 2) MySQL handshake — connection object is always closed in finally.
+            conn = None
+            try:
                 conn = pymysql.connect(
                     host=host, port=port, user=user,
                     password=password, charset="utf8mb4", connect_timeout=3,
@@ -1191,13 +1212,21 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
                 row = cur.fetchone()
                 version = row[0] if row else "unknown"
                 cur.close()
-                conn.close()
                 connected = True
             except Exception as e:
                 error = str(e)[:200]
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
             return name, connected, version, error, cfg
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(all_targets)) as pool:
+        # Cap concurrency to avoid spawning an unbounded number of threads
+        # each scan cycle (thread storm → native crashes under glibc 2.28).
+        max_workers = min(len(all_targets), 8)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
             futs = [pool.submit(_check_one, c) for c in all_targets]
             for fut in concurrent.futures.as_completed(futs):
                 try:

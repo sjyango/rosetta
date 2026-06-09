@@ -45,4 +45,5 @@ USER rosetta
 
 EXPOSE 8000
 
-CMD ["python3", "-m", "rosetta.playground_server", "--config", "with_config.json", "--port", "8000", "--output-dir", "/app/results"]
+# Disable core dumps in production to avoid filling disk if a native crash occurs
+CMD ["sh", "-c", "ulimit -c 0; exec python3 -m rosetta.playground_server --config with_config.json --port 8000 --output-dir /app/results"]
