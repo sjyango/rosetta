@@ -891,7 +891,7 @@ function loadDbms(){
     document.getElementById('sandbox-toggle').checked=SANDBOX_MODE;
     renderChips();renderBaselineChips();
   }
-  apiCall('GET','/api/dbms').then(function(r){
+  return apiCall('GET','/api/dbms').then(function(r){
     if(!r.ok){console.warn('API /api/dbms failed:',r);return}
     DBMS_LIST=r.dbms||[];DATABASE=r.database||'';
     ACTIVE_DBMS=new Set(DBMS_LIST.filter(function(d){return d.active}).map(function(d){return d.name}));
