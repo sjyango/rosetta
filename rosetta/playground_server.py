@@ -1175,11 +1175,19 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
 
         def _check_one(cfg):
             import pymysql
-            name = cfg["name"]
-            host = cfg["host"]
-            port = cfg["port"]
-            user = cfg["user"]
-            password = cfg["password"]
+            # Normalize: handle both DBMSConfig objects (built-in) and dicts (custom MySQL)
+            if isinstance(cfg, dict):
+                name = cfg["name"]
+                host = cfg["host"]
+                port = cfg["port"]
+                user = cfg["user"]
+                password = cfg["password"]
+            else:
+                name = cfg.name
+                host = cfg.host
+                port = cfg.port
+                user = cfg.user
+                password = cfg.password
             connected = False
             version = None
             error = None
@@ -1234,12 +1242,20 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
                 except Exception:
                     continue
 
-                restart_cfg = cfg.get("restart", {}) or {}
-                restart_avail = bool(restart_cfg.get("enabled") and restart_cfg.get("command"))
+                # Normalize cfg to dict for uniform access (built-in are DBMSConfig objects, custom are dicts)
+                if isinstance(cfg, dict):
+                    _restart_cfg = cfg.get("restart", {}) or {}
+                    _cfg_host = cfg["host"]
+                    _cfg_port = cfg["port"]
+                else:
+                    _restart_cfg = getattr(cfg, "restart", None) or {}
+                    _cfg_host = cfg.host
+                    _cfg_port = cfg.port
+                restart_avail = bool(_restart_cfg.get("enabled") and _restart_cfg.get("command"))
 
                 with cls._health_lock:
                     cls._health_status[name] = {
-                        "name": name, "host": cfg["host"], "port": cfg["port"],
+                        "name": name, "host": _cfg_host, "port": _cfg_port,
                         "port_reachable": connected, "connected": connected,
                         "version": version, "latency_ms": 0,
                         "restart_available": restart_avail,
@@ -1264,7 +1280,7 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
                         cls._restart_retry_count[name] = retries + 1
                         cls._restart_in_progress[name] = True
 
-                    cmd = restart_cfg.get("command", "")
+                    cmd = _restart_cfg.get("command", "")
                     ssh_host = cls._health_monitor_config.get("ssh_host", "21.6.101.185")
                     ssh_user = cls._health_monitor_config.get("ssh_user", "root")
                     ssh_timeout = str(cls._health_monitor_config.get("ssh_timeout", 10))
