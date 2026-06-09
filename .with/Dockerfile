@@ -1,64 +1,45 @@
-# Multi-stage build for Rosetta Playground
-FROM python:3.11-slim AS base
+FROM python:3.11-slim
+
+LABEL description="Rosetta SQL Playground for With Platform"
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
-# Install system dependencies needed for SSH + build
+# Install only runtime system deps (no build-essential, no gcc)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
-    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Dependencies stage ──
-FROM base AS deps
-COPY pyproject.toml requirements.txt ./
-RUN pip install --no-cache-dir \
-    pymysql>=1.0 \
-    rich>=13.0 \
-    prompt_toolkit>=3.0.52 \
-    oracledb>=2.0 \
-    mysql-connector-python>=8.0
+# Copy dependency files first for caching
+COPY requirements.txt pyproject.toml ./
 
-# ── Runner stage ──
-FROM base AS runner
+# Install Python deps from pre-built wheels only (fast)
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Create non-root user
-RUN useradd -m -u 1001 rosetta
+# Copy application
+COPY rosetta/ ./rosetta/
+COPY scripts/ ./scripts/
+COPY with_config.json .
+COPY playground.html .
 
-# Copy installed packages from deps stage
-COPY --from=deps /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-
-# Copy application source
-COPY --chown=rosetta:rosetta rosetta/ ./rosetta/
-COPY --chown=rosetta:rosetta scripts/ ./scripts/
-COPY --chown=rosetta:rosetta pyproject.toml .
-COPY --chown=rosetta:rosetta with_config.json .
-
-# Make restart scripts executable
+# Make scripts executable
 RUN chmod +x /app/scripts/*.sh
 
-# Create results directory
-RUN mkdir -p /app/results && chown rosetta:rosetta /app/results
+# Create non-root user
+RUN useradd -m -u 1001 rosetta && \
+    mkdir -p /app/results && \
+    chown -R rosetta:rosetta /app
 
-# MySQL persistence environment variables
+# MySQL persistence envs
 ENV MYSQL_HOST=11.142.154.110 \
     MYSQL_PORT=3306 \
     MYSQL_USER=with_ugmatclusdrxhadd \
     MYSQL_PASSWORD=Xe#RGXP8$a0XQQ \
-    MYSQL_DATABASE=rf5otpny
-
-# Rosetta config path
-ENV ROSETTA_CONFIG=/app/with_config.json
-
-# SSH config for DBMS restart
-ENV SSH_HOST=21.6.101.185 \
-    SSH_USER=root \
-    SSH_TIMEOUT=10
+    MYSQL_DATABASE=rf5otpny \
+    ROSETTA_CONFIG=/app/with_config.json
 
 USER rosetta
 
