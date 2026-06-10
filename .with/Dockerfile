@@ -45,5 +45,9 @@ USER rosetta
 
 EXPOSE 8000
 
-# Disable core dumps in production to avoid filling disk if a native crash occurs
-CMD ["sh", "-c", "ulimit -c 0; exec python3 -m rosetta.playground_server --config with_config.json --port 8000 --output-dir /app/results"]
+# Set core dump limit via env (no shell needed), then launch server directly.
+# Avoid sh -c wrapper so that special characters in env values (e.g. '#' in MYSQL_PASSWORD)
+# are handled correctly by Python's os.environ.
+ENV PYTHONCORE=0
+
+CMD ["python3", "-m", "rosetta.playground_server", "--config", "with_config.json", "--port", "8000", "--output-dir", "/app/results"]
