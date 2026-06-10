@@ -770,47 +770,50 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
     # ── API: Health ──────────────────────────────────────────────────
 
     def _handle_health_check(self):
-        """GET /api/health — check if the system is functional.
-        Tests connectivity to at least one enabled DBMS."""
+        """GET /api/health — fast system health check.
+
+        Returns cached health status from the background monitor.
+        If the monitor hasn't started yet, returns 'starting' status.
+        Never blocks on external network connections — always answers
+        within milliseconds so platform health probes don't timeout.
+        """
         from importlib.metadata import version as _get_version
         try:
             _version = _get_version("rosetta-sql")
         except Exception:
             _version = "1.5.1"
-        # Collect enabled active configs
-        active_configs = [c for c in self._all_configs
-                          if getattr(c, "enabled", True)]
-        if not active_configs:
-            self._respond_json({"ok": True, "status": "unhealthy",
-                                "reason": "No enabled DBMS", "version": _version})
+
+        cls = type(self)
+        # Use cached health status from background monitor if available.
+        with cls._health_lock:
+            statuses = dict(cls._health_status)
+
+        # Remove metadata keys
+        monitor_enabled = statuses.pop("_monitor_enabled", None)
+        statuses.pop("_last_scan", None)
+
+        if not statuses:
+            # Monitor hasn't completed a scan yet — count enabled configs as total
+            active = [c for c in cls._all_configs if getattr(c, "enabled", True)]
+            self._respond_json({
+                "ok": True,
+                "status": "starting" if monitor_enabled is not False else "unmonitored",
+                "connected": 0,
+                "total": len(active),
+                "version": _version,
+                "monitor_active": monitor_enabled if monitor_enabled is not None else False,
+            })
             return
 
-        # Try to connect to at least one enabled DBMS
-        import pymysql
-        connected_count = 0
-        for c in active_configs:
-            try:
-                conn = pymysql.connect(
-                    host=c.host, port=c.port, user=c.user,
-                    password=c.password,
-                    charset="utf8mb4", connect_timeout=3,
-                )
-                conn.ping(reconnect=False)
-                conn.close()
-                connected_count += 1
-            except Exception:
-                pass
-
-        if connected_count > 0:
-            self._respond_json({"ok": True, "status": "healthy",
-                                "connected": connected_count,
-                                "total": len(active_configs),
-                                "version": _version})
-        else:
-            self._respond_json({"ok": True, "status": "unhealthy",
-                                "reason": "No DBMS reachable",
-                                "total": len(active_configs),
-                                "version": _version})
+        connected = sum(1 for s in statuses.values() if s.get("connected"))
+        total = len(statuses)
+        self._respond_json({
+            "ok": True,
+            "status": "healthy" if connected == total else ("degraded" if connected > 0 else "unhealthy"),
+            "connected": connected,
+            "total": total,
+            "version": _version,
+        })
 
     # ── API: Per-DBMS Health ─────────────────────────────────────────
 
@@ -2108,11 +2111,28 @@ class PlaygroundServer:
         PlaygroundAPIHandler._baseline = self.baseline
         PlaygroundAPIHandler._traceless = self.traceless
 
-        # Ensure database tables exist
-        try:
-            PlaygroundAPIHandler._ensure_all_tables()
-        except Exception as e:
-            log.warning("Failed to ensure DB tables: %s", e)
+        # Ensure database tables exist — run in background to avoid blocking startup
+        # if MySQL is unreachable (e.g. in deployment environments).
+        def _background_init():
+            try:
+                PlaygroundAPIHandler._ensure_all_tables()
+            except Exception as e:
+                log.warning("Background DB init failed: %s", e)
+
+        threading.Thread(target=_background_init, daemon=True, name="db-init").start()
+
+        # Start health monitor in background after a short delay, so the HTTP
+        # server is responding before we attempt any SSH / network probes.
+        def _background_health():
+            _time.sleep(5)
+            try:
+                config_path = PlaygroundAPIHandler._config_path or "with_config.json"
+                PlaygroundAPIHandler._load_health_monitor_config(config_path)
+                PlaygroundAPIHandler._start_health_monitor()
+            except Exception as e:
+                log.warning("Background health monitor init failed: %s", e)
+
+        threading.Thread(target=_background_health, daemon=True, name="health-init").start()
 
         handler = lambda *a, **kw: PlaygroundAPIHandler(*a, directory=self.directory, **kw)
 
@@ -2126,12 +2146,6 @@ class PlaygroundServer:
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         log.info("Playground server started on port %d", self.port)
-
-        # Start health monitor
-        PlaygroundAPIHandler._load_health_monitor_config(
-            PlaygroundAPIHandler._config_path or "with_config.json"
-        )
-        PlaygroundAPIHandler._start_health_monitor()
 
         return self.base_url
 
