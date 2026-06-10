@@ -2063,8 +2063,19 @@ class PlaygroundServer:
             log.info("Playground (With edition) page written: %s", _dst_html)
             # Embed DBMS config data so the page works even when API is unavailable
             try:
+                import re
+
                 with open(_dst_html, "r", encoding="utf-8") as f:
                     html = f.read()
+
+                # Strip any stale EMBEDDED_xxx lines left over from source template
+                html = re.sub(
+                    r'\n?var EMBEDDED_DBMS=.*?;var EMBEDDED_DATABASE=.*?;'
+                    r'var EMBEDDED_BASELINE=.*?;var EMBEDDED_TRACELESS=.*?;'
+                    r'(?:var EMBEDDED_VERSION=.*?;)?\n?',
+                    '', html, count=1
+                )
+
                 active_names = {c.name for c in self.configs}
                 dbms_list = []
                 for c in self.all_configs:
