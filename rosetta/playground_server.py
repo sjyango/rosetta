@@ -793,11 +793,15 @@ class PlaygroundAPIHandler(http.server.SimpleHTTPRequestHandler):
         statuses.pop("_last_scan", None)
 
         if not statuses:
-            # Monitor hasn't completed a scan yet — count enabled configs as total
+            # Monitor hasn't completed a scan yet.
+            # The HTTP server itself is healthy (responding) — DBMS monitoring
+            # is a background enhancement. Report 'healthy' immediately so
+            # that deployment/platform health probes don't timeout waiting
+            # for the first scan cycle to complete.
             active = [c for c in cls._all_configs if getattr(c, "enabled", True)]
             self._respond_json({
                 "ok": True,
-                "status": "starting" if monitor_enabled is not False else "unmonitored",
+                "status": "healthy",
                 "connected": 0,
                 "total": len(active),
                 "version": _version,
