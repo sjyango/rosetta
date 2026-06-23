@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+PGRlZnM+PGxpbmVhckdyYWRpZW50IGlkPSJnIiB4MT0iMCIgeTE9IjAiIHgyPSIxIiB5Mj0iMSI+PHN0b3Agb2Zmc2V0PSIwJSIgc3RvcC1jb2xvcj0iIzU4YTZmZiIvPjxzdG9wIG9mZnNldD0iMTAwJSIgc3RvcC1jb2xvcj0iIzNmYjk1MCIvPjwvbGluZWFyR3JhZGllbnQ+PC9kZWZzPjxyZWN0IHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgcng9IjYiIGZpbGw9IiMwZDExMTciLz48ZWxsaXBzZSBjeD0iMTYiIGN5PSI4IiByeD0iMTEiIHJ5PSI0IiBmaWxsPSJ1cmwoI2cpIiBvcGFjaXR5PSIwLjkiLz48cGF0aCBkPSJNNSA4djE0YzAgMi4yMSA0LjkyIDQgMTEgNHMxMS0xLjc5IDExLTRWOCIgZmlsbD0idXJsKCNnKSIgb3BhY2l0eT0iMC43NSIvPjxlbGxpcHNlIGN4PSIxNiIgY3k9IjE1IiByeD0iMTEiIHJ5PSI0IiBmaWxsPSJub25lIiBzdHJva2U9IiM1OGE2ZmYiIHN0cm9rZS13aWR0aD0iMSIgc3Ryb2tlLWRhc2hhcnJheT0iMyAyIiBvcGFjaXR5PSIwLjQiLz48dGV4dCB4PSIxNiIgeT0iMjEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iOSIgZm9udC13ZWlnaHQ9IjgwMCIgZm9udC1mYW1pbHk9IkFyaWFsLEhlbHZldGljYSxzYW5zLXNlcmlmIiBmaWxsPSIjMGQxMTE3IiBzdHJva2U9Im5vbmUiPlI8L3RleHQ+PC9zdmc+" type="image/svg+xml">
 <title>Rosetta — SQL Playground (With Edition)</title>
 <style>
 :root {
@@ -41,6 +42,24 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
   transition:all 0.15s; cursor:pointer; }
 .btn-nav:hover { border-color:var(--blue); color:var(--blue); background:var(--bg2); }
 .btn-nav.active { border-color:var(--accent); color:var(--blue); background:rgba(31,111,235,0.1); }
+
+/* Version tag */
+.version-tag { font-size:10px; font-weight:600; padding:2px 7px; border-radius:10px;
+  background:rgba(31,111,235,0.12); color:var(--blue); letter-spacing:0.3px;
+  margin-left:6px; vertical-align:middle; line-height:1; border:1px solid rgba(31,111,235,0.2); }
+
+/* System status indicator */
+.sys-status { display:inline-flex; align-items:center; gap:5px; font-size:12px;
+  padding:5px 12px; border-radius:6px; border:1px solid var(--border);
+  background:var(--bg3); transition:all 0.3s; cursor:default; }
+.sys-status .status-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0;
+  transition:all 0.3s; }
+.sys-status.healthy { border-color:rgba(63,185,80,0.4); background:rgba(63,185,80,0.08); color:var(--green); }
+.sys-status.healthy .status-dot { background:var(--green); box-shadow:0 0 6px rgba(63,185,80,0.5); }
+.sys-status.unhealthy { border-color:rgba(248,81,73,0.4); background:rgba(248,81,73,0.08); color:var(--red); }
+.sys-status.unhealthy .status-dot { background:var(--red); box-shadow:0 0 6px rgba(248,81,73,0.5); }
+.sys-status.checking { border-color:rgba(210,153,34,0.4); background:rgba(210,153,34,0.08); color:var(--yellow); }
+.sys-status.checking .status-dot { background:var(--yellow); animation:chip-pulse 1.5s ease-in-out infinite; }
 .user-info { display:flex; align-items:center; gap:8px; padding:3px 10px 3px 3px; border-radius:24px; border:1px solid transparent; transition:all 0.25s; cursor:default; }
 .user-info:hover { border-color:var(--border); background:var(--bg3); }
 .avatar-wrap { width:30px; height:30px; border-radius:50%; flex-shrink:0; position:relative; overflow:hidden; box-shadow:0 0 0 2px var(--bg); transition:box-shadow 0.25s; }
@@ -53,6 +72,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .user-name { font-size:13px; color:var(--fg); font-weight:600; line-height:1.3; }
 .user-eng { font-size:11px; color:var(--fg2); font-weight:400; line-height:1.3; }
 #user-name-display:empty::after { content:'\200b'; }
+.anon-badge { display:inline-flex; align-items:center; gap:4px; font-size:12px; color:var(--yellow); background:rgba(210,153,34,0.1); padding:2px 8px; border-radius:12px; border:1px solid rgba(210,153,34,0.25); font-weight:600; }
+.anon-badge::before { content:'\26A0'; font-size:11px; }
 
 /* Body Layout */
 .body-wrap { display:flex; flex:1; overflow:hidden; }
@@ -65,7 +86,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .sidebar-close { background:none; border:none; color:var(--fg2); cursor:pointer; font-size:16px; padding:2px 6px; border-radius:4px; }
 .sidebar-close:hover { color:var(--fg); background:var(--bg3); }
 .sidebar-body { flex:1; overflow-y:auto; padding:8px; }
-.main-content { flex:1; display:flex; flex-direction:column; overflow:hidden; min-width:0; order:1; }
+.main-content { flex:1; display:flex; flex-direction:column; overflow-y:auto; min-width:0; order:1; }
 
 /* Sidebar Tabs */
 .sidebar-tabs { display:flex; border-bottom:1px solid var(--border); }
@@ -106,7 +127,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .sidebar-empty .icon { font-size:32px; margin-bottom:8px; opacity:0.4; }
 
 /* Input area */
-.input-area { padding:16px 20px 0; flex-shrink:0; }
+.input-area { padding:16px 20px 0; }
 .input-area-inner { background:var(--bg2); border:1px solid var(--border);
   border-radius:10px; padding:16px; overflow:hidden; }
 .input-label { font-size:12px; color:var(--fg2); text-transform:uppercase;
@@ -115,7 +136,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .sql-input { flex:1; background:var(--bg); border:1px solid var(--border);
   border-radius:10px; color:var(--fg); padding:14px 18px; font-size:14px;
   font-family:'SF Mono',Consolas,'Courier New',monospace;
-  min-height:130px; max-height:320px; resize:vertical; outline:none;
+  min-height:130px; max-height:460px; overflow-y:auto; outline:none;
   line-height:1.7; transition:border-color 0.2s,box-shadow 0.2s; tab-size:2; }
 .sql-input:focus { border-color:var(--accent); box-shadow:0 0 0 3px var(--glow); }
 .sql-input::placeholder { color:var(--fg2); opacity:0.6; }
@@ -188,7 +209,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .sandbox-hint { font-size:10px; color:var(--fg2); margin-left:6px; }
 
 /* Results */
-.results-area { flex:1; padding:16px 20px; overflow-y:auto; }
+.results-area { flex:1; padding:16px 20px; }
 
 /* Stmt block */
 .stmt-block { margin-bottom:24px; }
@@ -243,7 +264,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 /* Results summary bar */
 .results-summary { display:flex; gap:8px; align-items:center; padding:8px 16px;
   background:var(--bg2); border:1px solid var(--border); border-radius:8px;
-  margin-bottom:14px; font-size:12px; font-weight:600; }
+  margin-bottom:14px; font-size:12px; font-weight:600;
+  position:sticky; top:8px; z-index:10;
+  backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+  box-shadow:0 2px 12px rgba(0,0,0,0.3); }
 .summary-btn { display:inline-flex; align-items:center; gap:3px;
   background:none; border:1px solid transparent; border-radius:6px;
   padding:3px 8px; cursor:pointer; font-size:12px; font-weight:600; transition:all 0.15s; }
@@ -290,10 +314,24 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 
 /* Toast */
 .toast { position:fixed; bottom:24px; right:24px; padding:10px 18px;
-  border-radius:10px; font-size:13px; color:#fff; z-index:9999;
+  border-radius:10px; font-size:13px; color:#fff; z-index:10001;
   transition:opacity 0.3s; pointer-events:none; box-shadow:0 4px 20px rgba(0,0,0,0.4); }
 .toast-error { background:var(--red); }
 .toast-success { background:var(--green); }
+
+/* Back to Top */
+.back-to-top { position:fixed; bottom:28px; right:28px; width:42px; height:42px;
+  background:linear-gradient(135deg, var(--accent), #388bfd);
+  color:#fff; border:none; border-radius:50%; font-size:18px; cursor:pointer;
+  z-index:9998; opacity:0; transform:translateY(12px);
+  transition:opacity 0.3s,transform 0.3s,box-shadow 0.2s;
+  box-shadow:0 4px 16px rgba(31,111,235,0.35);
+  display:flex; align-items:center; justify-content:center;
+  pointer-events:none; }
+.back-to-top.visible { opacity:1; transform:translateY(0); pointer-events:auto; }
+.back-to-top:hover { transform:translateY(-2px); box-shadow:0 6px 24px rgba(31,111,235,0.5); }
+.back-to-top:active { transform:translateY(0); box-shadow:0 2px 8px rgba(31,111,235,0.3); }
+.back-to-top svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:2.5; stroke-linecap:round; stroke-linejoin:round; }
 
 /* EXPLAIN tabs */
 .explain-container { display:flex; flex-direction:column; max-height:350px; }
@@ -358,6 +396,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 .test-result { margin-top:8px; padding:8px 12px; border-radius:8px; font-size:12px;
   font-weight:500; display:none; animation:fadeIn 0.2s ease-out; }
 @keyframes fadeIn { from{opacity:0;transform:translateY(-4px)} to{opacity:1;transform:translateY(0)} }
+.test-result.testing { display:block; background:#1a2332; color:var(--accent);
+  border:1px solid rgba(31,111,235,0.3); }
+.test-result.testing::before { content:''; display:inline-block; width:12px; height:12px;
+  border:2px solid var(--accent); border-top-color:transparent; border-radius:50%;
+  animation:spin 0.8s linear infinite; vertical-align:middle; margin-right:8px; }
+@keyframes spin { to{transform:rotate(360deg)} }
 .test-result.success { display:block; background:var(--green-bg); color:var(--green);
   border:1px solid rgba(63,185,80,0.3); }
 .test-result.fail { display:block; background:var(--red-bg); color:var(--red);
@@ -403,6 +447,35 @@ select.form-input { cursor:pointer; }
 .btn-save:hover { transform:translateY(-1px); box-shadow:0 4px 16px rgba(31,111,235,0.4); }
 .btn-save:disabled { opacity:0.5; cursor:not-allowed; }
 
+/* ── Favorite Input Modal ── */
+.fav-modal .modal-card { width:440px; max-width:92vw; }
+.fav-modal-icon { width:44px; height:44px; border-radius:50%; background:linear-gradient(135deg,#f0c040,#d29922);
+  display:flex; align-items:center; justify-content:center; font-size:20px; margin:0 auto 8px;
+  box-shadow:0 4px 16px rgba(210,153,34,0.4); }
+.fav-modal-header { text-align:center; margin-bottom:4px; }
+.fav-modal-header h3 { font-size:16px; font-weight:600; color:var(--fg); margin:0; }
+.fav-modal-header p { font-size:12px; color:var(--fg2); margin:4px 0 0; }
+.fav-modal-body { padding:16px 24px; }
+.fav-input-wrap { position:relative; }
+.fav-input-wrap .fav-input { width:100%; background:var(--bg); border:2px solid var(--border);
+  border-radius:10px; padding:12px 14px; color:var(--fg); font-size:14px;
+  font-family:inherit; outline:none; transition:all 0.25s; }
+.fav-input-wrap .fav-input:focus { border-color:var(--yellow); box-shadow:0 0 0 3px rgba(210,153,34,0.15); }
+.fav-input-wrap .fav-input::placeholder { color:var(--fg2); opacity:0.4; font-size:12px; }
+.fav-input-hint { font-size:11px; color:var(--fg2); margin-top:6px; display:flex; align-items:center; gap:4px; }
+.fav-input-hint .sql-preview { background:var(--bg3); padding:3px 8px; border-radius:4px;
+  font-family:'SF Mono',Consolas,monospace; font-size:10px; color:var(--blue);
+  max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; }
+.fav-modal-footer { padding:12px 24px 20px; display:flex; justify-content:flex-end; gap:10px; }
+.btn-fav-cancel { background:var(--bg3); color:var(--fg2); border:1px solid var(--border);
+  border-radius:8px; padding:8px 18px; font-size:13px; cursor:pointer; transition:all 0.2s; }
+.btn-fav-cancel:hover { color:var(--fg); border-color:var(--fg2); background:var(--bg); }
+.btn-fav-save { background:linear-gradient(135deg,#d29922,#f0c040); color:#0d1117;
+  border:none; border-radius:8px; padding:8px 22px; font-size:13px; font-weight:600;
+  cursor:pointer; transition:all 0.2s; box-shadow:0 2px 8px rgba(210,153,34,0.35); }
+.btn-fav-save:hover { transform:translateY(-1px); box-shadow:0 4px 16px rgba(210,153,34,0.5); }
+.btn-fav-save:disabled { opacity:0.5; cursor:not-allowed; transform:none; }
+
 /* Config item action buttons */
 .ci-actions { display:flex; gap:6px; align-items:center; flex-shrink:0; }
 .ci-btn { background:var(--bg3); border:1px solid var(--border); border-radius:6px;
@@ -412,6 +485,8 @@ select.form-input { cursor:pointer; }
 .ci-btn.danger { color:var(--red); }
 .ci-btn.danger:hover { background:var(--red-bg); border-color:var(--red); }
 .ci-btn.testing { opacity:0.5; cursor:not-allowed; }
+.ci-btn.gear { color:var(--purple,#8250df); font-size:14px; padding:3px 8px; }
+.ci-btn.gear:hover { background:rgba(130,80,223,0.1); border-color:var(--purple,#8250df); }
 
 .add-dbms-btn { display:flex; align-items:center; gap:6px; width:100%;
   background:var(--bg); border:1px dashed var(--border); border-radius:10px;
@@ -427,6 +502,47 @@ select.form-input { cursor:pointer; }
   letter-spacing:0.3px; }
 .ci-tag.custom { background:rgba(163,113,247,0.12); color:var(--purple); }
 .ci-tag.builtin { background:rgba(88,166,255,0.1); color:var(--blue); }
+
+/* Config JSON Editor */
+.edit-config-btn { display:flex; align-items:center; gap:6px; width:100%;
+  background:var(--bg); border:1px dashed var(--border); border-radius:10px;
+  color:var(--fg2); font-size:12px; padding:10px 16px; cursor:pointer;
+  transition:all 0.2s; margin-bottom:10px; justify-content:center; }
+.edit-config-btn:hover { border-color:var(--yellow); color:var(--yellow);
+  background:rgba(210,153,34,0.05); }
+.edit-config-btn .edit-icon { font-size:14px; font-weight:700; }
+.config-editor-modal .modal-card { max-width:780px; width:95vw; max-height:90vh; }
+.config-editor-body { padding:16px 20px; display:flex; flex-direction:column; gap:12px; }
+.config-editor-hint { font-size:11px; color:var(--fg2); line-height:1.5;
+  background:rgba(210,153,34,0.08); border:1px solid rgba(210,153,34,0.2);
+  border-radius:8px; padding:10px 14px; }
+.config-editor-hint strong { color:var(--yellow); }
+.json-editor { width:100%; min-height:380px; max-height:55vh;
+  background:var(--bg); border:1px solid var(--border); border-radius:8px;
+  color:var(--fg); font-size:13px; font-family:'SF Mono',Consolas,'Courier New',monospace;
+  padding:14px 16px; resize:vertical; outline:none; line-height:1.6; tab-size:2;
+  transition:border-color 0.2s,box-shadow 0.2s; }
+.json-editor:focus { border-color:var(--yellow); box-shadow:0 0 0 3px rgba(210,153,34,0.15); }
+.json-editor.error { border-color:var(--red); box-shadow:0 0 0 3px rgba(248,81,73,0.15); }
+.config-editor-footer { display:flex; justify-content:space-between; align-items:center;
+  padding:14px 20px; border-top:1px solid var(--border); background:var(--bg); }
+.config-editor-footer .save-status { font-size:12px; color:var(--fg2); display:flex;
+  align-items:center; gap:6px; }
+.config-editor-footer .save-status.success { color:var(--green); }
+.config-editor-footer .save-status.error { color:var(--red); }
+.config-editor-footer .btn-group { display:flex; gap:8px; }
+.btn-reload { background:var(--bg3); color:var(--fg2); border:1px solid var(--border);
+  border-radius:8px; padding:9px 16px; font-size:13px; cursor:pointer;
+  transition:all 0.15s; display:flex; align-items:center; gap:5px; }
+.btn-reload:hover { color:var(--fg); border-color:var(--fg2); }
+.btn-reload svg { width:14px; height:14px; }
+.btn-save-warn { background:linear-gradient(135deg, var(--yellow), #d29922);
+  color:#000; border:none; border-radius:8px; padding:9px 20px; font-size:13px;
+  font-weight:600; cursor:pointer; transition:all 0.2s;
+  box-shadow:0 2px 8px rgba(210,153,34,0.3); }
+.btn-save-warn:hover { transform:translateY(-1px); box-shadow:0 4px 16px rgba(210,153,34,0.4); }
+.btn-save-warn:disabled { opacity:0.5; cursor:not-allowed; transform:none;
+  box-shadow:0 2px 8px rgba(210,153,34,0.15); }
 </style>
 </head>
 <body>
@@ -435,7 +551,11 @@ select.form-input { cursor:pointer; }
   <svg width="26" height="26" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="1" y="4" width="30" height="24" rx="4" stroke="#58a6ff" stroke-width="2" fill="none"/><rect x="1" y="4" width="30" height="8" rx="4" fill="#21262d"/><circle cx="7" cy="8" r="1.5" fill="#f85149"/><circle cx="12" cy="8" r="1.5" fill="#d29922"/><circle cx="17" cy="8" r="1.5" fill="#3fb950"/><path d="M11 20L15 23L11 26Z" fill="#58a6ff"/><line x1="18" y1="22" x2="25" y2="22" stroke="#79c0ff" stroke-width="2" stroke-linecap="round"/><line x1="18" y1="26" x2="22" y2="26" stroke="#8b949e" stroke-width="1.5" stroke-linecap="round"/></svg>
   <h1><span class="brand">Rosetta</span></h1>
   <span style="font-size:12px;color:var(--fg2);margin-left:4px;">SQL Playground · With Edition</span>
+  <span class="version-tag" id="version-tag">v1.0</span>
   <div class="header-spacer"></div>
+  <span class="sys-status checking" id="sys-status" title="Checking system health...">
+    <span class="status-dot"></span> Checking
+  </span>
   <button class="btn-nav" id="btn-history" onclick="toggleSidebar('history')" title="History">&#128337; History</button>
   <button class="btn-nav" id="btn-favorites" onclick="toggleSidebar('favorites')" title="Favorites">&#11088; Favorites</button>
   <button class="btn-nav" id="btn-config" onclick="toggleSidebar('config')" title="Config">&#9881; Config</button>
@@ -457,7 +577,7 @@ select.form-input { cursor:pointer; }
     <div class="sidebar-tabs">
       <button class="sidebar-tab active" data-tab="history" onclick="switchSidebarTab('history')">&#128337; History <span class="count" id="history-count">0</span></button>
       <button class="sidebar-tab" data-tab="favorites" onclick="switchSidebarTab('favorites')">&#11088; Favorites <span class="count" id="fav-count">0</span></button>
-      <button class="sidebar-tab" data-tab="config" onclick="switchSidebarTab('config')">&#9881; Config</button>
+      <button class="sidebar-tab" data-tab="config" onclick="switchSidebarTab('config')">&#9881; Config <span class="count" id="config-count">0</span></button>
     </div>
     <div class="sidebar-header">
       <span class="sidebar-title" id="sidebar-title">&#128337; SQL History</span>
@@ -505,6 +625,35 @@ select.form-input { cursor:pointer; }
 </div>
 
 <div id="toast" class="toast" style="opacity:0"></div>
+
+<!-- Favorite Save Modal -->
+<div class="modal-overlay fav-modal" id="fav-modal">
+  <div class="modal-card">
+    <div class="modal-header" style="border-bottom:none;padding-bottom:0">
+      <span class="modal-title"></span>
+      <button class="modal-close" onclick="closeFavModal()">&times;</button>
+    </div>
+    <div class="fav-modal-header">
+      <div class="fav-modal-icon">&#11088;</div>
+      <h3>Save to Favorites</h3>
+      <p>Give this query a memorable name</p>
+    </div>
+    <div class="fav-modal-body">
+      <div class="fav-input-wrap">
+        <input class="fav-input" id="fav-title-input" type="text" placeholder="e.g. Monthly sales report query" maxlength="200" autocomplete="off">
+      </div>
+      <div class="fav-input-hint">
+        <span>&#128196;</span>
+        <span>SQL preview: </span>
+        <span class="sql-preview" id="fav-sql-preview"></span>
+      </div>
+    </div>
+    <div class="fav-modal-footer">
+      <button class="btn-fav-cancel" onclick="closeFavModal()">Cancel</button>
+      <button class="btn-fav-save" id="btn-fav-confirm" onclick="confirmFavSave()">&#11088; Save</button>
+    </div>
+  </div>
+</div>
 
 <!-- DBMS Add/Edit Modal -->
 <div class="modal-overlay" id="dbms-modal">
@@ -565,62 +714,108 @@ select.form-input { cursor:pointer; }
   </div>
 </div>
 
+<!-- Config Editor Modal -->
+<div class="modal-overlay config-editor-modal" id="config-editor-modal">
+  <div class="modal-card">
+    <div class="modal-header">
+      <span class="modal-title">&#9881; Edit config.json</span>
+      <button class="modal-close" onclick="closeConfigEditor()">&times;</button>
+    </div>
+    <div class="config-editor-body">
+      <div class="config-editor-hint">
+        <strong>⚠️ Warning:</strong> Editing <code>config.json</code> directly may break the configuration.
+        Changes take effect immediately after saving. A backup (<code>.bak</code>) is auto-created.
+      </div>
+      <textarea class="json-editor" id="json-editor" spellcheck="false" placeholder="Loading config.json..."></textarea>
+    </div>
+    <div class="config-editor-footer">
+      <span class="save-status" id="config-save-status"></span>
+      <div class="btn-group">
+        <button class="btn-reload" id="btn-reload-config" onclick="reloadConfigEditor()" title="Reload from disk">
+          <svg viewBox="0 0 16 16" fill="none"><path d="M1 8a7 7 0 0113.5-3M15 8a7 7 0 01-13.5 3M13.5 1.5V5H10M2.5 14.5V11H6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Reload
+        </button>
+        <button class="btn-cancel" onclick="closeConfigEditor()">Cancel</button>
+        <button class="btn-save-warn" id="btn-save-config" onclick="saveConfigEditor()">
+          &#9881; Save & Apply
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
-var EMBEDDED_DBMS=[{"name": "mysql-9.6", "host": "21.6.101.185", "port": 3306, "active": true, "enabled": true, "type": "mysql", "database": "", "source": "builtin"}, {"name": "txsql-8.0", "host": "21.6.101.185", "port": 3307, "active": true, "enabled": true, "type": "mysql", "database": "", "source": "builtin"}, {"name": "tidb-8.5", "host": "21.6.101.185", "port": 4000, "active": true, "enabled": true, "type": "tidb", "database": "", "source": "builtin"}, {"name": "oceanbase", "host": "21.6.101.185", "port": 2881, "active": false, "enabled": false, "type": "oceanbase", "database": "", "source": "builtin"}, {"name": "oracle", "host": "21.6.101.185", "port": 1521, "active": false, "enabled": false, "type": "oracle", "database": "orclpdb1", "source": "builtin"}, {"name": "postgres-15", "host": "21.6.101.185", "port": 5432, "active": false, "enabled": false, "type": "mysql", "database": "", "source": "builtin"}];var EMBEDDED_DATABASE="cross_dbms_test_db";var EMBEDDED_BASELINE="";var EMBEDDED_TRACELESS=true;
-var EMBEDDED_DBMS=[{"name": "mysql-9.6", "host": "21.6.101.185", "port": 3306, "active": true, "enabled": true, "type": "mysql", "database": "", "source": "builtin"}, {"name": "txsql-8.0", "host": "21.6.101.185", "port": 3307, "active": true, "enabled": true, "type": "mysql", "database": "", "source": "builtin"}, {"name": "tidb-8.5", "host": "21.6.101.185", "port": 4000, "active": true, "enabled": true, "type": "tidb", "database": "", "source": "builtin"}, {"name": "oceanbase", "host": "21.6.101.185", "port": 2881, "active": false, "enabled": false, "type": "oceanbase", "database": "", "source": "builtin"}, {"name": "oracle", "host": "21.6.101.185", "port": 1521, "active": false, "enabled": false, "type": "oracle", "database": "orclpdb1", "source": "builtin"}, {"name": "postgres-15", "host": "21.6.101.185", "port": 5432, "active": false, "enabled": false, "type": "mysql", "database": "", "source": "builtin"}];var EMBEDDED_DATABASE="cross_dbms_test_db";var EMBEDDED_BASELINE="";var EMBEDDED_TRACELESS=true;
+var EMBEDDED_DBMS=[{"name": "mysql-9.6", "host": "21.6.101.185", "port": 3306, "active": true, "enabled": true, "type": "mysql", "database": "", "source": "builtin"}, {"name": "txsql-8.0", "host": "21.6.101.185", "port": 3307, "active": true, "enabled": true, "type": "mysql", "database": "", "source": "builtin"}, {"name": "tidb-8.5", "host": "21.6.101.185", "port": 4000, "active": true, "enabled": true, "type": "tidb", "database": "", "source": "builtin"}, {"name": "oceanbase", "host": "21.6.101.185", "port": 2881, "active": false, "enabled": false, "type": "oceanbase", "database": "", "source": "builtin"}, {"name": "oracle", "host": "21.6.101.185", "port": 1521, "active": false, "enabled": false, "type": "oracle", "database": "orclpdb1", "source": "builtin"}, {"name": "postgres-15", "host": "21.6.101.185", "port": 5432, "active": false, "enabled": false, "type": "mysql", "database": "", "source": "builtin"}];var EMBEDDED_DATABASE="cross_dbms_test_db";var EMBEDDED_BASELINE="";var EMBEDDED_TRACELESS=true;var EMBEDDED_VERSION="1.2.0";
 // ── State ──
 let DBMS_LIST=[], ACTIVE_DBMS=new Set(), BASELINE_DBMS='', DATABASE='', SANDBOX_MODE=true;
 let _currentAbortController=null, _sidebarVisible=false, _sidebarTab='history', currentUser=null;
 let DBMS_CONN_STATUS={};
 let configsData=[];
-let historyData=[], favoritesData=[], favSqlSet=new Set();
+let historyData=[], favoritesData=[], favSqlSet=new Set(), _loadHistoryVer=0, _loadFavVer=0, _loadConfigVer=0;
 
 // ── Utilities ──
 function showToast(msg,type){const t=document.getElementById('toast');t.textContent=msg;t.className='toast toast-'+(type||'error');t.style.opacity='1';setTimeout(()=>{t.style.opacity='0'},3000);}
 function esc(s){if(s===null||s===undefined)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function fmtElapsed(ms){if(ms<1)return ms.toFixed(3)+' ms';if(ms<1000)return ms.toFixed(1)+' ms';return(ms/1000).toFixed(2)+' s';}
 var IS_PREVIEW_0P=location.hostname.includes('preview.with.woa.com')&&/-0p-/.test(location.hostname);
+// Compute correct base URL that works behind preview proxies too.
+// e.g. http://with.woa.com/preview/abc123/ → base = http://with.woa.com/preview/abc123
+var BASE_URL=(function(){var p=location.pathname;var dir=p.substring(0,p.lastIndexOf('/'));return location.origin+dir;})();
+// All API calls use computed base URL — works both local & proxy-preview.
 // Note: With platform proxy forwarding handles /api/* → backend (9.134.197.122:8000).
 // All API calls use relative paths, no CORS issues.
-function apiCall(method,path,body){const opts={method,headers:{'Content-Type':'application/json'}};if(body)opts.body=JSON.stringify(body);return fetch(location.origin+path,opts).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);const ct=r.headers.get('content-type')||'';if(!ct.includes('application/json'))throw new Error('Non-JSON response from server');return r.json()});}
+function apiCall(method,path,body){var opts={method:method,headers:{'Content-Type':'application/json'}};if(body)opts.body=JSON.stringify(body);var controller=new AbortController();var timer=setTimeout(function(){controller.abort();},15000);opts.signal=controller.signal;return fetch(BASE_URL+path,opts).then(function(r){clearTimeout(timer);if(!r.ok)throw new Error('HTTP '+r.status);var ct=r.headers.get('content-type')||'';if(!ct.includes('application/json'))throw new Error('Non-JSON response from server');return r.json();}).catch(function(e){clearTimeout(timer);throw e;});}
 
 // ── User Info ──
-async function loadUserInfo(){const nameEl=document.getElementById('user-name-display');const engEl=document.getElementById('user-eng-display');const wrap=document.getElementById('avatar-wrap');const initialsEl=document.getElementById('avatar-initials');const img=document.getElementById('user-avatar');const avatarColors=['#1f6feb','#8250df','#bf3989','#cf222e','#d4a72c','#1a7f37','#0969da','#a40e26','#bc4c00','#0e7c7b'];function colorFromName(n){let h=0;for(let i=0;i<(n||'').length;i++)h=n.charCodeAt(i)+((h<<5)-h);return avatarColors[Math.abs(h)%avatarColors.length]}function setUser(eng,chn,dept,avatarUrl){nameEl.textContent=chn||eng||'Guest';if(eng){engEl.textContent='@'+eng;engEl.style.display='block'}else{engEl.style.display='none'}document.getElementById('user-info').title=dept||'';const initial=(chn||eng||'G')[0].toUpperCase();initialsEl.textContent=initial;initialsEl.style.background=colorFromName(eng||chn||'Guest');wrap.classList.remove('avatar-loading');img.classList.remove('loaded');img.src='';if(avatarUrl&&eng&&!location.hostname.includes('preview.with.woa.com')){img.src=avatarUrl;img.onload=()=>{img.classList.add('loaded')};img.onerror=()=>{img.classList.remove('loaded');img.src=''}}currentUser=null}try{const r=await fetch(location.origin+'/ts:auth/tauth/info.ashx').then(resp=>resp.json());if(r&&r.EngName){currentUser={eng_name:r.EngName,chn_name:r.ChnName||'',dept_name:r.DeptNameString||'',position:r.PositionName||'',avatar_url:'https://r.hrc.woa.com/photo/150/'+r.EngName+'.png?default_when_absent=true'};setUser(r.EngName,r.ChnName,r.DeptNameString,currentUser.avatar_url);return}}catch(e){}try{const r=await apiCall('GET','/api/user');if(r.ok&&r.user&&r.user.eng_name){currentUser=r.user;setUser(r.user.eng_name,r.user.chn_name,r.user.dept_name,r.user.avatar_url);return}}catch(e){}setUser('','','','')}
+async function loadUserInfo(){var nameEl=document.getElementById('user-name-display');var engEl=document.getElementById('user-eng-display');var wrap=document.getElementById('avatar-wrap');var initialsEl=document.getElementById('avatar-initials');var img=document.getElementById('user-avatar');var avatarColors=['#1f6feb','#8250df','#bf3989','#cf222e','#d4a72c','#1a7f37','#0969da','#a40e26','#bc4c00','#0e7c7b'];function colorFromName(n){var h=0;for(var i=0;i<(n||'').length;i++)h=n.charCodeAt(i)+((h<<5)-h);return avatarColors[Math.abs(h)%avatarColors.length]}function setUser(eng,chn,dept,avatarUrl,isAnon){var userInfo=document.getElementById('user-info');if(isAnon){nameEl.innerHTML='<span class="anon-badge">'+esc(chn||'匿名用户')+'</span>';engEl.style.display='none';userInfo.title='当前为访客模式 — 数据仅保存在匿名账户下';userInfo.style.cursor='help'}else{nameEl.textContent=chn||eng||'Guest';if(eng){engEl.textContent='@'+eng;engEl.style.display='block'}else{engEl.style.display='none'}userInfo.title=dept||'';userInfo.style.cursor=''}var initial=(chn||eng||'G')[0].toUpperCase();initialsEl.textContent=initial;initialsEl.style.background=colorFromName(eng||chn||'Guest');wrap.classList.remove('avatar-loading');img.classList.remove('loaded');img.src='';if(avatarUrl&&eng&&!location.hostname.includes('preview.with.woa.com')){img.src=avatarUrl;img.onload=function(){img.classList.add('loaded')};img.onerror=function(){img.classList.remove('loaded');img.src=''}}}var anonUser={eng_name:'anonymous',chn_name:'匿名用户',dept_name:'访客模式',position:'',avatar_url:''};try{var ctrl=new AbortController();var tmr=setTimeout(function(){ctrl.abort()},5000);var r=await fetch(BASE_URL+'/ts:auth/tauth/info.ashx',{signal:ctrl.signal}).then(function(resp){return resp.json()});clearTimeout(tmr);if(r&&r.EngName){currentUser={eng_name:r.EngName,chn_name:r.ChnName||'',dept_name:r.DeptNameString||'',position:r.PositionName||'',avatar_url:'https://r.hrc.woa.com/photo/150/'+r.EngName+'.png?default_when_absent=true'};setUser(r.EngName,r.ChnName,r.DeptNameString,currentUser.avatar_url);return}}catch(e){}try{var r2=await apiCall('GET','/api/user');if(r2.ok&&r2.user&&r2.user.eng_name){currentUser=r2.user;setUser(r2.user.eng_name,r2.user.chn_name,r2.user.dept_name,r2.user.avatar_url);return}}catch(e){}currentUser=anonUser;setUser('anonymous','匿名用户','','',true)}
 
 // ── Sidebar ──
 function toggleSidebar(tab){const sidebar=document.getElementById('sidebar');if(_sidebarVisible&&_sidebarTab===tab){closeSidebar();return}_sidebarVisible=true;_sidebarTab=tab;sidebar.classList.remove('collapsed');switchSidebarTab(tab);document.getElementById('btn-history').classList.toggle('active',tab==='history');document.getElementById('btn-favorites').classList.toggle('active',tab==='favorites');document.getElementById('btn-config').classList.toggle('active',tab==='config')}
 function closeSidebar(){_sidebarVisible=false;document.getElementById('sidebar').classList.add('collapsed');document.getElementById('btn-history').classList.remove('active');document.getElementById('btn-favorites').classList.remove('active');document.getElementById('btn-config').classList.remove('active')}
 function switchSidebarTab(tab){_sidebarTab=tab;document.querySelectorAll('.sidebar-tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===tab));const titles={history:'&#128337; SQL History',favorites:'&#11088; Favorites',config:'&#9881; DBMS Configurations'};document.getElementById('sidebar-title').innerHTML=titles[tab]||'';loadSidebarContent()}
-async function loadSidebarContent(){const body=document.getElementById('sidebar-body');body.innerHTML='<div class="sidebar-empty"><div class="icon">&#9203;</div>Loading...</div>';if(_sidebarTab==='history'){await loadHistory();renderHistory()}else if(_sidebarTab==='favorites'){await loadFavorites();renderFavorites()}else if(_sidebarTab==='config'){await loadConfigsData();renderConfigs()}}
+async function loadSidebarContent(){const body=document.getElementById('sidebar-body');body.innerHTML='<div class="sidebar-empty"><div class="icon">&#9203;</div>Loading...</div>';var histP=loadHistory(),favP=loadFavorites(),cfgP=loadConfigsData();if(_sidebarTab==='history'){await histP;renderHistory()}else if(_sidebarTab==='favorites'){await favP;renderFavorites()}else if(_sidebarTab==='config'){await cfgP;renderConfigs()}else{await Promise.all([histP,favP,cfgP])}}
 
 // ── History ──
-async function loadHistory(){try{const r=await apiCall('GET','/api/history');historyData=r.history||[];document.getElementById('history-count').textContent=historyData.length}catch(e){historyData=[]}}
-function renderHistory(){const body=document.getElementById('sidebar-body');if(historyData.length===0){body.innerHTML='<div class="sidebar-empty"><div class="icon">&#128203;</div><p>No history yet.<br>Execute some SQL to start!</p></div>';return}body.innerHTML=historyData.map(h=>{const sqlShort=esc(h.sql_text||'').substring(0,80)+((h.sql_text||'').length>80?'...':'');const meta=[h.dbms_targets,h.baseline?'baseline:'+h.baseline:''].filter(Boolean).join(' · ');const isFav=favSqlSet.has(h.sql_text||'');return'<div class="history-item" onclick="loadHistorySql(\''+esc(h.sql_text).replace(/'/g,"\\'")+'\')"><div class="hi-sql" title="'+esc(h.sql_text||'')+'">'+sqlShort+'</div><div class="hi-meta"><span>'+esc(meta)+'</span><span class="hi-time">'+esc(h.created_at||'')+'</span></div><div class="history-actions"><button class="hi-btn" onclick="event.stopPropagation();loadHistorySql(\''+esc(h.sql_text).replace(/'/g,"\\'")+'\')">&#9654; Load</button><button class="hi-btn fav '+(isFav?'active':'')+'" onclick="event.stopPropagation();toggleFavHistory('+h.id+',\''+esc(h.sql_text).replace(/'/g,"\\'")+'\')">'+(isFav?'&#11088;':'&#9734;')+'</button><button class="hi-btn danger" onclick="event.stopPropagation();deleteHistory('+h.id+')">&#10005;</button></div></div>'}).join('')}
-function loadHistorySql(escapedSql){document.getElementById('sql-input').value=escapedSql.replace(/\\'/g,"'");closeSidebar()}
-async function saveHistory(sqlText,dbmsTargets,baseline,elapsedMs,summary){try{await apiCall('POST','/api/history/save',{sql_text:sqlText,dbms_targets:dbmsTargets,baseline:baseline,execution_time_ms:elapsedMs,result_summary:summary})}catch(e){}}
+async function loadHistory(){var _v=++_loadHistoryVer;try{const un=(currentUser||{}).eng_name||'';const r=await apiCall('GET','/api/history'+(un?'?user_name='+encodeURIComponent(un):''));if(_v!==_loadHistoryVer)return;historyData=r.history||[];document.getElementById('history-count').textContent=historyData.length}catch(e){if(_v!==_loadHistoryVer)return;historyData=[]}}
+function renderHistory(){const body=document.getElementById('sidebar-body');if(historyData.length===0){body.innerHTML='<div class="sidebar-empty"><div class="icon">&#128203;</div><p>No history yet.<br>Execute some SQL to start!</p></div>';return}body.innerHTML=historyData.map(function(h,i){const sqlShort=esc(h.sql_text||'').substring(0,80)+((h.sql_text||'').length>80?'...':'');const meta=[h.dbms_targets,h.baseline?'baseline:'+h.baseline:''].filter(Boolean).join(' · ');const isFav=favSqlSet.has(h.sql_text||'');return'<div class="history-item" data-hidx="'+i+'" onclick="loadHistoryByIndex('+i+')"><div class="hi-sql" title="'+esc(h.sql_text||'')+'">'+sqlShort+'</div><div class="hi-meta"><span>'+esc(meta)+'</span><span class="hi-time">'+esc(h.created_at||'')+'</span></div><div class="history-actions"><button class="hi-btn" onclick="event.stopPropagation();loadHistoryByIndex('+i+')">&#9654; Load</button><button class="hi-btn fav '+(isFav?'active':'')+'" onclick="event.stopPropagation();toggleFavHistory('+h.id+','+i+')">'+(isFav?'&#11088;':'&#9734;')+'</button><button class="hi-btn danger" onclick="event.stopPropagation();deleteHistory('+h.id+')">&#10005;</button></div></div>'}).join('')}
+function loadHistoryByIndex(idx){if(idx>=0&&idx<historyData.length){document.getElementById('sql-input').value=historyData[idx].sql_text;closeSidebar()}}
+async function saveHistory(sqlText,dbmsTargets,baseline,elapsedMs,summary){try{const r=await apiCall('POST','/api/history/save',{user_name:(currentUser||{}).eng_name||'',sql_text:sqlText,dbms_targets:dbmsTargets,baseline:baseline,execution_time_ms:elapsedMs,result_summary:summary});if(!r.ok)console.warn('saveHistory failed:',r.error)}catch(e){console.warn('saveHistory error:',e)}}
 async function deleteHistory(id){try{await apiCall('DELETE','/api/history/'+id);historyData=historyData.filter(h=>h.id!==id);document.getElementById('history-count').textContent=historyData.length;renderHistory();showToast('History deleted','success')}catch(e){showToast('Failed to delete')}}
 
 // ── Favorites ──
-async function loadFavorites(){try{const r=await apiCall('GET','/api/favorites');favoritesData=r.favorites||[];favSqlSet=new Set(favoritesData.map(f=>f.sql_text||''));document.getElementById('fav-count').textContent=favoritesData.length}catch(e){favoritesData=[]}}
-function renderFavorites(){const body=document.getElementById('sidebar-body');if(favoritesData.length===0){body.innerHTML='<div class="sidebar-empty"><div class="icon">&#11088;</div><p>No favorites yet.<br>Click &#11088; Save to add!</p></div>';return}body.innerHTML=favoritesData.map(f=>{const title=f.title||'Untitled';const sqlShort=esc(f.sql_text||'').substring(0,60)+((f.sql_text||'').length>60?'...':'');return'<div class="fav-item" onclick="loadFavSql(\''+esc(f.sql_text).replace(/'/g,"\\'")+'\')"><div class="fav-title">'+esc(title)+'</div><div class="fav-sql">'+sqlShort+'</div><div class="history-actions" style="margin-top:4px"><button class="hi-btn" onclick="event.stopPropagation();loadFavSql(\''+esc(f.sql_text).replace(/'/g,"\\'")+'\')">&#9654; Load</button><button class="hi-btn danger" onclick="event.stopPropagation();deleteFavorite('+f.id+')">&#10005;</button></div></div>'}).join('')}
-function loadFavSql(escapedSql){document.getElementById('sql-input').value=escapedSql.replace(/\\'/g,"'");closeSidebar()}
-async function saveToFavorites(){const sql=document.getElementById('sql-input').value.trim();if(!sql){showToast('No SQL to save');return}const title=prompt('Favorite title (optional):',sql.substring(0,50));try{const r=await apiCall('POST','/api/favorites/add',{sql_text:sql,title:title||'',dbms_targets:[...ACTIVE_DBMS].join(','),baseline:BASELINE_DBMS});if(r.ok){showToast('Saved to favorites!','success');favSqlSet.add(sql);await loadFavorites()}}catch(e){showToast('Failed to save')}}
-async function toggleFavHistory(histId,sqlText){try{const r=await apiCall('POST','/api/favorites/toggle',{sql_text:sqlText,title:'',dbms_targets:'',baseline:''});if(r.ok){showToast(r.action==='added'?'Added to favorites':'Removed from favorites','success');await loadFavorites();renderHistory()}}catch(e){showToast('Failed')}}
+async function loadFavorites(){var _v=++_loadFavVer;try{const un=(currentUser||{}).eng_name||'';const r=await apiCall('GET','/api/favorites'+(un?'?user_name='+encodeURIComponent(un):''));if(_v!==_loadFavVer)return;favoritesData=r.favorites||[];favSqlSet=new Set(favoritesData.map(f=>f.sql_text||''));document.getElementById('fav-count').textContent=favoritesData.length}catch(e){if(_v!==_loadFavVer)return;favoritesData=[]}}
+function renderFavorites(){const body=document.getElementById('sidebar-body');if(favoritesData.length===0){body.innerHTML='<div class="sidebar-empty"><div class="icon">&#11088;</div><p>No favorites yet.<br>Click &#11088; Save to add!</p></div>';return}body.innerHTML=favoritesData.map(function(f,i){const title=f.title||'Untitled';const sqlShort=esc(f.sql_text||'').substring(0,60)+((f.sql_text||'').length>60?'...':'');return'<div class="fav-item" data-favidx="'+i+'" onclick="loadFavByIndex('+i+')"><div class="fav-title">'+esc(title)+'</div><div class="fav-sql">'+sqlShort+'</div><div class="history-actions" style="margin-top:4px"><button class="hi-btn" onclick="event.stopPropagation();loadFavByIndex('+i+')">&#9654; Load</button><button class="hi-btn danger" onclick="event.stopPropagation();deleteFavorite('+f.id+')">&#10005;</button></div></div>'}).join('')}
+function loadFavByIndex(idx){if(idx>=0&&idx<favoritesData.length){document.getElementById('sql-input').value=favoritesData[idx].sql_text;closeSidebar()}}
+let _pendingFavSql='';
+function openFavModal(sql){_pendingFavSql=sql;const inp=document.getElementById('fav-title-input');const preview=document.getElementById('fav-sql-preview');const short=sql.length>50?sql.substring(0,47)+'...':sql;preview.textContent=short;inp.value=sql.substring(0,60);inp.focus();inp.select();document.getElementById('fav-modal').classList.add('show')}
+function closeFavModal(){document.getElementById('fav-modal').classList.remove('show');_pendingFavSql=''}
+async function confirmFavSave(){const title=document.getElementById('fav-title-input').value.trim();const sql=_pendingFavSql;if(!sql)return;const btn=document.getElementById('btn-fav-confirm');btn.disabled=true;btn.innerHTML='Saving...';try{const r=await apiCall('POST','/api/favorites/add',{user_name:(currentUser||{}).eng_name||'',sql_text:sql,title:title||sql.substring(0,60),dbms_targets:[...ACTIVE_DBMS].join(','),baseline:BASELINE_DBMS});if(r.ok){showToast('Saved to favorites!','success');favSqlSet.add(sql);await loadFavorites();closeFavModal()}}catch(e){showToast('Failed to save')}finally{btn.disabled=false;btn.innerHTML='&#11088; Save'}}
+async function saveToFavorites(){const sql=document.getElementById('sql-input').value.trim();if(!sql){showToast('No SQL to save');return}openFavModal(sql)}
+document.addEventListener('keydown',function(e){if(!document.getElementById('fav-modal').classList.contains('show'))return;if(e.key==='Enter'){e.preventDefault();confirmFavSave()}else if(e.key==='Escape'){e.preventDefault();closeFavModal()}});
+document.getElementById('fav-modal').addEventListener('click',function(e){if(e.target===this)closeFavModal()});
+async function toggleFavHistory(histId,histIdx){var sqlText=historyData[histIdx]?historyData[histIdx].sql_text:'';try{const r=await apiCall('POST','/api/favorites/toggle',{user_name:(currentUser||{}).eng_name||'',sql_text:sqlText,title:'',dbms_targets:'',baseline:''});if(r.ok){showToast(r.action==='added'?'Added to favorites':'Removed from favorites','success');await loadFavorites();renderHistory()}}catch(e){showToast('Failed')}}
 async function deleteFavorite(id){try{await apiCall('DELETE','/api/favorites/'+id);favoritesData=favoritesData.filter(f=>f.id!==id);favSqlSet=new Set(favoritesData.map(f=>f.sql_text||''));document.getElementById('fav-count').textContent=favoritesData.length;renderFavorites();showToast('Favorite deleted','success')}catch(e){showToast('Failed to delete')}}
 
 // ── Config Panel ──
-async function loadConfigsData(){try{const r=await apiCall('GET','/api/dbms');if(r.ok){configsData=r.dbms||[];configsData.forEach(d=>{if(!(d.name in DBMS_CONN_STATUS))DBMS_CONN_STATUS[d.name]='unknown'})}else{configsData=[]}}catch(e){if(typeof EMBEDDED_DBMS!=='undefined'&&EMBEDDED_DBMS.length>0){configsData=EMBEDDED_DBMS;configsData.forEach(d=>{if(!(d.name in DBMS_CONN_STATUS))DBMS_CONN_STATUS[d.name]='unknown'})}else{configsData=[]}}}
-function renderConfigs(){const b=document.getElementById('sidebar-body');let html='<button class="add-dbms-btn" onclick="openAddDbmsModal()"><span class="plus-icon">+</span> Add DBMS</button>';if(configsData.length===0){html+='<div class="sidebar-empty"><div class="icon">&#9881;</div><p>No DBMS configured.<br>Add yours above or edit with_config.json</p></div>';b.innerHTML=html;return}configsData.forEach(d=>{const isCustom=d.source==='custom';const status=DBMS_CONN_STATUS[d.name]||'unknown';const statusCls=status==='success'?'online':status==='fail'?'offline':status==='testing'?'unknown':'unknown';const activeBadge=d.active?'<span style="font-size:10px;background:var(--green-bg);color:var(--green);padding:1px 6px;border-radius:4px;margin-left:4px;">active</span>':'';const sourceTag=isCustom?'<span class="ci-tag custom">custom</span>':'<span class="ci-tag builtin">builtin</span>';const editBtns=isCustom?'<button class="ci-btn" onclick="event.stopPropagation();openEditDbmsModal(\''+esc(d.name).replace(/'/g,"\\'")+'\')" title="Edit">&#9998;</button><button class="ci-btn danger" onclick="event.stopPropagation();deleteCustomDbms(\''+esc(d.name).replace(/'/g,"\\'")+'\')" title="Delete">&#10005;</button>':'';html+='<div class="config-item" id="config-item-'+esc(d.name)+'"><div class="ci-row"><div class="ci-status '+statusCls+'" id="status-'+esc(d.name)+'" title="'+status+'"></div><div class="ci-info"><div class="ci-name">'+esc(d.name)+activeBadge+'<span class="ci-type-tag">'+esc(d.type||'mysql')+'</span>'+sourceTag+'</div><div class="ci-host">'+esc(d.host)+':'+esc(d.port)+(d.database?' / '+esc(d.database):'')+'</div></div><div class="ci-actions"><button class="ci-btn test" id="test-btn-'+esc(d.name)+'" onclick="testDbmsConnection(\''+esc(d.name).replace(/'/g,"\\'")+'\')">&#9654; Test</button>'+editBtns+'</div></div><div class="test-result" id="test-result-'+esc(d.name)+'"></div></div>';});b.innerHTML=html}
-async function testDbmsConnection(name){const resultDiv=document.getElementById('test-result-'+name);const statusDot=document.getElementById('status-'+name);const testBtn=document.getElementById('test-btn-'+name);if(!resultDiv||!testBtn)return;testBtn.textContent='...';testBtn.classList.add('testing');resultDiv.style.display='none';statusDot.className='ci-status unknown';DBMS_CONN_STATUS[name]='testing';try{const r=await apiCall('POST','/api/dbms/test',{name:name});if(r.ok&&r.success){DBMS_CONN_STATUS[name]='success';statusDot.className='ci-status online';resultDiv.className='test-result success';resultDiv.innerHTML='&#10003; Connected — '+esc(r.version||'OK');resultDiv.style.display='block'}else{throw new Error(r.error||'Connection failed')}}catch(e){DBMS_CONN_STATUS[name]='fail';statusDot.className='ci-status offline';resultDiv.className='test-result fail';resultDiv.innerHTML='&#10007; '+(e.message||'Connection failed');resultDiv.style.display='block';statusDot.title=e.message}finally{testBtn.textContent='&#9654; Test';testBtn.classList.remove('testing');renderChips();renderBaselineChips()}}
+async function loadConfigsData(){var _v=++_loadConfigVer;try{const r=await apiCall('GET','/api/dbms');if(_v!==_loadConfigVer)return;if(r.ok){configsData=r.dbms||[];configsData.forEach(d=>{if(!(d.name in DBMS_CONN_STATUS))DBMS_CONN_STATUS[d.name]='unknown'})}else{configsData=[]}}catch(e){if(_v!==_loadConfigVer)return;if(typeof EMBEDDED_DBMS!=='undefined'&&EMBEDDED_DBMS.length>0){configsData=EMBEDDED_DBMS;configsData.forEach(d=>{if(!(d.name in DBMS_CONN_STATUS))DBMS_CONN_STATUS[d.name]='unknown'})}else{configsData=[]}}if(_v===_loadConfigVer)document.getElementById('config-count').textContent=configsData.length}
+function renderConfigs(){const b=document.getElementById('sidebar-body');let html='<button class="add-dbms-btn" onclick="openAddDbmsModal()"><span class="plus-icon">+</span> Add DBMS</button><button class="edit-config-btn" onclick="event.stopPropagation();openConfigEditor()"><span class="edit-icon">&#9881;</span> Edit config.json</button>';if(configsData.length===0){html+='<div class="sidebar-empty"><div class="icon">&#9881;</div><p>No DBMS configured.<br>Add yours above or edit with_config.json</p></div>';b.innerHTML=html;return}[...configsData].sort((a,b)=>{const aStatus=DBMS_CONN_STATUS[a.name]||'unknown';const bStatus=DBMS_CONN_STATUS[b.name]||'unknown';const aEnabled=a.enabled!==false&&a.active!==false;const bEnabled=b.enabled!==false&&b.active!==false;const aScore=aEnabled?(aStatus==='success'?3:aStatus==='unknown'?2:aStatus==='testing'?2:1):0;const bScore=bEnabled?(bStatus==='success'?3:bStatus==='unknown'?2:bStatus==='testing'?2:1):0;return bScore-aScore}).forEach(d=>{const isCustom=d.source==='custom';const status=DBMS_CONN_STATUS[d.name]||'unknown';const statusCls=status==='success'?'online':status==='fail'?'offline':status==='testing'?'unknown':'unknown';const activeBadge=d.active?'<span style="font-size:10px;background:var(--green-bg);color:var(--green);padding:1px 6px;border-radius:4px;margin-left:4px;">active</span>':'';const sourceTag=isCustom?'<span class="ci-tag custom">custom</span>':'<span class="ci-tag builtin">builtin</span>';const editBtns='<button class="ci-btn gear" onclick="event.stopPropagation();openEditDbmsModal(\''+esc(d.name).replace(/'/g,"\\'")+'\')" title="Edit config">&#9881;</button>'+(isCustom?'<button class="ci-btn danger" onclick="event.stopPropagation();deleteCustomDbms(\''+esc(d.name).replace(/'/g,"\\'")+'\')" title="Delete">&#10005;</button>':'');html+='<div class="config-item" id="config-item-'+esc(d.name)+'"><div class="ci-row"><div class="ci-status '+statusCls+'" id="status-'+esc(d.name)+'" title="'+status+'"></div><div class="ci-info"><div class="ci-name">'+esc(d.name)+activeBadge+'<span class="ci-type-tag">'+esc(d.type||'mysql')+'</span>'+sourceTag+'</div><div class="ci-host">'+esc(d.host)+':'+esc(d.port)+(d.database?' / '+esc(d.database):'')+'</div></div><div class="ci-actions"><button class="ci-btn test" id="test-btn-'+esc(d.name)+'" onclick="testDbmsConnection(\''+esc(d.name).replace(/'/g,"\\'")+'\')">&#9654; Test</button>'+editBtns+'</div></div><div class="test-result" id="test-result-'+esc(d.name)+'"></div></div>';});b.innerHTML=html}
+async function testDbmsConnection(name){const resultDiv=document.getElementById('test-result-'+name);const statusDot=document.getElementById('status-'+name);const testBtn=document.getElementById('test-btn-'+name);if(!resultDiv||!testBtn)return;const d=configsData.find(function(c){return c.name===name});const target=d?d.host+':'+d.port:name;testBtn.textContent='...';testBtn.classList.add('testing');resultDiv.className='test-result testing';resultDiv.innerHTML='Connecting to '+esc(target)+'...';resultDiv.style.display='block';statusDot.className='ci-status unknown';DBMS_CONN_STATUS[name]='testing';try{const r=await apiCall('POST','/api/dbms/test',{name:name});if(r.ok&&r.success){DBMS_CONN_STATUS[name]='success';statusDot.className='ci-status online';resultDiv.className='test-result success';resultDiv.innerHTML='&#10003; Connected — '+esc(r.version||'OK')}else{throw new Error(r.error||'Connection failed')}}catch(e){DBMS_CONN_STATUS[name]='fail';statusDot.className='ci-status offline';resultDiv.className='test-result fail';resultDiv.innerHTML='&#10007; '+(e.message||'Connection failed');statusDot.title=e.message}finally{testBtn.innerHTML='&#9654; Test';testBtn.classList.remove('testing');renderChips();renderBaselineChips()}}
 
 // ── DBMS Modal ──
-let _editingDbmsName=null;
-function openAddDbmsModal(){_editingDbmsName=null;document.getElementById('modal-title').textContent='Add DBMS';document.getElementById('form-name').value='';document.getElementById('form-name').disabled=false;document.getElementById('form-protocol').value='mysql';document.getElementById('form-host').value='';document.getElementById('form-port').value='3306';document.getElementById('form-database').value='';document.getElementById('form-user').value='';document.getElementById('form-password').value='';document.getElementById('form-enabled').checked=true;document.getElementById('btn-save-dbms').innerHTML='<span id="save-icon">&#10003;</span> Save DBMS';document.getElementById('dbms-modal').classList.add('show')}
-function openEditDbmsModal(ename){const d=configsData.find(c=>c.name===ename.replace(/\\'/g,"'"));if(!d)return;_editingDbmsName=d.name;document.getElementById('modal-title').textContent='Edit DBMS';document.getElementById('form-name').value=d.name;document.getElementById('form-name').disabled=true;document.getElementById('form-protocol').value=d.type||'mysql';document.getElementById('form-host').value=d.host||'';document.getElementById('form-port').value=d.port||3306;document.getElementById('form-database').value=d.database||'';document.getElementById('form-user').value='';document.getElementById('form-password').value='';document.getElementById('form-enabled').checked=d.active!==false;document.getElementById('btn-save-dbms').innerHTML='<span id="save-icon">&#10003;</span> Save Changes';document.getElementById('dbms-modal').classList.add('show')}
+let _editingDbmsName=null;let _editingSource=null;
+function openAddDbmsModal(){_editingDbmsName=null;_editingSource=null;document.getElementById('modal-title').textContent='Add DBMS';document.getElementById('form-name').value='';document.getElementById('form-name').disabled=false;document.getElementById('form-protocol').value='mysql';document.getElementById('form-host').value='';document.getElementById('form-port').value='3306';document.getElementById('form-database').value='';document.getElementById('form-user').value='';document.getElementById('form-password').value='';document.getElementById('form-enabled').checked=true;document.getElementById('btn-save-dbms').innerHTML='<span id="save-icon">&#10003;</span> Save DBMS';document.getElementById('dbms-modal').classList.add('show')}
+function openEditDbmsModal(ename){const d=configsData.find(c=>c.name===ename.replace(/\\'/g,"'"));if(!d)return;_editingDbmsName=d.name;_editingSource=d.source||'builtin';document.getElementById('modal-title').textContent='Edit DBMS';document.getElementById('form-name').value=d.name;document.getElementById('form-name').disabled=true;document.getElementById('form-protocol').value=d.type||'mysql';document.getElementById('form-host').value=d.host||'';document.getElementById('form-port').value=d.port||3306;document.getElementById('form-database').value=d.database||'';document.getElementById('form-user').value='';document.getElementById('form-password').value='';document.getElementById('form-enabled').checked=d.active!==false;document.getElementById('btn-save-dbms').innerHTML='<span id="save-icon">&#10003;</span> Save Changes';document.getElementById('dbms-modal').classList.add('show')}
 function closeDbmsModal(){document.getElementById('dbms-modal').classList.remove('show')}
-async function saveCustomDbms(){const name=(document.getElementById('form-name').value||'').trim();if(!name){showToast('DBMS name is required');return}const btn=document.getElementById('btn-save-dbms');btn.disabled=true;btn.innerHTML='Saving...';const body={name:name,protocol:document.getElementById('form-protocol').value,host:document.getElementById('form-host').value.trim()||'127.0.0.1',port:parseInt(document.getElementById('form-port').value)||3306,user:document.getElementById('form-user').value.trim()||'root',password:document.getElementById('form-password').value,database:document.getElementById('form-database').value.trim(),enabled:document.getElementById('form-enabled').checked};try{const r=await apiCall('POST','/api/dbms/custom/save',body);if(r.ok){showToast(r.action==='created'?'DBMS added!':'DBMS updated!','success');closeDbmsModal();await loadDbms();await loadConfigsData();renderConfigs()}else{showToast(r.error||'Save failed')}}catch(e){showToast('Save failed: '+e.message)}finally{btn.disabled=false;btn.innerHTML='<span id="save-icon">&#10003;</span> '+(document.getElementById('form-name').disabled?'Save Changes':'Save DBMS')}}
+async function saveBuiltinDbms(btn){const name=_editingDbmsName;const protocol=document.getElementById('form-protocol').value;const host=document.getElementById('form-host').value.trim()||'127.0.0.1';const port=parseInt(document.getElementById('form-port').value)||3306;const user=document.getElementById('form-user').value.trim()||'root';const password=document.getElementById('form-password').value;const database=document.getElementById('form-database').value.trim();const enabled=document.getElementById('form-enabled').checked;try{const cr=await apiCall('GET','/api/config/raw');if(!cr.ok||!cr.content){throw new Error('Failed to load config')}const config=JSON.parse(cr.content);const dbs=config.databases||[];const entry=dbs.find(d=>d.name===name);if(!entry){throw new Error('DBMS not found in config')}entry.type=protocol;entry.host=host;entry.port=port;entry.user=user;if(password)entry.password=password;if(database)entry.service_name=database;entry.enabled=enabled;const sr=await apiCall('POST','/api/config/raw',{content:JSON.stringify(config,null,2)});if(sr.ok){showToast('Built-in DBMS config saved & reloaded!','success');closeDbmsModal();await loadDbms();await loadConfigsData();renderConfigs()}else{showToast(sr.error||'Save failed')}}catch(e){showToast('Save built-in failed: '+e.message)}finally{btn.disabled=false;btn.innerHTML='<span id="save-icon">&#10003;</span> Save Changes'}}async function saveCustomDbms(){const name=(document.getElementById('form-name').value||'').trim();if(!name){showToast('DBMS name is required');return}const btn=document.getElementById('btn-save-dbms');btn.disabled=true;btn.innerHTML='Saving...';if(_editingSource==='builtin'&&_editingDbmsName){await saveBuiltinDbms(btn);return}const body={name:name,protocol:document.getElementById('form-protocol').value,host:document.getElementById('form-host').value.trim()||'127.0.0.1',port:parseInt(document.getElementById('form-port').value)||3306,user:document.getElementById('form-user').value.trim()||'root',password:document.getElementById('form-password').value,database:document.getElementById('form-database').value.trim(),enabled:document.getElementById('form-enabled').checked};try{const r=await apiCall('POST','/api/dbms/custom/save',body);if(r.ok){showToast(r.action==='created'?'DBMS added!':'DBMS updated!','success');closeDbmsModal();await loadDbms();await loadConfigsData();renderConfigs()}else{showToast(r.error||'Save failed')}}catch(e){showToast('Save failed: '+e.message)}finally{btn.disabled=false;btn.innerHTML='<span id="save-icon">&#10003;</span> '+(document.getElementById('form-name').disabled?'Save Changes':'Save DBMS')}}
 async function deleteCustomDbms(ename){const name=ename.replace(/\\'/g,"'");if(!confirm('Delete custom DBMS "'+name+'"? This cannot be undone.'))return;try{const r=await apiCall('DELETE','/api/dbms/custom/'+encodeURIComponent(name));if(r.ok){showToast('DBMS deleted','success');await loadDbms();await loadConfigsData();renderConfigs()}else{showToast(r.error||'Delete failed')}}catch(e){showToast('Delete failed: '+e.message)}}
 document.getElementById('dbms-modal').addEventListener('click',function(e){if(e.target===this)closeDbmsModal()});
+
+// ── Config Editor ──
+async function openConfigEditor(){document.getElementById('config-editor-modal').classList.add('show');await reloadConfigEditor()}
+function closeConfigEditor(){document.getElementById('config-editor-modal').classList.remove('show')}
+async function reloadConfigEditor(){const editor=document.getElementById('json-editor');const status=document.getElementById('config-save-status');const btn=document.getElementById('btn-reload-config');btn.disabled=true;status.textContent='';status.className='save-status';editor.value='Loading...';try{const r=await apiCall('GET','/api/config/raw');editor.value=r.content||'';editor.classList.remove('error')}catch(e){editor.value='// Failed to load config: '+e.message;editor.classList.add('error')}finally{btn.disabled=false}}
+async function saveConfigEditor(){const editor=document.getElementById('json-editor');const status=document.getElementById('config-save-status');const btn=document.getElementById('btn-save-config');const content=editor.value.trim();if(!content){status.textContent='Content is empty';status.className='save-status error';return}btn.disabled=true;status.textContent='Saving...';status.className='save-status';try{const r=await apiCall('POST','/api/config/raw',{content:content});if(r.ok){editor.classList.remove('error');status.textContent='Saved — '+r.databases+' database(s) loaded. Refresh to see updates.';status.className='save-status success';showToast('Config saved & applied','success');closeConfigEditor();await loadConfigsData();renderConfigs();await loadDbms()}else{editor.classList.add('error');status.textContent=r.error||'Save failed';status.className='save-status error'}}catch(e){editor.classList.add('error');status.textContent='Save failed: '+e.message;status.className='save-status error'}finally{btn.disabled=false}}
+document.getElementById('config-editor-modal').addEventListener('click',function(e){if(e.target===this)closeConfigEditor()});
 
 // ── DBMS Chips ──
 function loadDbms(){
@@ -634,7 +829,7 @@ function loadDbms(){
     document.getElementById('sandbox-toggle').checked=SANDBOX_MODE;
     renderChips();renderBaselineChips();
   }
-  apiCall('GET','/api/dbms').then(function(r){
+  return apiCall('GET','/api/dbms').then(function(r){
     if(!r.ok){console.warn('API /api/dbms failed:',r);return}
     DBMS_LIST=r.dbms||[];DATABASE=r.database||'';
     ACTIVE_DBMS=new Set(DBMS_LIST.filter(function(d){return d.active}).map(function(d){return d.name}));
@@ -654,18 +849,18 @@ function loadDbms(){
   });
 }
 async function autoTestAllDbms(){const targets=DBMS_LIST.filter(d=>!(d.name in DBMS_CONN_STATUS)||DBMS_CONN_STATUS[d.name]==='unknown');for(const d of targets){DBMS_CONN_STATUS[d.name]='testing';try{const r=await apiCall('POST','/api/dbms/test',{name:d.name});DBMS_CONN_STATUS[d.name]=r.success?'success':'fail'}catch(e){DBMS_CONN_STATUS[d.name]='fail'}}renderChips();renderBaselineChips()}
-function renderChips(){const container=document.getElementById('dbms-selector');container.innerHTML='<label>Targets:</label>';DBMS_LIST.forEach(d=>{const conn=DBMS_CONN_STATUS[d.name]||'unknown';const chip=document.createElement('span');const isEnabled=d.enabled!==false&&d.active!==false;const isSelected=ACTIVE_DBMS.has(d.name);let cls='dbms-chip';if(isSelected)cls+=' active';if(!isEnabled)cls+=' disabled';else if(conn==='fail')cls+=' warn';const dotCls=conn==='success'?'online':conn==='fail'?'offline':'unknown';const dotTitle=conn==='success'?'Connected':conn==='fail'?'Connection failed':'Untested';chip.className=cls;chip.innerHTML='<span class="chip-dot '+dotCls+'" title="'+dotTitle+'"></span><span class="cb">'+(isSelected?'&#10003;':'')+'</span>'+esc(d.name);chip.title=d.host+':'+d.port;chip.onclick=()=>{if(!isEnabled)return;if(ACTIVE_DBMS.has(d.name))ACTIVE_DBMS.delete(d.name);else ACTIVE_DBMS.add(d.name);renderChips()};container.appendChild(chip)});if(DBMS_LIST.length>1){const actions=document.createElement('span');actions.className='dbms-actions';const btnAll=document.createElement('button');btnAll.textContent='All';btnAll.onclick=()=>{ACTIVE_DBMS=new Set(DBMS_LIST.filter(d=>d.enabled!==false&&d.active!==false).map(d=>d.name));renderChips()};const btnNone=document.createElement('button');btnNone.textContent='None';btnNone.onclick=()=>{ACTIVE_DBMS.clear();renderChips()};actions.appendChild(btnAll);actions.appendChild(btnNone);container.appendChild(actions)}const count=document.createElement('span');count.className='dbms-count';count.textContent=ACTIVE_DBMS.size+' selected';container.appendChild(count);if(DATABASE){const info=document.createElement('span');info.className='db-info';info.textContent='DB: '+DATABASE;container.appendChild(info)}const l=document.createElement('span');l.className='db-legend';l.innerHTML='<span class="chip-dot online" style="display:inline-block;vertical-align:middle;margin:0 2px 0 10px"></span> ok <span class="chip-dot offline" style="display:inline-block;vertical-align:middle;margin:0 2px 0 6px"></span> fail <span style="display:inline-block;vertical-align:middle;margin:0 2px 0 6px;opacity:0.4;filter:grayscale(0.6)">grayed</span> off';container.appendChild(l)}
-function renderBaselineChips(){const container=document.getElementById('baseline-selector');container.innerHTML='<label>Baseline:</label>';DBMS_LIST.forEach(d=>{const conn=DBMS_CONN_STATUS[d.name]||'unknown';const chip=document.createElement('span');const isEnabled=d.enabled!==false&&d.active!==false;const isBaseline=d.name===BASELINE_DBMS;let cls='dbms-chip';if(isBaseline)cls+=' active';if(!isEnabled)cls+=' disabled';else if(conn==='fail')cls+=' warn';const dotCls=conn==='success'?'online':conn==='fail'?'offline':'unknown';const dotTitle=conn==='success'?'Connected':conn==='fail'?'Connection failed':'Untested';chip.className=cls;chip.innerHTML='<span class="chip-dot '+dotCls+'" title="'+dotTitle+'"></span><span class="cb">'+(isBaseline?'&#9679;':'')+'</span>'+esc(d.name);chip.title=d.host+':'+d.port;chip.onclick=()=>{if(!isEnabled)return;BASELINE_DBMS=(BASELINE_DBMS===d.name)?'':d.name;renderBaselineChips()};container.appendChild(chip)})}
+function renderChips(){const container=document.getElementById('dbms-selector');container.innerHTML='<label>Targets:</label>';[...DBMS_LIST].sort((a,b)=>{const aConn=DBMS_CONN_STATUS[a.name]||'unknown';const bConn=DBMS_CONN_STATUS[b.name]||'unknown';const aEn=a.enabled!==false&&a.active!==false;const bEn=b.enabled!==false&&b.active!==false;const aSc=aEn?(aConn==='success'?3:aConn==='unknown'?2:aConn==='testing'?2:1):0;const bSc=bEn?(bConn==='success'?3:bConn==='unknown'?2:bConn==='testing'?2:1):0;return bSc-aSc}).forEach(d=>{const conn=DBMS_CONN_STATUS[d.name]||.unknown.;const chip=document.createElement(.span.);const isEnabled=d.enabled!==false&&d.active!==false;const isSelected=ACTIVE_DBMS.has(d.name);let cls=.dbms-chip.;if(isSelected)cls+=. active.;if(!isEnabled)cls+=. disabled.;else if(conn===.fail.)cls+=. warn.;const dotCls=conn==='success'?'online':conn==='fail'?'offline':'unknown';const dotTitle=conn==='success'?'Connected':conn==='fail'?'Connection failed':'Untested';chip.className=cls;chip.innerHTML='<span class="chip-dot '+dotCls+'" title="'+dotTitle+'"></span><span class="cb">'+(isSelected?'&#10003;':'')+'</span>'+esc(d.name);chip.title=d.host+':'+d.port;chip.onclick=()=>{if(!isEnabled)return;if(ACTIVE_DBMS.has(d.name))ACTIVE_DBMS.delete(d.name);else ACTIVE_DBMS.add(d.name);renderChips()};container.appendChild(chip)});if(DBMS_LIST.length>1){const actions=document.createElement('span');actions.className='dbms-actions';const btnAll=document.createElement('button');btnAll.textContent='All';btnAll.onclick=()=>{ACTIVE_DBMS=new Set(DBMS_LIST.filter(d=>d.enabled!==false&&d.active!==false).map(d=>d.name));renderChips()};const btnNone=document.createElement('button');btnNone.textContent='None';btnNone.onclick=()=>{ACTIVE_DBMS.clear();renderChips()};actions.appendChild(btnAll);actions.appendChild(btnNone);container.appendChild(actions)}const count=document.createElement('span');count.className='dbms-count';count.textContent=ACTIVE_DBMS.size+' selected';container.appendChild(count);if(DATABASE){const info=document.createElement('span');info.className='db-info';info.textContent='DB: '+DATABASE;container.appendChild(info)}const l=document.createElement('span');l.className='db-legend';l.innerHTML='<span class="chip-dot online" style="display:inline-block;vertical-align:middle;margin:0 2px 0 10px"></span> ok <span class="chip-dot offline" style="display:inline-block;vertical-align:middle;margin:0 2px 0 6px"></span> fail <span style="display:inline-block;vertical-align:middle;margin:0 2px 0 6px;opacity:0.4;filter:grayscale(0.6)">grayed</span> off';container.appendChild(l)}
+function renderBaselineChips(){const container=document.getElementById('baseline-selector');container.innerHTML='<label>Baseline:</label>';[...DBMS_LIST].sort((a,b)=>{const aConn=DBMS_CONN_STATUS[a.name]||'unknown';const bConn=DBMS_CONN_STATUS[b.name]||'unknown';const aEn=a.enabled!==false&&a.active!==false;const bEn=b.enabled!==false&&b.active!==false;const aSc=aEn?(aConn==='success'?3:aConn==='unknown'?2:aConn==='testing'?2:1):0;const bSc=bEn?(bConn==='success'?3:bConn==='unknown'?2:bConn==='testing'?2:1):0;return bSc-aSc}).forEach(d=>{const conn=DBMS_CONN_STATUS[d.name]||'unknown';const chip=document.createElement('span');const isEnabled=d.enabled!==false&&d.active!==false;const isBaseline=d.name===BASELINE_DBMS;let cls='dbms-chip';if(isBaseline)cls+=' active';if(!isEnabled)cls+=' disabled';else if(conn==='fail')cls+=' warn';const dotCls=conn==='success'?'online':conn==='fail'?'offline':'unknown';const dotTitle=conn==='success'?'Connected':conn==='fail'?'Connection failed':'Untested';chip.className=cls;chip.innerHTML='<span class="chip-dot '+dotCls+'" title="'+dotTitle+'"></span><span class="cb">'+(isBaseline?'&#9679;':'')+'</span>'+esc(d.name);chip.title=d.host+':'+d.port;chip.onclick=()=>{if(!isEnabled)return;BASELINE_DBMS=(BASELINE_DBMS===d.name)?'':d.name;renderBaselineChips()};container.appendChild(chip)})}
 
 // ── Execute ──
-function executeSql(){const sql=document.getElementById('sql-input').value.trim();if(!sql)return;if(ACTIVE_DBMS.size===0){showToast('Select at least one DBMS');return}const btn=document.getElementById('btn-exec');const stopBtn=document.getElementById('btn-stop');btn.disabled=true;btn.innerHTML='<span style="display:inline-block;width:14px;height:14px;border:2px solid transparent;border-top-color:#fff;border-radius:50%;animation:spin 0.8s linear infinite;vertical-align:middle;margin-right:6px"></span>Running...';stopBtn.style.display='block';stopBtn.disabled=false;const area=document.getElementById('results-area');area.innerHTML='';const dbmsList=[...ACTIVE_DBMS];const total=dbmsList.length;let completed=0;const results={};const startTime=Date.now();const progressContainer=document.createElement('div');progressContainer.className='progress-container';progressContainer.innerHTML='<div class="progress-header"><div class="progress-title"><span class="spinner-sm"></span>Executing SQL...</div><div class="progress-stats"><span id="progress-completed">0</span>/'+total+' completed</div></div><div class="progress-dbms-list" id="progress-dbms-list">'+dbmsList.map(n=>'<div class="progress-dbms-item running" id="progress-item-'+esc(n)+'"><span class="dbms-label">'+esc(n)+'</span><div class="bar-track"><div class="bar-fill" id="progress-bar-'+esc(n)+'"></div></div><span class="bar-pct" id="progress-pct-'+esc(n)+'"></span></div>').join('')+'</div>';area.appendChild(progressContainer);const abortCtrl=new AbortController();_currentAbortController=abortCtrl;fetch(location.origin+'/api/execute/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sql:sql,dbms:dbmsList,sandbox:SANDBOX_MODE}),signal:abortCtrl.signal}).then(response=>{if(!response.ok)throw new Error('HTTP '+response.status);const reader=response.body.getReader();const decoder=new TextDecoder();let buffer='';function processChunk(){return reader.read().then(({done,value})=>{if(done){finalizeExecution();return}buffer+=decoder.decode(value,{stream:true});const parts=buffer.split('\n\n');buffer=parts.pop()||'';for(const part of parts){let event='message',data='';for(const line of part.split('\n')){if(line.startsWith('event: '))event=line.substring(7);else if(line.startsWith('data: '))data=line.substring(6)}if(!data)continue;try{const parsed=JSON.parse(data);if(event==='progress'){completed++;results[parsed.name]=parsed.result;document.getElementById('progress-completed').textContent=completed;const item=document.getElementById('progress-item-'+parsed.name);if(item){item.className='progress-dbms-item '+(parsed.result.error?'error':'done');const bar=document.getElementById('progress-bar-'+parsed.name);if(bar)bar.style.width='100%';const pctLabel=document.getElementById('progress-pct-'+parsed.name);if(pctLabel)pctLabel.textContent=parsed.result.error?'Error':'Done'}}else if(event==='stmt_progress'){const pct=Math.round((parsed.stmt_index/parsed.stmt_total)*100);const item=document.getElementById('progress-item-'+parsed.name);if(item){if(item.classList.contains('running'))item.className='progress-dbms-item active';const bar=document.getElementById('progress-bar-'+parsed.name);if(bar)bar.style.width=pct+'%';const pctLabel=document.getElementById('progress-pct-'+parsed.name);if(pctLabel)pctLabel.textContent=pct+'%'}}else if(event==='done'){finalizeExecution()}else if(event==='cancelled'){showToast('Execution cancelled','error');finalizeExecution()}else if(event==='error'){showToast('Execution error: '+(parsed.error||'Unknown'));finalizeExecution()}}catch(e){}}return processChunk()})}processChunk().catch(e=>{if(e.name==='AbortError')showToast('Execution cancelled','error');else showToast('Stream error: '+e.message);finalizeExecution()})}).catch(e=>{if(e.name==='AbortError')showToast('Execution cancelled','error');else showToast('Request failed: '+e.message);finalizeExecution()});let finalized=false;function finalizeExecution(){if(finalized)return;finalized=true;_currentAbortController=null;btn.disabled=false;btn.innerHTML='&#9654; Execute';stopBtn.style.display='none';stopBtn.disabled=true;stopBtn.innerHTML='&#9632; Stop';const elapsed=Date.now()-startTime;if(Object.keys(results).length>0){renderResults(results,sql);const dbmsTargets=[...ACTIVE_DBMS].join(',');const errorNames=Object.keys(results).filter(n=>results[n].error);const summary={total_dbms:Object.keys(results).length,errors:errorNames.length,elapsed_ms:elapsed};saveHistory(sql,dbmsTargets,BASELINE_DBMS,elapsed,summary)}else{area.innerHTML='<div class="empty-state"><p>Execution was cancelled. No results.</p></div>'}}}
-function stopExecution(){const stopBtn=document.getElementById('btn-stop');stopBtn.disabled=true;stopBtn.innerHTML='&#9632; Stopping...';fetch(location.origin+'/api/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}).catch(()=>{});if(_currentAbortController){_currentAbortController.abort();_currentAbortController=null}}
+function executeSql(){const sql=document.getElementById('sql-input').value.trim();if(!sql)return;if(ACTIVE_DBMS.size===0){showToast('Select at least one DBMS');return}const btn=document.getElementById('btn-exec');const stopBtn=document.getElementById('btn-stop');btn.disabled=true;btn.innerHTML='<span style="display:inline-block;width:14px;height:14px;border:2px solid transparent;border-top-color:#fff;border-radius:50%;animation:spin 0.8s linear infinite;vertical-align:middle;margin-right:6px"></span>Running...';stopBtn.style.display='block';stopBtn.disabled=false;const area=document.getElementById('results-area');area.innerHTML='';const dbmsList=[...ACTIVE_DBMS];const total=dbmsList.length;let completed=0;const results={};const startTime=Date.now();const progressContainer=document.createElement('div');progressContainer.className='progress-container';progressContainer.innerHTML='<div class="progress-header"><div class="progress-title"><span class="spinner-sm"></span>Executing SQL...</div><div class="progress-stats"><span id="progress-completed">0</span>/'+total+' completed</div></div><div class="progress-dbms-list" id="progress-dbms-list">'+dbmsList.map(n=>'<div class="progress-dbms-item running" id="progress-item-'+esc(n)+'"><span class="dbms-label">'+esc(n)+'</span><div class="bar-track"><div class="bar-fill" id="progress-bar-'+esc(n)+'"></div></div><span class="bar-pct" id="progress-pct-'+esc(n)+'"></span></div>').join('')+'</div>';area.appendChild(progressContainer);const abortCtrl=new AbortController();_currentAbortController=abortCtrl;fetch(BASE_URL+'/api/execute/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sql:sql,dbms:dbmsList,sandbox:SANDBOX_MODE}),signal:abortCtrl.signal}).then(response=>{if(!response.ok)throw new Error('HTTP '+response.status);const reader=response.body.getReader();const decoder=new TextDecoder();let buffer='';function processChunk(){return reader.read().then(({done,value})=>{if(done){finalizeExecution();return}buffer+=decoder.decode(value,{stream:true});const parts=buffer.split('\n\n');buffer=parts.pop()||'';for(const part of parts){let event='message',data='';for(const line of part.split('\n')){if(line.startsWith('event: '))event=line.substring(7);else if(line.startsWith('data: '))data=line.substring(6)}if(!data)continue;try{const parsed=JSON.parse(data);if(event==='progress'){completed++;results[parsed.name]=parsed.result;document.getElementById('progress-completed').textContent=completed;const item=document.getElementById('progress-item-'+parsed.name);if(item){item.className='progress-dbms-item '+(parsed.result.error?'error':'done');const bar=document.getElementById('progress-bar-'+parsed.name);if(bar)bar.style.width='100%';const pctLabel=document.getElementById('progress-pct-'+parsed.name);if(pctLabel)pctLabel.textContent=parsed.result.error?'Error':'Done'}}else if(event==='stmt_progress'){const pct=Math.round((parsed.stmt_index/parsed.stmt_total)*100);const item=document.getElementById('progress-item-'+parsed.name);if(item){if(item.classList.contains('running'))item.className='progress-dbms-item active';const bar=document.getElementById('progress-bar-'+parsed.name);if(bar)bar.style.width=pct+'%';const pctLabel=document.getElementById('progress-pct-'+parsed.name);if(pctLabel)pctLabel.textContent=pct+'%'}}else if(event==='done'){finalizeExecution()}else if(event==='cancelled'){showToast('Execution cancelled','error');finalizeExecution()}else if(event==='error'){showToast('Execution error: '+(parsed.error||'Unknown'));finalizeExecution()}}catch(e){}}return processChunk()})}processChunk().catch(e=>{if(e.name==='AbortError')showToast('Execution cancelled','error');else showToast('Stream error: '+e.message);finalizeExecution()})}).catch(e=>{if(e.name==='AbortError')showToast('Execution cancelled','error');else showToast('Request failed: '+e.message);finalizeExecution()});let finalized=false;function finalizeExecution(){if(finalized)return;finalized=true;_currentAbortController=null;btn.disabled=false;btn.innerHTML='&#9654; Execute';stopBtn.style.display='none';stopBtn.disabled=true;stopBtn.innerHTML='&#9632; Stop';const elapsed=Date.now()-startTime;if(Object.keys(results).length>0){renderResults(results,sql);const dbmsTargets=[...ACTIVE_DBMS].join(',');const errorNames=Object.keys(results).filter(n=>results[n].error);const summary={total_dbms:Object.keys(results).length,errors:errorNames.length,elapsed_ms:elapsed};saveHistory(sql,dbmsTargets,BASELINE_DBMS,elapsed,summary)}else{area.innerHTML='<div class="empty-state"><p>Execution was cancelled. No results.</p></div>'}}}
+function stopExecution(){const stopBtn=document.getElementById('btn-stop');stopBtn.disabled=true;stopBtn.innerHTML='&#9632; Stopping...';fetch(BASE_URL+'/api/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})}).catch(()=>{});if(_currentAbortController){_currentAbortController.abort();_currentAbortController=null}}
 
 // ── Render Results ──
 function renderResults(results,originalSql){const area=document.getElementById('results-area');area.innerHTML='';let dbmsNames=[...ACTIVE_DBMS].filter(n=>results[n]);if(dbmsNames.length===0){area.innerHTML='<div class="empty-state"><p>No results returned.</p></div>';return}if(BASELINE_DBMS&&dbmsNames.includes(BASELINE_DBMS))dbmsNames=[BASELINE_DBMS,...dbmsNames.filter(n=>n!==BASELINE_DBMS)];const okNames=dbmsNames.filter(n=>!results[n].error);const refName=(BASELINE_DBMS&&okNames.includes(BASELINE_DBMS))?BASELINE_DBMS:okNames[0];const maxStmts=Math.max(...dbmsNames.map(n=>(results[n].statements||[]).length),0);const stmtDisplayList=refName&&results[refName]&&results[refName].statements?results[refName].statements.map(s=>s.sql||''):[];const nonRefNames=dbmsNames.filter(n=>n!==refName);let matchCount=0,diffCount=0,skipDiffCount=0;for(let si=0;si<maxStmts;si++){const stmtSql=stmtDisplayList[si]||'';if(isSkipDiff(stmtSql)){skipDiffCount++;continue}const stmtResults={};dbmsNames.forEach(n=>{const r=results[n];if(r.error)stmtResults[n]={type:'conn_error',error:r.error};else if(r.statements&&r.statements[si])stmtResults[n]=r.statements[si];else stmtResults[n]={type:'missing'}});const refResult=refName?stmtResults[refName]:null;let stmtHasDiff=false;if(refResult){for(const name of nonRefNames){if(hasDiff(refResult,stmtResults[name])){stmtHasDiff=true;break}}}if(stmtHasDiff)diffCount++;else matchCount++}if(maxStmts>0&&nonRefNames.length>0){const summaryBar=document.createElement('div');summaryBar.className='results-summary';summaryBar.id='results-summary-bar';summaryBar.innerHTML='<button class="summary-btn summary-match" data-filter="match">&#10003; Match: '+matchCount+'</button>'+(diffCount>0?'<button class="summary-btn summary-diff" data-filter="diff">&#10007; Diff: '+diffCount+'</button>':'<span class="summary-btn summary-diff-zero">Diff: 0</span>')+(skipDiffCount>0?'<button class="summary-btn summary-skip" data-filter="skip-diff">&#9888; Skip-Diff: '+skipDiffCount+'</button>':'')+'<button class="summary-btn summary-total" data-filter="">Total: '+maxStmts+'</button>';area.appendChild(summaryBar);summaryBar.querySelectorAll('.summary-btn[data-filter]').forEach(btn=>{btn.addEventListener('click',()=>{const filter=btn.getAttribute('data-filter');summaryBar.querySelectorAll('.summary-btn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');area.querySelectorAll('.stmt-block').forEach(block=>{block.style.display=(!filter||block.getAttribute('data-status')===filter)?'':'none'})})})}for(let si=0;si<maxStmts;si++){const block=document.createElement('div');block.className='stmt-block';const stmtSql=stmtDisplayList[si]||'';const sqlDiv=document.createElement('div');sqlDiv.className='stmt-sql';sqlDiv.innerHTML=(maxStmts>1?'<span class="stmt-label">Statement '+(si+1)+'/'+maxStmts+'</span> ':'')+esc(stmtSql)+'<button class="fav-star'+(favSqlSet.has(stmtSql)?' starred':'')+'" onclick="event.stopPropagation();quickToggleFav(\''+esc(stmtSql).replace(/'/g,"\\'")+'\',this)" title="Toggle favorite">'+(favSqlSet.has(stmtSql)?'&#11088;':'&#9734;')+'</button>';block.appendChild(sqlDiv);const stmtResults={};dbmsNames.forEach(n=>{const r=results[n];if(r.error)stmtResults[n]={type:'conn_error',error:r.error};else if(r.statements&&r.statements[si])stmtResults[n]=r.statements[si];else stmtResults[n]={type:'missing'}});const refResult=refName?stmtResults[refName]:null;const skipDiff=isSkipDiff(stmtSql);let stmtHasDiff=false;if(!skipDiff&&refResult){for(const name of nonRefNames){if(hasDiff(refResult,stmtResults[name])){stmtHasDiff=true;break}}}const grid=document.createElement('div');grid.className='results-grid';dbmsNames.forEach(name=>{const sr=stmtResults[name];const panel=document.createElement('div');panel.className='result-panel';let isDiff=false;if(!skipDiff)isDiff=refResult&&name!==refName&&hasDiff(refResult,sr);if(isDiff)panel.classList.add('has-diff');const header=document.createElement('div');header.className='result-panel-header';let badge='';if(name===refName)badge=' <span class="diff-badge diff-badge-baseline">BASELINE</span>';else if(skipDiff)badge=' <span class="diff-badge diff-badge-skip">SKIP-DIFF</span>';else if(refResult)badge=isDiff?' <span class="diff-badge diff-badge-diff">DIFF</span>':' <span class="diff-badge diff-badge-match">MATCH</span>';header.innerHTML='<span class="result-panel-name">'+esc(name)+badge+'</span><span class="result-panel-meta">'+(sr.elapsed_ms!=null?'<span style="color:var(--fg2);font-weight:600">'+fmtElapsed(sr.elapsed_ms)+'</span>':'')+(sr.columns&&sr.rows?' · '+sr.rows.length+' row(s)':!sr.error&&!sr.type?' · '+(sr.affected_rows||0)+' affected':'')+'</span>';panel.appendChild(header);const body=document.createElement('div');body.className='result-panel-body';if(sr.type==='conn_error')body.innerHTML='<div class="result-error">Connection error: '+esc(sr.error)+'</div>';else if(sr.type==='missing')body.innerHTML='<div class="result-empty">No result</div>';else if(sr.error){const errorClass=(!skipDiff&&isDiff)?'result-error':'result-error-match';body.innerHTML='<div class="'+errorClass+'">'+esc(sr.error)+'</div>'}else if(sr.explain_formats&&sr.explain_formats.length>0)body.appendChild(buildExplainTabs(sr));else if(sr.columns&&sr.rows)body.appendChild(buildTable(sr,(!skipDiff&&name!==refName&&refResult)?refResult:null));else body.innerHTML='<div class="result-ok">OK — '+(sr.affected_rows||0)+' row(s) affected</div>';panel.appendChild(body);grid.appendChild(panel)});block.appendChild(grid);area.appendChild(block);if(skipDiff)block.setAttribute('data-status','skip-diff');else if(stmtHasDiff)block.setAttribute('data-status','diff');else block.setAttribute('data-status','match')}}
 
 // ── Quick fav toggle ──
-async function quickToggleFav(escapedSql,btn){const sql=escapedSql.replace(/\\'/g,"'");try{const r=await apiCall('POST','/api/favorites/toggle',{sql_text:sql,title:'',dbms_targets:'',baseline:''});if(r.ok){showToast(r.action==='added'?'Added to favorites':'Removed from favorites','success');await loadFavorites();if(r.action==='added')favSqlSet.add(sql);else favSqlSet.delete(sql);btn.classList.toggle('starred',r.action==='added');btn.innerHTML=r.action==='added'?'&#11088;':'&#9734;'}}catch(e){showToast('Failed')}}
+async function quickToggleFav(escapedSql,btn){const sql=escapedSql.replace(/\\'/g,"'");try{const r=await apiCall('POST','/api/favorites/toggle',{user_name:(currentUser||{}).eng_name||'',sql_text:sql,title:'',dbms_targets:'',baseline:''});if(r.ok){showToast(r.action==='added'?'Added to favorites':'Removed from favorites','success');await loadFavorites();if(r.action==='added')favSqlSet.add(sql);else favSqlSet.delete(sql);btn.classList.toggle('starred',r.action==='added');btn.innerHTML=r.action==='added'?'&#11088;':'&#9734;'}}catch(e){showToast('Failed')}}
 
 // ── Diff helpers ──
 const SKIP_DIFF_PATTERNS=[/^\s*ANALYZE\s+/i,/^\s*EXPLAIN\s+/i,/^\s*SET\s+/i,/^\s*SHOW\s+/i,/^\s*FLUSH\s+/i,/^\s*RESET\s+/i,/^\s*OPTIMIZE\s+/i,/^\s*CHECKSUM\s+/i,/^\s*CHECK\s+/i,/^\s*REPAIR\s+/i,/^\s*GRANT\s+/i,/^\s*REVOKE\s+/i,/^\s*LOCK\s+/i,/^\s*UNLOCK\s+/i];
@@ -685,8 +880,34 @@ function clearResults(){document.getElementById('sql-input').value='';document.g
 // ── Keyboard shortcuts ──
 document.getElementById('sql-input').addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){e.preventDefault();executeSql()}});
 
+// ── Version & Health ──
+function initVersion(){const tag=document.getElementById('version-tag');if(tag&&typeof EMBEDDED_VERSION!=='undefined')tag.textContent='v'+EMBEDDED_VERSION}
+async function checkSystemHealth(){const el=document.getElementById('sys-status');if(!el)return;el.className='sys-status checking';el.innerHTML='<span class="status-dot"></span> 检测中';try{const r=await apiCall('GET','/api/health');if(r.ok&&r.status==='healthy'){el.className='sys-status healthy';el.title='系统运行正常 — '+r.connected+'/'+r.total+' 数据库可达';el.innerHTML='<span class="status-dot"></span> 运行正常'}else{el.className='sys-status unhealthy';el.title=r.reason||'部分数据库不可达';el.innerHTML='<span class="status-dot"></span> 部分异常'}}catch(e){el.className='sys-status unhealthy';el.title='健康检查失败: '+e.message;el.innerHTML='<span class="status-dot"></span> 无法连接'}}
+
 // ── Init ──
-loadUserInfo();loadDbms();loadFavorites();loadHistory();
+initVersion();
+(async function initPage(){
+  await loadUserInfo();
+  loadDbms();
+  loadFavorites();
+  loadHistory();
+  loadConfigsData();
+  checkSystemHealth();
+})();
 </script>
+
+<button class="back-to-top" id="back-to-top" title="Back to top" onclick="scrollToTop()">
+  <svg viewBox="0 0 24 24"><polyline points="18 15 12 9 6 15"/></svg>
+</button>
+
+<script>
+// ── Back to Top ──
+(function(){const btn=document.getElementById('back-to-top');const area=document.querySelector('.main-content');function toggle(){if(!area)return;btn.classList.toggle('visible',area.scrollTop>300)}if(area)area.addEventListener('scroll',toggle,{passive:true})})();
+function scrollToTop(){const area=document.querySelector('.main-content');if(area)area.scrollTo({top:0,behavior:'smooth'})}
+
+// ── SQL Editor Auto-resize ──
+(function(){const ta=document.getElementById('sql-input');if(!ta)return;function resize(){ta.style.height='auto';ta.style.height=Math.min(ta.scrollHeight,460)+'px'}ta.addEventListener('input',resize);ta.addEventListener('paste',()=>setTimeout(resize,0));resize()})();
+</script>
+
 </body>
 </html>

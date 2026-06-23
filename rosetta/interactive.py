@@ -253,13 +253,17 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
         return json.loads(body)
 
     def _respond_json(self, data: dict, status: int = 200):
-        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self._send_cors_headers()
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
+        try:
+            payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self._send_cors_headers()
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
     # -- Runs delete API ----------------------------------------------------
 
@@ -416,10 +420,11 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
                 temp_db = None
 
             target_db = temp_db if use_sandbox else database
-            db = DBConnection(config, target_db)
-            with self._active_connections_lock:
-                self._active_connections.append(db)
+            db = None
             try:
+                db = DBConnection(config, target_db)
+                with self._active_connections_lock:
+                    self._active_connections.append(db)
                 db.connect()
             except Exception as e:
                 with self._active_connections_lock:
@@ -563,19 +568,26 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
 
         results = {}
         try:
-            with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=len(targets)) as pool:
-                futures = {pool.submit(_exec_on_dbms, c): c for c in targets}
-                for fut in concurrent.futures.as_completed(futures):
-                    r = fut.result()
-                    results[r["name"]] = r
-        finally:
-            watchdog_stop.set()
-            self._cleanup_connections()
+            try:
+                with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=len(targets)) as pool:
+                    futures = {pool.submit(_exec_on_dbms, c): c for c in targets}
+                    for fut in concurrent.futures.as_completed(futures):
+                        r = fut.result()
+                        results[r["name"]] = r
+            finally:
+                watchdog_stop.set()
+                self._cleanup_connections()
 
-        cancelled = any(r.get("cancelled") for r in results.values())
-        self._respond_json({"ok": True, "results": results,
-                            "cancelled": cancelled})
+            cancelled = any(r.get("cancelled") for r in results.values())
+            self._respond_json({"ok": True, "results": results,
+                                "cancelled": cancelled})
+        except Exception as e:
+            log.error("Execute API internal error: %s", e, exc_info=True)
+            try:
+                self._respond_json({"ok": False, "error": f"Internal server error: {e}"}, 500)
+            except Exception:
+                pass
 
     def _handle_execute_stream_api(self):
         """POST /api/execute/stream — execute SQL on selected DBMS targets
@@ -730,12 +742,13 @@ class _APIHandler(http.server.SimpleHTTPRequestHandler):
                 temp_db = None
 
             target_db = temp_db if use_sandbox else database
-            db = DBConnection(config, target_db)
-            # Register connection BEFORE connect so /api/stop can kill it
-            # even if connect() itself is blocking
-            with self._active_connections_lock:
-                self._active_connections.append(db)
+            db = None
             try:
+                db = DBConnection(config, target_db)
+                # Register connection BEFORE connect so /api/stop can kill it
+                # even if connect() itself is blocking
+                with self._active_connections_lock:
+                    self._active_connections.append(db)
                 db.connect()
             except Exception as e:
                 with self._active_connections_lock:

@@ -1,6 +1,14 @@
 __pycache__/
 *.pyc
 *.egg-info/
+.venv/
+playground.db
+playground.db-shm
+playground.db-wal
+playground.log
+playground.pid
+playground-wrapper.sh
+with_config.json.bak
 dist/
 dist-skill/
 build/

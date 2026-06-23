@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-LABEL description="Rosetta SQL Playground for With Platform"
+LABEL description="Rosetta SQL Playground (本地部署模式)"
 LABEL version="1.0"
 
 WORKDIR /app
@@ -23,14 +23,10 @@ RUN mkdir -p /app/results
 # Expose default port
 EXPOSE 19527
 
-# Environment variables for MySQL (history/favorites storage)
-ENV MYSQL_HOST=11.142.154.110
-ENV MYSQL_PORT=3306
-ENV MYSQL_USER=with_ugmatclusdrxhadd
-ENV MYSQL_PASSWORD=Xe#RGXP8$a0XQQ
-ENV MYSQL_DATABASE=rf5otpny
+# SQLite 数据库路径（用于存储 history/favorites/custom DBMS）
+ENV SQLITE_PATH=/app/playground.db
 
-# Default config path (With platform 专用配置)
+# Default config path
 ENV ROSETTA_CONFIG=/app/with_config.json
 
 # Run playground server
